@@ -1,0 +1,30 @@
+{
+  "title": "Architecture Decisions",
+  "questions": [
+    {
+      "id": "q1",
+      "type": "validation",
+      "statement": "We'll use WebSockets for real-time updates between the daemon and TUI",
+      "rationale": "Lower latency than polling, and the existing infra already supports WS connections"
+    },
+    {
+      "id": "q2",
+      "type": "choice",
+      "question": "Which state management approach for the TUI?",
+      "rationale": "Need to decide before implementing the render loop",
+      "options": ["Single mutable state object", "Immutable state with reducer", "Event-driven with emitter"]
+    },
+    {
+      "id": "q3",
+      "type": "freetext",
+      "question": "Any constraints on the deployment target we should know about?",
+      "rationale": "Affects containerization and CI choices"
+    },
+    {
+      "id": "q4",
+      "type": "validation",
+      "statement": "Visual context generation will use Haiku with full conversation context via prompt caching",
+      "rationale": "First call pays the input cost, subsequent calls hit the cache making them nearly free"
+    }
+  ]
+}
