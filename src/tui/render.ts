@@ -18,16 +18,36 @@ const GRAY = `${ESC}90m`;
 const BG_BLUE = `${ESC}44m`;
 const WHITE = `${ESC}37m`;
 
+// Strip ANSI escape sequences and other C0/C1 control bytes from user-supplied
+// text so it can't poison the alt-screen buffer (cursor moves, color bleed,
+// embedded \x1b[2J that clears the screen, etc). Keeps \n and \t which the
+// wrappers handle explicitly.
+const CONTROL_CHARS_RE = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[@-_]|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F]/g;
+export function sanitize(text: string): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(CONTROL_CHARS_RE, '');
+}
+
+// For one-line displays (overview rows, summaries): collapse all whitespace
+// — including newlines and tabs — to single spaces so the row stays one line.
+function singleLine(text: string): string {
+  return sanitize(text).replace(/\s+/g, ' ').trim();
+}
+
 function truncate(text: string, maxWidth: number): string {
+  if (maxWidth < 1) return '';
   if (stringWidth(text) <= maxWidth) return text;
+  // Iterate by codepoint, not UTF-16 code unit, so surrogate pairs don't split.
+  const chars = [...text];
   let w = 0;
-  let i = 0;
-  for (; i < text.length; i++) {
-    const cw = stringWidth(text[i]!);
+  let out = '';
+  for (const ch of chars) {
+    const cw = stringWidth(ch);
     if (w + cw + 1 > maxWidth) break;
+    out += ch;
     w += cw;
   }
-  return text.slice(0, i) + '…';
+  return out + '…';
 }
 
 function padRight(text: string, width: number): string {
@@ -37,24 +57,62 @@ function padRight(text: string, width: number): string {
 }
 
 function hline(width: number, char = '─'): string {
+  if (width < 1) return '';
   return char.repeat(width);
 }
 
+// Word-wrap that ALSO respects \n as a hard break and ALSO breaks oversized
+// words at maxWidth so a single 200-char token doesn't overflow the frame.
 function wrap(text: string, maxWidth: number): string[] {
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (stringWidth(candidate) <= maxWidth) {
-      current = candidate;
-    } else {
-      if (current) lines.push(current);
-      current = word;
+  if (maxWidth < 1) return [text];
+  const out: string[] = [];
+  const paragraphs = text.split('\n');
+  for (let p = 0; p < paragraphs.length; p++) {
+    const para = paragraphs[p]!;
+    if (para === '') {
+      out.push('');
+      continue;
     }
+    const words = para.split(/[ \t]+/).filter(Boolean);
+    let current = '';
+    for (let word of words) {
+      // Hard-break a word that's wider than the line.
+      while (stringWidth(word) > maxWidth) {
+        if (current) {
+          out.push(current);
+          current = '';
+        }
+        const piece = sliceByWidth(word, maxWidth);
+        out.push(piece);
+        word = word.slice(piece.length);
+      }
+      const candidate = current ? `${current} ${word}` : word;
+      if (stringWidth(candidate) <= maxWidth) {
+        current = candidate;
+      } else {
+        if (current) out.push(current);
+        current = word;
+      }
+    }
+    if (current) out.push(current);
   }
-  if (current) lines.push(current);
-  return lines.length > 0 ? lines : [''];
+  return out.length > 0 ? out : [''];
+}
+
+// Take the longest prefix of `s` whose visible width is <= maxWidth.
+function sliceByWidth(s: string, maxWidth: number): string {
+  let w = 0;
+  let out = '';
+  for (const ch of s) {
+    const cw = stringWidth(ch);
+    if (w + cw > maxWidth) break;
+    out += ch;
+    w += cw;
+  }
+  // Always advance at least one character so we don't loop forever on
+  // a single zero-width or oversized glyph.
+  if (out === '' && s.length > 0) out = [...s][0]!;
+  return out;
 }
 
 function hardWrap(text: string, maxWidth: number): string[] {
@@ -68,7 +126,8 @@ function hardWrap(text: string, maxWidth: number): string[] {
     }
     let current = '';
     let currentW = 0;
-    for (const ch of seg) {
+    // Iterate by codepoint so emoji surrogate pairs stay intact.
+    for (const ch of [...seg]) {
       const cw = stringWidth(ch);
       if (currentW + cw > maxWidth) {
         out.push(current);
@@ -116,28 +175,63 @@ export function renderOverview(state: TuiState): string[] {
   lines.push(`  ${DIM}${hline(Math.min(cols - 4, 60))}${RESET}`);
   lines.push('');
 
+  // Build all question rows with mapping back to question index so we can
+  // scroll while keeping `currentIndex` visible.
+  type Row = { line: string; questionIndex: number };
+  const rowsBuf: Row[] = [];
   for (let i = 0; i < state.questions.length; i++) {
     const q = state.questions[i]!;
     const answer = state.answers.get(q.id);
     const icon = answer ? `${GREEN}✓${RESET}` : `${DIM}○${RESET}`;
-    const label = q.type === 'validation' ? q.statement : q.question;
+    const label = singleLine(q.type === 'validation' ? q.statement : q.question);
     const typeTag = `${DIM}[${q.type}]${RESET}`;
     const cursor = i === state.currentIndex ? `${CYAN}▸${RESET} ` : '  ';
-
-    lines.push(`  ${cursor}${icon} ${truncate(label, cols - 20)} ${typeTag}`);
-
+    const labelMax = Math.max(10, cols - 20);
+    rowsBuf.push({
+      line: `  ${cursor}${icon} ${truncate(label, labelMax)} ${typeTag}`,
+      questionIndex: i,
+    });
     if (answer) {
-      const summary = answerSummary(answer);
-      lines.push(`      ${DIM}${truncate(summary, cols - 10)}${RESET}`);
+      const summary = singleLine(answerSummary(answer));
+      const summaryMax = Math.max(10, cols - 10);
+      rowsBuf.push({
+        line: `      ${DIM}${truncate(summary, summaryMax)}${RESET}`,
+        questionIndex: i,
+      });
     }
   }
 
-  lines.push('');
+  // Reserve space for header (4 already pushed) + footer (3) + scroll hints (2).
+  const reserved = 4 + 3 + 2;
+  const available = Math.max(1, rows - reserved);
+  let scroll = state.scrollOffset || 0;
+  // Find first row matching currentIndex; ensure it's in [scroll, scroll+available).
+  const focusRow = rowsBuf.findIndex((r) => r.questionIndex === state.currentIndex);
+  if (focusRow >= 0) {
+    if (focusRow < scroll) scroll = focusRow;
+    if (focusRow >= scroll + available) scroll = focusRow - available + 1;
+  }
+  scroll = Math.max(0, Math.min(scroll, Math.max(0, rowsBuf.length - available)));
+  state.scrollOffset = scroll;
+
+  if (scroll > 0) {
+    lines.push(`  ${DIM}↑ ${scroll} more above${RESET}`);
+  } else {
+    lines.push('');
+  }
+  const end = Math.min(rowsBuf.length, scroll + available);
+  for (let i = scroll; i < end; i++) lines.push(rowsBuf[i]!.line);
+  if (end < rowsBuf.length) {
+    lines.push(`  ${DIM}↓ ${rowsBuf.length - end} more below${RESET}`);
+  } else {
+    lines.push('');
+  }
+
   lines.push(`  ${DIM}${hline(Math.min(cols - 4, 60))}${RESET}`);
   lines.push(`  ${DIM}enter${RESET} review  ${DIM}j/k${RESET} navigate  ${DIM}q${RESET} finish`);
 
   while (lines.length < rows) lines.push('');
-  return lines;
+  return lines.slice(0, rows);
 }
 
 export function renderItemReview(state: TuiState): string[] {
@@ -156,11 +250,11 @@ export function renderItemReview(state: TuiState): string[] {
   lines.push('');
 
   // Question / Statement
-  const headline = q.type === 'validation' ? q.statement : q.question;
+  const headline = sanitize(q.type === 'validation' ? q.statement : q.question);
   for (const line of wrap(headline, maxW)) {
     lines.push(`  ${BOLD}${line}${RESET}`);
   }
-  for (const line of wrap(q.rationale, maxW)) {
+  for (const line of wrap(sanitize(q.rationale), maxW)) {
     lines.push(`  ${ITALIC}${GRAY}${line}${RESET}`);
   }
   lines.push('');
@@ -211,6 +305,12 @@ export function renderItemReview(state: TuiState): string[] {
   ];
   lines.push(`  ${footerParts.join('  ')}`);
 
+  // If the headline + visual + actions overflowed the viewport, the footer
+  // would otherwise scroll off the bottom. Clip to `rows` so flush() never
+  // writes more rows than the terminal has.
+  if (lines.length > rows) {
+    return [...lines.slice(0, rows - 1), lines[lines.length - 1]!];
+  }
   return lines;
 }
 
@@ -233,12 +333,15 @@ function renderActions(q: Question, selectedAction: number, existing?: Answer): 
   } else if (q.type === 'choice') {
     for (let i = 0; i < q.options.length; i++) {
       const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-      const keyBadge = `${DIM}[${i + 1}]${RESET}`;
-      lines.push(`  ${cursor} ${keyBadge} ${q.options[i]}`);
+      // Numeric shortcut only for 1..9 — past that, the digit '1' would fire
+      // before the user can type the second digit, so we use a blank pad.
+      const keyBadge = i < 9 ? `${DIM}[${i + 1}]${RESET}` : `${DIM}   ${RESET}`;
+      lines.push(`  ${cursor} ${keyBadge} ${sanitize(q.options[i]!)}`);
     }
     const otherIdx = q.options.length;
     const cursor = otherIdx === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-    lines.push(`  ${cursor} ${DIM}[${otherIdx + 1}]${RESET} ${ITALIC}Other (custom)${RESET}`);
+    const otherBadge = otherIdx < 9 ? `${DIM}[${otherIdx + 1}]${RESET}` : `${DIM}   ${RESET}`;
+    lines.push(`  ${cursor} ${otherBadge} ${ITALIC}Other (custom)${RESET}`);
   } else {
     lines.push(`  ${DIM}[r]${RESET} Enter response`);
   }
@@ -253,49 +356,63 @@ function renderActions(q: Question, selectedAction: number, existing?: Answer): 
 
 export function renderFinal(state: TuiState): string[] {
   const { cols, rows } = getTerminalSize();
-  const lines: string[] = [];
+  const header: string[] = [];
+  const footer: string[] = [];
   const maxW = Math.min(cols - 4, 60);
   const total = state.questions.length;
   const answered = state.answers.size;
 
-  lines.push('');
-  lines.push(`  ${BOLD}${CYAN} Summary ${RESET}`);
-  lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-  lines.push('');
-  lines.push(`  ${answered}/${total} questions answered`);
-  lines.push('');
+  header.push('');
+  header.push(`  ${BOLD}${CYAN} Summary ${RESET}`);
+  header.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  header.push('');
+  header.push(`  ${answered}/${total} questions answered`);
+  header.push('');
 
+  footer.push('');
+  footer.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  if (answered < total) {
+    footer.push(`  ${YELLOW}${total - answered} unanswered — press p to go back${RESET}`);
+  }
+  footer.push(`  ${DIM}enter${RESET} submit  ${DIM}p${RESET} go back`);
+
+  // Build per-question rows so we can clip to fit the viewport while
+  // keeping the header + footer always visible (the keybind hint at the
+  // bottom is essential — without it the user can't submit).
+  const questionRows: string[] = [];
   for (const q of state.questions) {
     const answer = state.answers.get(q.id);
     const icon = answer ? `${GREEN}✓${RESET}` : `${YELLOW}○${RESET}`;
-    const label = q.type === 'validation' ? q.statement : q.question;
-    lines.push(`  ${icon} ${truncate(label, maxW - 4)}`);
+    const label = singleLine(q.type === 'validation' ? q.statement : q.question);
+    questionRows.push(`  ${icon} ${truncate(label, Math.max(10, maxW - 4))}`);
     if (answer) {
-      lines.push(`    ${DIM}${truncate(answerSummary(answer), maxW - 6)}${RESET}`);
+      questionRows.push(`    ${DIM}${truncate(singleLine(answerSummary(answer)), Math.max(10, maxW - 6))}${RESET}`);
     }
   }
 
-  lines.push('');
-  lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-
-  if (answered < total) {
-    lines.push(`  ${YELLOW}${total - answered} unanswered — press p to go back${RESET}`);
+  const available = Math.max(1, rows - header.length - footer.length - 1);
+  let visible = questionRows;
+  if (questionRows.length > available) {
+    visible = [
+      ...questionRows.slice(0, available - 1),
+      `  ${DIM}… ${questionRows.length - (available - 1)} more rows omitted${RESET}`,
+    ];
   }
-  lines.push(`  ${DIM}enter${RESET} submit  ${DIM}p${RESET} go back`);
 
+  const lines = [...header, ...visible, ...footer];
   while (lines.length < rows) lines.push('');
-  return lines;
+  return lines.slice(0, rows);
 }
 
 function answerSummary(a: Answer): string {
   switch (a.type) {
     case 'validation':
       return a.approved
-        ? (a.comment ? `approved: "${a.comment}"` : 'approved')
-        : (a.comment ? `commented: "${a.comment}"` : 'commented');
+        ? (a.comment ? `approved: "${sanitize(a.comment)}"` : 'approved')
+        : (a.comment ? `commented: "${sanitize(a.comment)}"` : 'commented');
     case 'choice':
-      return a.isCustom ? `custom: "${a.selected}"` : a.selected;
+      return a.isCustom ? `custom: "${sanitize(a.selected)}"` : sanitize(a.selected);
     case 'freetext':
-      return a.response;
+      return sanitize(a.response);
   }
 }

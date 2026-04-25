@@ -148,6 +148,8 @@ program
         process.stderr.write('\nFix: hl needs an interactive terminal. If the caller captures stdin,\nrun inside tmux so hl can auto-dispatch the TUI to a new pane, or pipe\nstdin from /dev/tty.\n');
       } else if (msg.includes('JSON')) {
         process.stderr.write('\nFix: the decisions file must be valid JSON matching `hl schema`.\n');
+      } else if (msg.startsWith('questions[') || msg.includes('Duplicate question id') || msg.includes('must be')) {
+        process.stderr.write('\nFix: the decisions file must match `hl schema`. Run `hl schema` to see the required shape.\n');
       }
       process.exit(1);
     }

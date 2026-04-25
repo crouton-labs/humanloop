@@ -1,10 +1,70 @@
 import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import type { DecisionsInput, DecisionsOutput, TuiState, Answer } from '../types.js';
+import type { DecisionsInput, DecisionsOutput, TuiState, Answer, Question } from '../types.js';
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
 import { flush, renderOverview, renderItemReview, renderFinal } from './render.js';
 import { handleKeypress } from './input.js';
 import { readConversation } from '../conversation/reader.js';
 import { generateVisuals } from '../visuals/generate.js';
+
+// Validate the parsed JSON before opening the terminal so bad agent input
+// fails with a clear error instead of crashing inside the TUI.
+export function validateInput(parsed: unknown): DecisionsInput {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Decisions file must be a JSON object with a `questions` array');
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (!Array.isArray(obj.questions)) {
+    throw new Error('`questions` must be an array');
+  }
+  if (obj.questions.length === 0) {
+    throw new Error('No questions in decisions file');
+  }
+  if (obj.title !== undefined && typeof obj.title !== 'string') {
+    throw new Error('`title` must be a string when present');
+  }
+
+  const seen = new Set<string>();
+  const validated: Question[] = [];
+  for (let i = 0; i < obj.questions.length; i++) {
+    const q = obj.questions[i] as Record<string, unknown> | null;
+    const where = `questions[${i}]`;
+    if (typeof q !== 'object' || q === null || Array.isArray(q)) {
+      throw new Error(`${where} must be an object`);
+    }
+    if (typeof q.id !== 'string' || q.id === '') {
+      throw new Error(`${where}.id must be a non-empty string`);
+    }
+    if (seen.has(q.id)) {
+      throw new Error(`Duplicate question id: ${JSON.stringify(q.id)}`);
+    }
+    seen.add(q.id);
+
+    if (q.type === 'validation') {
+      if (typeof q.statement !== 'string') throw new Error(`${where}.statement must be a string`);
+      if (typeof q.rationale !== 'string') throw new Error(`${where}.rationale must be a string`);
+      validated.push({ id: q.id, type: 'validation', statement: q.statement, rationale: q.rationale });
+    } else if (q.type === 'choice') {
+      if (typeof q.question !== 'string') throw new Error(`${where}.question must be a string`);
+      if (typeof q.rationale !== 'string') throw new Error(`${where}.rationale must be a string`);
+      if (!Array.isArray(q.options)) throw new Error(`${where}.options must be an array`);
+      if (q.options.length < 2) throw new Error(`${where}.options must have at least 2 items (got ${q.options.length})`);
+      const opts: string[] = [];
+      for (let j = 0; j < q.options.length; j++) {
+        if (typeof q.options[j] !== 'string') throw new Error(`${where}.options[${j}] must be a string`);
+        opts.push(q.options[j] as string);
+      }
+      validated.push({ id: q.id, type: 'choice', question: q.question, rationale: q.rationale, options: opts });
+    } else if (q.type === 'freetext') {
+      if (typeof q.question !== 'string') throw new Error(`${where}.question must be a string`);
+      if (typeof q.rationale !== 'string') throw new Error(`${where}.rationale must be a string`);
+      validated.push({ id: q.id, type: 'freetext', question: q.question, rationale: q.rationale });
+    } else {
+      throw new Error(`${where}.type must be "validation" | "choice" | "freetext" (got ${JSON.stringify(q.type)})`);
+    }
+  }
+
+  return { title: obj.title as string | undefined, questions: validated };
+}
 
 export async function launchTui(
   decisionsPath: string,
@@ -15,11 +75,8 @@ export async function launchTui(
   }
 
   const raw = readFileSync(decisionsPath, 'utf8');
-  const input: DecisionsInput = JSON.parse(raw);
-
-  if (!input.questions || input.questions.length === 0) {
-    throw new Error('No questions in decisions file');
-  }
+  const parsed: unknown = JSON.parse(raw);
+  const input = validateInput(parsed);
 
   const state: TuiState = {
     phase: 'overview',

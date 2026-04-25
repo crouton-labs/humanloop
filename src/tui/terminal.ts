@@ -39,6 +39,11 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
     return { input: ch, key };
   }
 
+  // Multi-byte chunks (paste, multi-byte UTF-8, unknown escape sequences)
+  // are returned as-is in `input`; the input-mode handler is responsible for
+  // sanitising them before appending to its buffer. Top-level handlers
+  // ignore strings of length > 1, which is the desired behaviour for
+  // accidentally pasted text in overview/item-review.
   return { input: str, key };
 }
 

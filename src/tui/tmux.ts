@@ -44,13 +44,34 @@ export async function dispatchToTmuxPane(
   const resultPath = join(dir, 'result.json');
 
   const cmd = buildChildCmd(file, resultPath, opts);
-  execFileSync('tmux', ['split-window', '-h', '-d', cmd], { stdio: 'ignore' });
+  // Capture the spawned pane id so we can detect if the user closes it
+  // without finishing — otherwise the parent would poll forever.
+  const paneId = execFileSync(
+    'tmux',
+    ['split-window', '-P', '-F', '#{pane_id}', '-h', '-d', cmd],
+    { encoding: 'utf8' },
+  ).trim();
 
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     const poll = setInterval(() => {
       if (existsSync(resultPath)) {
         clearInterval(poll);
         resolve();
+        return;
+      }
+      // Check the pane is still alive. If it's gone and there's still no
+      // result file, the child died (closed pane, crash, etc).
+      try {
+        const panes = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_id}'], {
+          encoding: 'utf8',
+        });
+        if (!panes.split('\n').map((s) => s.trim()).includes(paneId)) {
+          clearInterval(poll);
+          reject(new Error(`tmux pane ${paneId} closed before writing a result`));
+        }
+      } catch (err) {
+        clearInterval(poll);
+        reject(new Error(`tmux list-panes failed: ${err instanceof Error ? err.message : String(err)}`));
       }
     }, 150);
   });

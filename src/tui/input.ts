@@ -238,13 +238,24 @@ function handleInputMode(
   }
 
   if (key.backspace) {
-    mode.buffer = mode.buffer.slice(0, -1);
+    // Drop the last *codepoint*, not the last UTF-16 code unit, so backspace
+    // on an emoji removes the whole glyph instead of leaving a lone surrogate.
+    const chars = [...mode.buffer];
+    chars.pop();
+    mode.buffer = chars.join('');
     render();
     return;
   }
 
-  if (input.length === 1 && input.charCodeAt(0) >= 32) {
-    mode.buffer += input;
+  // Accept any printable input — including pasted multi-char chunks and
+  // multi-byte UTF-8 (emoji / CJK). Strip control bytes (ESC sequences,
+  // bracketed-paste markers, BEL, BS, CR) so they can't corrupt the TUI.
+  const cleaned = input
+    .replace(/\x1b\[20[01]~/g, '') // bracketed-paste start/end markers
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '') // CSI sequences
+    .replace(/[\x00-\x1F\x7F]/g, ''); // C0 controls and DEL
+  if (cleaned.length > 0) {
+    mode.buffer += cleaned;
     render();
   }
 }
