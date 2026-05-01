@@ -1,8 +1,33 @@
-import type { TuiState, Answer, Question } from '../types.js';
+import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import type { Key } from './terminal.js';
 
 export type RenderFn = () => void;
 export type ExitFn = () => void;
+
+const RESERVED = new Set(['c', 'r', 'n', 'p', 'q', 'j', 'k', 'u', 'd', ' ']);
+
+export function assignShortcuts(interactions: Interaction[]): void {
+  for (const it of interactions) {
+    const used = new Set<string>(
+      it.options.map((o) => o.shortcut).filter((s): s is string => s !== undefined),
+    );
+    for (const opt of it.options) {
+      if (opt.shortcut !== undefined) continue;
+      const letters = [...opt.label.toLowerCase()].filter((c) => /[a-z]/.test(c));
+      let chosen: string | undefined;
+      for (const letter of letters) {
+        if (!used.has(letter) && !RESERVED.has(letter)) { chosen = letter; break; }
+      }
+      if (chosen === undefined) {
+        for (let d = 1; d <= 9; d++) {
+          const s = String(d);
+          if (!used.has(s)) { chosen = s; break; }
+        }
+      }
+      if (chosen !== undefined) { opt.shortcut = chosen; used.add(chosen); }
+    }
+  }
+}
 
 export function handleKeypress(
   input: string,
@@ -37,7 +62,7 @@ export function handleKeypress(
 }
 
 function checkAutoExit(state: TuiState, exit: ExitFn): void {
-  if (state.phase === 'final' && state.answers.size >= state.questions.length) {
+  if (state.phase === 'final' && state.responses.size >= state.interactions.length) {
     exit();
   }
 }
@@ -52,7 +77,7 @@ function handleOverview(
   exit: ExitFn,
 ): void {
   if (input === 'j' || key.downArrow) {
-    state.currentIndex = Math.min(state.currentIndex + 1, state.questions.length - 1);
+    state.currentIndex = Math.min(state.currentIndex + 1, state.interactions.length - 1);
     render();
   } else if (input === 'k' || key.upArrow) {
     state.currentIndex = Math.max(state.currentIndex - 1, 0);
@@ -63,7 +88,7 @@ function handleOverview(
     state.detailExpanded = false;
     render();
   } else if (input === 'q') {
-    if (state.answers.size >= state.questions.length) {
+    if (state.responses.size >= state.interactions.length) {
       exit();
     } else {
       state.phase = 'final';
@@ -80,33 +105,30 @@ function handleItemReview(
   state: TuiState,
   render: RenderFn,
 ): void {
-  const q = state.questions[state.currentIndex]!;
+  const interaction = state.interactions[state.currentIndex]!;
 
-  // Navigation
-  if (input === 'n') {
-    advanceItem(state, 1);
+  if (input === 'n') { advanceItem(state, 1); render(); return; }
+  if (input === 'p') { advanceItem(state, -1); render(); return; }
+  if (input === 'q') { state.phase = 'overview'; render(); return; }
+  if (input === ' ') { state.detailExpanded = !state.detailExpanded; render(); return; }
+
+  // Body scroll: u/d or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
+  // Plain u/d exists because tmux configs commonly bind C-d/C-u for pane scroll
+  // and intercept them before they reach the app. Render clamps state.scrollOffset,
+  // so over-scroll past the bottom is harmless.
+  if (input === 'd' || (key.ctrl && (input === 'd' || input === 'e'))) {
+    state.scrollOffset = (state.scrollOffset ?? 0) + (input === 'e' ? 1 : 10);
     render();
     return;
   }
-  if (input === 'p') {
-    advanceItem(state, -1);
-    render();
-    return;
-  }
-  if (input === 'q') {
-    state.phase = 'overview';
-    render();
-    return;
-  }
-  if (input === ' ') {
-    state.detailExpanded = !state.detailExpanded;
+  if (input === 'u' || (key.ctrl && (input === 'u' || input === 'y'))) {
+    state.scrollOffset = Math.max(0, (state.scrollOffset ?? 0) - (input === 'y' ? 1 : 10));
     render();
     return;
   }
 
-  // Action selection with j/k
   if (input === 'j' || key.downArrow) {
-    const max = actionCount(q) - 1;
+    const max = actionCount(interaction) - 1;
     state.selectedAction = Math.min(state.selectedAction + 1, max);
     render();
     return;
@@ -117,99 +139,66 @@ function handleItemReview(
     return;
   }
 
-  // Type-specific actions
-  if (q.type === 'validation') {
-    handleValidationAction(input, key, state, q, render);
-  } else if (q.type === 'choice') {
-    handleChoiceAction(input, key, state, q, render);
-  } else {
-    handleFreetextAction(input, key, state, render);
-  }
+  handleInteractionAction(input, key, state, interaction, render);
 }
 
-function handleValidationAction(
+function handleInteractionAction(
   input: string,
   key: Key,
   state: TuiState,
-  q: Question,
+  interaction: Interaction,
   render: RenderFn,
 ): void {
-  if (input === '1' || (key.return && state.selectedAction === 0)) {
-    state.answers.set(q.id, { id: q.id, type: 'validation', approved: true });
-    state.persist?.();
-    advanceItem(state, 1);
-    render();
-  } else if (input === '2' || (key.return && state.selectedAction === 1)) {
-    state.inputMode = { kind: 'comment', buffer: '' };
-    state.answers.set(q.id, { id: q.id, type: 'validation', approved: true, comment: '' });
-    state.persist?.();
-    render();
-  } else if (input === '3' || (key.return && state.selectedAction === 2)) {
-    state.answers.set(q.id, { id: q.id, type: 'validation', approved: false });
-    state.persist?.();
-    advanceItem(state, 1);
-    render();
-  } else if (input === '4' || (key.return && state.selectedAction === 3)) {
-    state.inputMode = { kind: 'comment', buffer: '' };
-    state.answers.set(q.id, { id: q.id, type: 'validation', approved: false, comment: '' });
-    state.persist?.();
-    render();
-  }
-}
+  const opts = interaction.options;
 
-function handleChoiceAction(
-  input: string,
-  key: Key,
-  state: TuiState,
-  q: Question & { type: 'choice' },
-  render: RenderFn,
-): void {
-  const numOptions = q.options.length;
-
-  const digit = parseInt(input, 10);
-  if (digit >= 1 && digit <= numOptions) {
-    state.answers.set(q.id, {
-      id: q.id,
-      type: 'choice',
-      selected: q.options[digit - 1]!,
-      isCustom: false,
-    });
-    state.persist?.();
+  // Match by shortcut
+  const matched = opts.find((o) => o.shortcut === input);
+  if (matched !== undefined) {
+    submitOption(state, interaction, matched.id, undefined);
     advanceItem(state, 1);
     render();
     return;
   }
 
-  if (digit === numOptions + 1 || (key.return && state.selectedAction === numOptions)) {
-    state.inputMode = { kind: 'custom-option', buffer: '' };
+  // Comment mode: allowFreetext + options exist
+  // If the cursor is on an option row, pre-attach that option to the comment.
+  if (input === 'c' && interaction.allowFreetext && opts.length > 0) {
+    const preselected = state.selectedAction < opts.length
+      ? opts[state.selectedAction]!.id
+      : undefined;
+    state.inputMode = preselected !== undefined
+      ? { kind: 'comment', buffer: '', selectedOptionId: preselected }
+      : { kind: 'comment', buffer: '' };
     render();
     return;
   }
 
-  if (key.return && state.selectedAction < numOptions) {
-    state.answers.set(q.id, {
-      id: q.id,
-      type: 'choice',
-      selected: q.options[state.selectedAction]!,
-      isCustom: false,
-    });
-    state.persist?.();
+  // Freetext-only: 'r' or enter opens input mode
+  if (interaction.allowFreetext && opts.length === 0) {
+    if (input === 'r' || key.return) {
+      const existing = state.responses.get(interaction.id);
+      const prefill = existing !== undefined && existing.freetext !== undefined ? existing.freetext : '';
+      state.inputMode = { kind: 'freetext', buffer: prefill };
+      render();
+      return;
+    }
+  }
+
+  // Enter on selected option row
+  if (key.return && state.selectedAction < opts.length) {
+    const o = opts[state.selectedAction]!;
+    submitOption(state, interaction, o.id, undefined);
     advanceItem(state, 1);
     render();
+    return;
   }
-}
 
-function handleFreetextAction(
-  input: string,
-  key: Key,
-  state: TuiState,
-  render: RenderFn,
-): void {
-  if (input === 'r' || key.return) {
-    const existing = state.answers.get(state.questions[state.currentIndex]!.id);
-    const prefill = existing?.type === 'freetext' ? existing.response : '';
-    state.inputMode = { kind: 'freetext', buffer: prefill };
+  // Enter on the [c] row (allowFreetext + options exist)
+  if (key.return && state.selectedAction === opts.length
+      && interaction.allowFreetext && opts.length > 0) {
+    state.inputMode = { kind: 'comment', buffer: '' };
     render();
+    return;
   }
 }
 
@@ -229,8 +218,28 @@ function handleInputMode(
     return;
   }
 
+  // Tab cycles attached option in comment mode: (none) → opt1 → opt2 → ... → (none)
+  if (key.tab && mode.kind === 'comment') {
+    const interaction = state.interactions[state.currentIndex]!;
+    const opts = interaction.options;
+    if (opts.length > 0) {
+      const cur = mode.selectedOptionId;
+      const curIdx = cur === undefined ? -1 : opts.findIndex((o) => o.id === cur);
+      const nextIdx = curIdx + 1; // -1 → 0, last → length (which we map to none)
+      if (nextIdx >= opts.length) {
+        delete mode.selectedOptionId;
+      } else {
+        mode.selectedOptionId = opts[nextIdx]!.id;
+      }
+      render();
+    }
+    return;
+  }
+
   if (key.return) {
-    commitInput(state);
+    const interaction = state.interactions[state.currentIndex]!;
+    const attached = mode.kind === 'comment' ? mode.selectedOptionId : undefined;
+    submitOption(state, interaction, attached, mode.buffer);
     state.inputMode = null;
     advanceItem(state, 1);
     render();
@@ -238,8 +247,6 @@ function handleInputMode(
   }
 
   if (key.backspace) {
-    // Drop the last *codepoint*, not the last UTF-16 code unit, so backspace
-    // on an emoji removes the whole glyph instead of leaving a lone surrogate.
     const chars = [...mode.buffer];
     chars.pop();
     mode.buffer = chars.join('');
@@ -247,52 +254,14 @@ function handleInputMode(
     return;
   }
 
-  // Accept any printable input — including pasted multi-char chunks and
-  // multi-byte UTF-8 (emoji / CJK). Strip control bytes (ESC sequences,
-  // bracketed-paste markers, BEL, BS, CR) so they can't corrupt the TUI.
   const cleaned = input
-    .replace(/\x1b\[20[01]~/g, '') // bracketed-paste start/end markers
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '') // CSI sequences
-    .replace(/[\x00-\x1F\x7F]/g, ''); // C0 controls and DEL
+    .replace(/\x1b\[20[01]~/g, '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/[\x00-\x1F\x7F]/g, '');
   if (cleaned.length > 0) {
     mode.buffer += cleaned;
     render();
   }
-}
-
-function commitInput(state: TuiState): void {
-  const q = state.questions[state.currentIndex]!;
-  const mode = state.inputMode!;
-
-  if (mode.kind === 'comment') {
-    const existing = state.answers.get(q.id) as { id: string; type: 'validation'; approved: boolean } | undefined;
-    const approved = existing ? existing.approved : false;
-    state.answers.set(q.id, {
-      id: q.id,
-      type: 'validation',
-      approved,
-      comment: mode.buffer || undefined,
-    });
-  } else if (mode.kind === 'custom-option') {
-    if (mode.buffer) {
-      state.answers.set(q.id, {
-        id: q.id,
-        type: 'choice',
-        selected: mode.buffer,
-        isCustom: true,
-      });
-    }
-  } else if (mode.kind === 'freetext') {
-    if (mode.buffer) {
-      state.answers.set(q.id, {
-        id: q.id,
-        type: 'freetext',
-        response: mode.buffer,
-      });
-    }
-  }
-
-  state.persist?.();
 }
 
 // ── Final ────────────────────────────────────────────────────────────────────
@@ -308,7 +277,7 @@ function handleFinal(
     exit();
   } else if (input === 'p') {
     state.phase = 'item-review';
-    state.currentIndex = state.questions.length - 1;
+    state.currentIndex = state.interactions.length - 1;
     render();
   }
 }
@@ -318,19 +287,29 @@ function handleFinal(
 function advanceItem(state: TuiState, direction: number): void {
   const next = state.currentIndex + direction;
   if (next < 0) return;
-  if (next >= state.questions.length) {
+  if (next >= state.interactions.length) {
     state.phase = 'final';
     return;
   }
   state.currentIndex = next;
   state.selectedAction = 0;
   state.detailExpanded = false;
+  state.scrollOffset = 0;
 }
 
-function actionCount(q: Question): number {
-  switch (q.type) {
-    case 'validation': return 4;
-    case 'choice': return q.options.length + 1;
-    case 'freetext': return 1;
-  }
+function actionCount(interaction: Interaction): number {
+  return interaction.options.length + (interaction.allowFreetext && interaction.options.length > 0 ? 1 : 0);
+}
+
+function submitOption(
+  state: TuiState,
+  interaction: Interaction,
+  selectedOptionId: string | undefined,
+  freetext: string | undefined,
+): void {
+  const response: InteractionResponse = { id: interaction.id };
+  if (selectedOptionId !== undefined) response.selectedOptionId = selectedOptionId;
+  if (freetext !== undefined) response.freetext = freetext;
+  state.responses.set(interaction.id, response);
+  state.persist?.();
 }

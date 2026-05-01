@@ -1,7 +1,6 @@
 import { query } from '@r-cli/sdk';
 import { execSync } from 'child_process';
-import type { Question, VisualBlock } from '../types.js';
-import type { ConversationMessage } from '../conversation/reader.js';
+import type { Interaction } from '../types.js';
 
 const VISUAL_SYSTEM_PROMPT = `You're briefing a CTO-level engineer in the 30 seconds before they decide. They've been off this problem for days; they need a fast re-ground in what *already exists* — the files, data flow, or constraint they're deciding inside of — not a lecture on tradeoffs.
 
@@ -17,12 +16,12 @@ If one sentence captures the current state, write one sentence. If they need to 
 
 # Directives (termrender-flavored markdown)
 
-  :::panel{title="T" color="c"}   Bordered box (colors: red|green|yellow|blue|magenta|cyan|white|gray)
-  :::tree{color="c"}               Indented hierarchy (2-space indent = nesting)
-  :::table                         Markdown table with borders
-  :::note / :::warning             Callouts
+  :::panel{title="T" color="c"}                 Bordered box (colors: red|green|yellow|blue|magenta|cyan|white|gray)
+  :::tree{color="c"}                            Indented hierarchy (2-space indent = nesting)
+  :::callout{type="info|warning|error|success"} Status callout with icon
+  ::::columns / :::col{width="50%"}             Side-by-side layout (use 4 colons on the outer columns)
 
-Each opens with ::: and closes with :::. Standard markdown also works: **bold**, *italic*, \`code\`, bullets.
+Each opens with ::: and closes with :::. GFM tables (\`| col | col |\` with a \`| --- |\` separator) render directly — no directive needed. Standard markdown also works: **bold**, *italic*, \`code\`, bullets.
 
 # Critical: ASCII art must live inside a :::panel
 
@@ -36,7 +35,7 @@ If the conversation doesn't contain enough context to write a grounded briefing,
 
 # Hard rules
 
-- Never nest directives (no :::panel containing :::table)
+- When nesting directives, the outer fence needs strictly more colons than the inner — e.g. \`::::columns\` wrapping \`:::col\`. Don't nest a panel inside a panel.
 - Never wrap output in backtick fences
 - Never repeat the question/statement text
 - Never write "tradeoffs to consider" or "here are some options"
@@ -45,8 +44,6 @@ If the conversation doesn't contain enough context to write a grounded briefing,
 - Never ask the user a question back. You are producing a briefing, not a conversation.
 - Do NOT use these section headings: **Recommendation:**, **Decide by:**, **Trade-off:**, **Why it matters:**, **What you're locking in:**. These invite editorializing. Use neutral labels like **Current state:**, **Constraint:**, or none at all.
 - 30 lines maximum`;
-
-export type VisualUpdateCallback = (questionId: string, block: VisualBlock) => void;
 
 async function callHaiku(prompt: string, systemPrompt: string): Promise<string | null> {
   try {
@@ -101,48 +98,32 @@ function tryTermrender(markdown: string, width: number): string | null {
   }
 }
 
-export async function generateVisuals(
-  questions: Question[],
-  conversation: ConversationMessage[],
-  onUpdate: VisualUpdateCallback,
-  width: number = 72,
-): Promise<void> {
-  const conversationText = conversation
-    .map(m => `${m.role}: ${m.content}`)
-    .join('\n\n');
+// defaultGenerateVisual matches the GenerateVisual contract for use with
+// mountPanel. Width is read from process.stdout.columns so callers that
+// embed humanloop in a sub-region should supply their own closure that bakes
+// in the correct width.
+export async function defaultGenerateVisual(interaction: Interaction, conversationContext: string): Promise<{ ok: true; ansi: string; markdown: string } | { ok: false; error: string }> {
+  const width = Math.max(40, Math.min((process.stdout.columns || 80) - 4, 76));
 
-  const tasks = questions.map(async (question) => {
-    const questionText = question.type === 'validation'
-      ? `Decision to validate: "${question.statement}"\nRationale: ${question.rationale}`
-      : `Question: "${question.question}"\nRationale: ${question.rationale}${
-          question.type === 'choice'
-            ? `\nOptions: ${question.options.join(', ')}`
-            : ''
-        }`;
+  const optionsSummary = interaction.options.length > 0
+    ? `\nOptions: ${interaction.options.map((o) => o.label).join(' | ')}`
+    : '';
+  const subtitleLine = interaction.subtitle ? `\nContext: ${interaction.subtitle}` : '';
+  const questionText = `Title: "${interaction.title}"${subtitleLine}${optionsSummary}`;
 
-    const prompt = `Here is the conversation so far:\n\n${conversationText}\n\n---\n\nGenerate a visual context block for this decision point:\n\n${questionText}`;
+  const prompt = conversationContext
+    ? `Here is the conversation so far:\n\n${conversationContext}\n\n---\n\nGenerate a visual context block for this decision point:\n\n${questionText}`
+    : `Generate a visual context block for this decision point:\n\n${questionText}`;
 
-    const result = await callHaiku(prompt, VISUAL_SYSTEM_PROMPT);
+  const result = await callHaiku(prompt, VISUAL_SYSTEM_PROMPT);
 
-    if (result) {
-      const cleaned = result
-        .replace(/^```[\w]*\n?/gm, '')
-        .replace(/^```\s*$/gm, '')
-        .trim();
-      const rendered = renderWithTermrender(cleaned, width);
-      onUpdate(question.id, {
-        questionId: question.id,
-        content: rendered,
-        status: 'ready',
-      });
-    } else {
-      onUpdate(question.id, {
-        questionId: question.id,
-        content: '',
-        status: 'error',
-      });
-    }
-  });
-
-  await Promise.all(tasks);
+  if (result) {
+    const markdown = result
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```\s*$/gm, '')
+      .trim();
+    const ansi = renderWithTermrender(markdown, width);
+    return { ok: true, ansi, markdown };
+  }
+  return { ok: false, error: 'haiku returned no output' };
 }

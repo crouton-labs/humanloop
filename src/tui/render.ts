@@ -1,6 +1,45 @@
+import { execFileSync } from 'node:child_process';
 import stringWidth from 'string-width';
-import type { TuiState, Question, Answer, VisualBlock } from '../types.js';
-import { getTerminalSize } from './terminal.js';
+import type { TuiState, Interaction, InteractionResponse, VisualBlock } from '../types.js';
+
+// ── Termrender body rendering ────────────────────────────────────────────────
+
+let _termrenderAvail: boolean | null = null;
+function isTermrenderAvailable(): boolean {
+  if (_termrenderAvail !== null) return _termrenderAvail;
+  try {
+    execFileSync('termrender', ['--version'], { stdio: 'pipe', timeout: 3000 });
+    _termrenderAvail = true;
+  } catch {
+    _termrenderAvail = false;
+  }
+  return _termrenderAvail;
+}
+
+const _bodyCache = new Map<string, string[]>();
+
+function renderBody(text: string, width: number): string[] {
+  const key = `${text}\0${width}`;
+  const cached = _bodyCache.get(key);
+  if (cached) return cached;
+  if (isTermrenderAvailable()) {
+    try {
+      const out = execFileSync('termrender', ['--width', String(width)], {
+        input: text,
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const lines = out.split('\n');
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+      _bodyCache.set(key, lines);
+      return lines;
+    } catch { /* fall through */ }
+  }
+  const fallback = wrap(sanitize(text), width);
+  _bodyCache.set(key, fallback);
+  return fallback;
+}
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -11,25 +50,14 @@ const DIM = `${ESC}2m`;
 const ITALIC = `${ESC}3m`;
 const GREEN = `${ESC}32m`;
 const YELLOW = `${ESC}33m`;
-const BLUE = `${ESC}34m`;
-const MAGENTA = `${ESC}35m`;
 const CYAN = `${ESC}36m`;
-const GRAY = `${ESC}90m`;
-const BG_BLUE = `${ESC}44m`;
-const WHITE = `${ESC}37m`;
 
-// Strip ANSI escape sequences and other C0/C1 control bytes from user-supplied
-// text so it can't poison the alt-screen buffer (cursor moves, color bleed,
-// embedded \x1b[2J that clears the screen, etc). Keeps \n and \t which the
-// wrappers handle explicitly.
 const CONTROL_CHARS_RE = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[@-_]|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F]/g;
 export function sanitize(text: string): string {
   if (typeof text !== 'string') return '';
   return text.replace(CONTROL_CHARS_RE, '');
 }
 
-// For one-line displays (overview rows, summaries): collapse all whitespace
-// — including newlines and tabs — to single spaces so the row stays one line.
 function singleLine(text: string): string {
   return sanitize(text).replace(/\s+/g, ' ').trim();
 }
@@ -37,7 +65,6 @@ function singleLine(text: string): string {
 function truncate(text: string, maxWidth: number): string {
   if (maxWidth < 1) return '';
   if (stringWidth(text) <= maxWidth) return text;
-  // Iterate by codepoint, not UTF-16 code unit, so surrogate pairs don't split.
   const chars = [...text];
   let w = 0;
   let out = '';
@@ -61,8 +88,6 @@ function hline(width: number, char = '─'): string {
   return char.repeat(width);
 }
 
-// Word-wrap that ALSO respects \n as a hard break and ALSO breaks oversized
-// words at maxWidth so a single 200-char token doesn't overflow the frame.
 function wrap(text: string, maxWidth: number): string[] {
   if (maxWidth < 1) return [text];
   const out: string[] = [];
@@ -76,7 +101,6 @@ function wrap(text: string, maxWidth: number): string[] {
     const words = para.split(/[ \t]+/).filter(Boolean);
     let current = '';
     for (let word of words) {
-      // Hard-break a word that's wider than the line.
       while (stringWidth(word) > maxWidth) {
         if (current) {
           out.push(current);
@@ -99,7 +123,6 @@ function wrap(text: string, maxWidth: number): string[] {
   return out.length > 0 ? out : [''];
 }
 
-// Take the longest prefix of `s` whose visible width is <= maxWidth.
 function sliceByWidth(s: string, maxWidth: number): string {
   let w = 0;
   let out = '';
@@ -109,8 +132,6 @@ function sliceByWidth(s: string, maxWidth: number): string {
     out += ch;
     w += cw;
   }
-  // Always advance at least one character so we don't loop forever on
-  // a single zero-width or oversized glyph.
   if (out === '' && s.length > 0) out = [...s][0]!;
   return out;
 }
@@ -126,7 +147,6 @@ function hardWrap(text: string, maxWidth: number): string[] {
     }
     let current = '';
     let currentW = 0;
-    // Iterate by codepoint so emoji surrogate pairs stay intact.
     for (const ch of [...seg]) {
       const cw = stringWidth(ch);
       if (currentW + cw > maxWidth) {
@@ -145,54 +165,48 @@ function hardWrap(text: string, maxWidth: number): string[] {
 
 // ── Frame buffer ─────────────────────────────────────────────────────────────
 
-let prevFrame: string[] = [];
-
-export function flush(lines: string[]): void {
-  const { rows } = getTerminalSize();
-  process.stdout.write('\x1b[?2026h');
-
+export function diffFrame(
+  prevFrame: string[],
+  nextLines: string[],
+  rows: number,
+): { writes: string[]; nextPrevFrame: string[] } {
+  const writes: string[] = [];
   for (let i = 0; i < rows; i++) {
-    const line = i < lines.length ? lines[i]! : '';
+    const line = i < nextLines.length ? nextLines[i]! : '';
     if (prevFrame[i] !== line) {
-      process.stdout.write(`${ESC}${i + 1};1H${ESC}2K${line}`);
+      writes.push(`${ESC}${i + 1};1H${ESC}2K${line}`);
     }
   }
-
-  process.stdout.write('\x1b[?2026l');
-  prevFrame = [...lines];
+  return { writes, nextPrevFrame: [...nextLines] };
 }
 
 // ── Renderers ────────────────────────────────────────────────────────────────
 
-export function renderOverview(state: TuiState): string[] {
-  const { cols, rows } = getTerminalSize();
+export function renderOverview(state: TuiState, cols: number, rows: number): string[] {
   const lines: string[] = [];
   const title = `${BOLD}${CYAN} Decisions ${RESET}`;
-  const progress = `${state.answers.size}/${state.questions.length} answered`;
+  const progress = `${state.responses.size}/${state.interactions.length} answered`;
 
   lines.push('');
   lines.push(`  ${title}  ${DIM}${progress}${RESET}`);
   lines.push(`  ${DIM}${hline(Math.min(cols - 4, 60))}${RESET}`);
   lines.push('');
 
-  // Build all question rows with mapping back to question index so we can
-  // scroll while keeping `currentIndex` visible.
   type Row = { line: string; questionIndex: number };
   const rowsBuf: Row[] = [];
-  for (let i = 0; i < state.questions.length; i++) {
-    const q = state.questions[i]!;
-    const answer = state.answers.get(q.id);
-    const icon = answer ? `${GREEN}✓${RESET}` : `${DIM}○${RESET}`;
-    const label = singleLine(q.type === 'validation' ? q.statement : q.question);
-    const typeTag = `${DIM}[${q.type}]${RESET}`;
+  for (let i = 0; i < state.interactions.length; i++) {
+    const interaction = state.interactions[i]!;
+    const response = state.responses.get(interaction.id);
+    const icon = response ? `${GREEN}✓${RESET}` : `${DIM}○${RESET}`;
+    const label = singleLine(interaction.title);
     const cursor = i === state.currentIndex ? `${CYAN}▸${RESET} ` : '  ';
-    const labelMax = Math.max(10, cols - 20);
+    const labelMax = Math.max(10, cols - 16);
     rowsBuf.push({
-      line: `  ${cursor}${icon} ${truncate(label, labelMax)} ${typeTag}`,
+      line: `  ${cursor}${icon} ${truncate(label, labelMax)}`,
       questionIndex: i,
     });
-    if (answer) {
-      const summary = singleLine(answerSummary(answer));
+    if (response) {
+      const summary = singleLine(responseSummary(response, interaction));
       const summaryMax = Math.max(10, cols - 10);
       rowsBuf.push({
         line: `      ${DIM}${truncate(summary, summaryMax)}${RESET}`,
@@ -201,18 +215,15 @@ export function renderOverview(state: TuiState): string[] {
     }
   }
 
-  // Reserve space for header (4 already pushed) + footer (3) + scroll hints (2).
   const reserved = 4 + 3 + 2;
   const available = Math.max(1, rows - reserved);
   let scroll = state.scrollOffset || 0;
-  // Find first row matching currentIndex; ensure it's in [scroll, scroll+available).
   const focusRow = rowsBuf.findIndex((r) => r.questionIndex === state.currentIndex);
   if (focusRow >= 0) {
     if (focusRow < scroll) scroll = focusRow;
     if (focusRow >= scroll + available) scroll = focusRow - available + 1;
   }
   scroll = Math.max(0, Math.min(scroll, Math.max(0, rowsBuf.length - available)));
-  state.scrollOffset = scroll;
 
   if (scroll > 0) {
     lines.push(`  ${DIM}↑ ${scroll} more above${RESET}`);
@@ -234,133 +245,183 @@ export function renderOverview(state: TuiState): string[] {
   return lines.slice(0, rows);
 }
 
-export function renderItemReview(state: TuiState): string[] {
-  const { cols, rows } = getTerminalSize();
-  const lines: string[] = [];
-  const q = state.questions[state.currentIndex]!;
-  const visual = state.visuals.get(q.id);
-  const answer = state.answers.get(q.id);
-  const maxW = Math.min(cols - 4, 76);
+export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
+  const interaction = state.interactions[state.currentIndex]!;
+  const visual = state.visuals.get(interaction.id);
+  const response = state.responses.get(interaction.id);
+  const maxW = Math.min(cols - 4, 120);
 
-  // Header
-  const pos = `${state.currentIndex + 1}/${state.questions.length}`;
-  lines.push('');
-  lines.push(`  ${BOLD}${CYAN}[${pos}]${RESET} ${DIM}${q.type}${RESET}`);
-  lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-  lines.push('');
-
-  // Question / Statement
-  const headline = sanitize(q.type === 'validation' ? q.statement : q.question);
-  for (const line of wrap(headline, maxW)) {
-    lines.push(`  ${BOLD}${line}${RESET}`);
+  // Pre-body: position, divider, title, subtitle (always visible)
+  const preLines: string[] = [];
+  const pos = `${state.currentIndex + 1}/${state.interactions.length}`;
+  preLines.push('');
+  preLines.push(`  ${BOLD}${CYAN}[${pos}]${RESET}`);
+  preLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  preLines.push('');
+  for (const line of wrap(sanitize(interaction.title), maxW)) {
+    preLines.push(`  ${BOLD}${line}${RESET}`);
   }
-  for (const line of wrap(sanitize(q.rationale), maxW)) {
-    lines.push(`  ${ITALIC}${GRAY}${line}${RESET}`);
+  if (interaction.subtitle) {
+    for (const line of wrap(sanitize(interaction.subtitle), maxW)) {
+      preLines.push(`  ${DIM}${line}${RESET}`);
+    }
   }
-  lines.push('');
 
-  // Visual context
+  // Body: rendered question body + expanded visual block (scrollable)
+  const bodyLines: string[] = [];
+  if (interaction.body) {
+    bodyLines.push('');
+    for (const line of renderBody(interaction.body, maxW)) {
+      bodyLines.push(`  ${line}`);
+    }
+  }
+  if (visual && visual.status === 'ready' && state.detailExpanded) {
+    bodyLines.push('');
+    bodyLines.push(`  ${DIM}── context ${hline(maxW - 12)}${RESET}`);
+    for (const vl of visual.content.split('\n')) {
+      bodyLines.push(`  ${vl}`);
+    }
+    bodyLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  }
+
+  // Post-body: visual status hint, input buffer or actions, footer (always visible)
+  const postLines: string[] = [];
+  postLines.push('');
   if (visual) {
     if (visual.status === 'loading') {
-      lines.push(`  ${DIM}loading context...${RESET}`);
+      postLines.push(`  ${DIM}loading context...${RESET}`);
+      postLines.push('');
     } else if (visual.status === 'error') {
-      lines.push(`  ${YELLOW}visual context unavailable${RESET}`);
-    } else if (state.detailExpanded) {
-      lines.push(`  ${DIM}── context ${hline(maxW - 12)}${RESET}`);
-      for (const vl of visual.content.split('\n')) {
-        lines.push(`  ${vl}`);
-      }
-      lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-    } else {
-      lines.push(`  ${DIM}[space] expand context${RESET}`);
+      postLines.push(`  ${YELLOW}visual context unavailable${RESET}`);
+      postLines.push('');
+    } else if (!state.detailExpanded) {
+      postLines.push(`  ${DIM}[space] expand context${RESET}`);
+      postLines.push('');
     }
-    lines.push('');
   }
 
-  // Input mode
   if (state.inputMode) {
-    lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-    const label = state.inputMode.kind === 'comment' ? 'Comment'
-      : state.inputMode.kind === 'freetext' ? 'Response'
-      : 'Custom option';
-    lines.push(`  ${YELLOW}${label}:${RESET}`);
+    postLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
+    const label = interaction.freetextLabel !== undefined
+      ? interaction.freetextLabel
+      : state.inputMode.kind === 'comment' ? 'Comment' : 'Response';
+
+    // Show attached option (comment mode only) — Tab cycles
+    let attachedLine: string | undefined;
+    if (state.inputMode.kind === 'comment') {
+      const attachedId = state.inputMode.selectedOptionId;
+      const opts = interaction.options;
+      if (opts.length > 0) {
+        const attached = attachedId !== undefined
+          ? opts.find((o) => o.id === attachedId)
+          : undefined;
+        const valueText = attached !== undefined
+          ? `${CYAN}${sanitize(attached.label)}${RESET}`
+          : `${DIM}none${RESET}`;
+        attachedLine = `  ${DIM}attached:${RESET} ${valueText}  ${DIM}[tab to cycle]${RESET}`;
+      }
+    }
+
+    postLines.push(`  ${YELLOW}${label}:${RESET}`);
     const bufLines = hardWrap(state.inputMode.buffer, maxW - 1);
     for (let i = 0; i < bufLines.length; i++) {
       const isLast = i === bufLines.length - 1;
-      lines.push(`  ${bufLines[i]}${isLast ? '█' : ''}`);
+      postLines.push(`  ${bufLines[i]}${isLast ? '█' : ''}`);
     }
-    lines.push('');
-    lines.push(`  ${DIM}enter${RESET} submit  ${DIM}esc${RESET} cancel`);
+    if (attachedLine !== undefined) {
+      postLines.push('');
+      postLines.push(attachedLine);
+    }
+    postLines.push('');
+    postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}esc${RESET} cancel`);
   } else {
-    // Actions
-    lines.push(...renderActions(q, state.selectedAction, answer));
+    postLines.push(...renderActions(interaction, state.selectedAction, response));
   }
 
-  // Footer
-  while (lines.length < rows - 1) lines.push('');
+  // Window the body
+  const reservedRows = preLines.length + postLines.length + 1; // +1 for footer
+  const bodyHeight = Math.max(1, rows - reservedRows);
+  const overflows = bodyLines.length > bodyHeight;
+  let scroll = state.scrollOffset || 0;
+  const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
+  scroll = Math.max(0, Math.min(scroll, maxScroll));
+  state.scrollOffset = scroll;
+
+  let visibleBody: string[];
+  if (overflows) {
+    visibleBody = bodyLines.slice(scroll, scroll + bodyHeight);
+    if (scroll > 0) {
+      visibleBody[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
+    }
+    const remainingBelow = bodyLines.length - (scroll + bodyHeight);
+    if (remainingBelow > 0) {
+      visibleBody[visibleBody.length - 1] = `  ${DIM}↓ ${remainingBelow} more below${RESET}`;
+    }
+  } else {
+    visibleBody = bodyLines;
+  }
+
+  // Footer hint — mention scroll keys when body overflows
   const footerParts = [
     `${DIM}n/p${RESET} prev/next`,
     `${DIM}space${RESET} expand`,
     `${DIM}q${RESET} overview`,
   ];
-  lines.push(`  ${footerParts.join('  ')}`);
+  if (overflows) footerParts.unshift(`${DIM}u/d${RESET} scroll`);
+  const footer = `  ${footerParts.join('  ')}`;
 
-  // If the headline + visual + actions overflowed the viewport, the footer
-  // would otherwise scroll off the bottom. Clip to `rows` so flush() never
-  // writes more rows than the terminal has.
+  // Assemble — pad to fill rows so post-body sits at the bottom
+  const lines: string[] = [...preLines, ...visibleBody, ...postLines];
+  while (lines.length < rows - 1) lines.push('');
+  lines.push(footer);
+
+  // Final clamp (safety net for very small terminals)
   if (lines.length > rows) {
-    return [...lines.slice(0, rows - 1), lines[lines.length - 1]!];
+    return [...lines.slice(0, rows - 1), footer];
   }
   return lines;
 }
 
-function renderActions(q: Question, selectedAction: number, existing?: Answer): string[] {
+function renderActions(
+  interaction: Interaction,
+  selectedAction: number,
+  existing?: InteractionResponse,
+): string[] {
   const lines: string[] = [];
+  const opts = interaction.options;
 
-  if (q.type === 'validation') {
-    const actions = [
-      { key: '1', label: 'Approve', desc: 'accept as stated' },
-      { key: '2', label: 'Approve + comment', desc: 'accept with note' },
-      { key: '3', label: 'Reject', desc: 'do not accept as stated' },
-      { key: '4', label: 'Comment', desc: 'feedback without decision' },
-    ];
-    for (let i = 0; i < actions.length; i++) {
-      const a = actions[i]!;
-      const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-      const keyBadge = `${DIM}[${a.key}]${RESET}`;
-      lines.push(`  ${cursor} ${keyBadge} ${a.label} ${DIM}— ${a.desc}${RESET}`);
-    }
-  } else if (q.type === 'choice') {
-    for (let i = 0; i < q.options.length; i++) {
-      const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-      // Numeric shortcut only for 1..9 — past that, the digit '1' would fire
-      // before the user can type the second digit, so we use a blank pad.
-      const keyBadge = i < 9 ? `${DIM}[${i + 1}]${RESET}` : `${DIM}   ${RESET}`;
-      lines.push(`  ${cursor} ${keyBadge} ${sanitize(q.options[i]!)}`);
-    }
-    const otherIdx = q.options.length;
-    const cursor = otherIdx === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-    const otherBadge = otherIdx < 9 ? `${DIM}[${otherIdx + 1}]${RESET}` : `${DIM}   ${RESET}`;
-    lines.push(`  ${cursor} ${otherBadge} ${ITALIC}Other (custom)${RESET}`);
-  } else {
-    lines.push(`  ${DIM}[r]${RESET} Enter response`);
+  for (let i = 0; i < opts.length; i++) {
+    const o = opts[i]!;
+    const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const sc = o.shortcut ?? ' ';
+    const keyBadge = `${DIM}[${sc}]${RESET}`;
+    const desc = o.description ? ` ${DIM}— ${sanitize(o.description)}${RESET}` : '';
+    lines.push(`  ${cursor} ${keyBadge} ${sanitize(o.label)}${desc}`);
+  }
+
+  if (interaction.allowFreetext && opts.length > 0) {
+    const cursor = opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const label = interaction.freetextLabel !== undefined ? interaction.freetextLabel : 'Add comment';
+    lines.push(`  ${cursor} ${DIM}[c]${RESET} ${label}`);
+  } else if (interaction.allowFreetext && opts.length === 0) {
+    const ftLabel = interaction.freetextLabel !== undefined ? interaction.freetextLabel : 'Enter response';
+    lines.push(`  ${DIM}[r]${RESET} ${ftLabel}`);
   }
 
   if (existing) {
     lines.push('');
-    lines.push(`  ${GREEN}Current: ${answerSummary(existing)}${RESET}`);
+    lines.push(`  ${GREEN}Current: ${responseSummary(existing, interaction)}${RESET}`);
   }
 
   return lines;
 }
 
-export function renderFinal(state: TuiState): string[] {
-  const { cols, rows } = getTerminalSize();
+export function renderFinal(state: TuiState, cols: number, rows: number): string[] {
   const header: string[] = [];
   const footer: string[] = [];
   const maxW = Math.min(cols - 4, 60);
-  const total = state.questions.length;
-  const answered = state.answers.size;
+  const total = state.interactions.length;
+  const answered = state.responses.size;
 
   header.push('');
   header.push(`  ${BOLD}${CYAN} Summary ${RESET}`);
@@ -376,17 +437,14 @@ export function renderFinal(state: TuiState): string[] {
   }
   footer.push(`  ${DIM}enter${RESET} submit  ${DIM}p${RESET} go back`);
 
-  // Build per-question rows so we can clip to fit the viewport while
-  // keeping the header + footer always visible (the keybind hint at the
-  // bottom is essential — without it the user can't submit).
   const questionRows: string[] = [];
-  for (const q of state.questions) {
-    const answer = state.answers.get(q.id);
-    const icon = answer ? `${GREEN}✓${RESET}` : `${YELLOW}○${RESET}`;
-    const label = singleLine(q.type === 'validation' ? q.statement : q.question);
+  for (const interaction of state.interactions) {
+    const response = state.responses.get(interaction.id);
+    const icon = response ? `${GREEN}✓${RESET}` : `${YELLOW}○${RESET}`;
+    const label = singleLine(interaction.title);
     questionRows.push(`  ${icon} ${truncate(label, Math.max(10, maxW - 4))}`);
-    if (answer) {
-      questionRows.push(`    ${DIM}${truncate(singleLine(answerSummary(answer)), Math.max(10, maxW - 6))}${RESET}`);
+    if (response) {
+      questionRows.push(`    ${DIM}${truncate(singleLine(responseSummary(response, interaction)), Math.max(10, maxW - 6))}${RESET}`);
     }
   }
 
@@ -404,15 +462,12 @@ export function renderFinal(state: TuiState): string[] {
   return lines.slice(0, rows);
 }
 
-function answerSummary(a: Answer): string {
-  switch (a.type) {
-    case 'validation':
-      return a.approved
-        ? (a.comment ? `approved: "${sanitize(a.comment)}"` : 'approved')
-        : (a.comment ? `commented: "${sanitize(a.comment)}"` : 'commented');
-    case 'choice':
-      return a.isCustom ? `custom: "${sanitize(a.selected)}"` : sanitize(a.selected);
-    case 'freetext':
-      return sanitize(a.response);
-  }
+export function responseSummary(r: InteractionResponse, interaction: Interaction): string {
+  const opt = r.selectedOptionId
+    ? interaction.options.find((o) => o.id === r.selectedOptionId)
+    : undefined;
+  if (opt && r.freetext) return `${sanitize(opt.label)}: "${sanitize(r.freetext)}"`;
+  if (opt) return sanitize(opt.label);
+  if (r.freetext) return sanitize(r.freetext);
+  return '(empty)';
 }

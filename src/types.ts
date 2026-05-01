@@ -1,93 +1,101 @@
-// ── Input: what the agent writes ─────────────────────────────────────────────
+// ── v2 shapes (v1 schema dropped per cycle-16 user pivot — humanloop is v2-only) ──
 
-export type QuestionType = 'validation' | 'choice' | 'freetext';
+import type { Key } from './tui/terminal.js';
 
-export interface ValidationQuestion {
+export type InteractionKind = 'notify' | 'validation' | 'decision' | 'context' | 'error';
+
+export interface InteractionOption {
   id: string;
-  type: 'validation';
-  statement: string;
-  rationale: string;
+  label: string;
+  description?: string;
+  shortcut?: string;
 }
 
-export interface ChoiceQuestion {
+export interface Interaction {
   id: string;
-  type: 'choice';
-  question: string;
-  rationale: string;
-  options: string[];
+  title: string;
+  subtitle?: string;
+  body?: string;
+  bodyPath?: string;
+  options: InteractionOption[];
+  allowFreetext?: boolean;
+  freetextLabel?: string;
+  kind?: InteractionKind;
 }
 
-export interface FreetextQuestion {
+export interface InteractionResponse {
   id: string;
-  type: 'freetext';
-  question: string;
-  rationale: string;
+  selectedOptionId?: string;
+  freetext?: string;
 }
 
-export type Question = ValidationQuestion | ChoiceQuestion | FreetextQuestion;
+export interface DeckSource {
+  sessionName?: string;
+  askedBy?: string;
+  blockedSince?: string;
+}
 
-export interface DecisionsInput {
+export interface Deck {
   title?: string;
-  questions: Question[];
+  source?: DeckSource;
+  interactions: Interaction[];
 }
 
-// ── Output: what the agent reads back ────────────────────────────────────────
-
-export interface ValidationAnswer {
-  id: string;
-  type: 'validation';
-  approved: boolean;
-  comment?: string;
-}
-
-export interface ChoiceAnswer {
-  id: string;
-  type: 'choice';
-  selected: string; // option text or freetext value
-  isCustom: boolean;
-  comment?: string;
-}
-
-export interface FreetextAnswer {
-  id: string;
-  type: 'freetext';
-  response: string;
-}
-
-export type Answer = ValidationAnswer | ChoiceAnswer | FreetextAnswer;
-
-export interface DecisionsOutput {
-  answers: Answer[];
-  completedAt: string;
-}
-
-// ── Visual context: what haiku generates ─────────────────────────────────────
+// ── Visual context ─────────────────────────────────────────────────────────────
 
 export interface VisualBlock {
-  questionId: string;
-  content: string; // rendered terminal content (ANSI)
+  questionId: string;   // carries Interaction.id
+  content: string;
   status: 'loading' | 'ready' | 'error';
 }
 
-// ── TUI state ────────────────────────────────────────────────────────────────
+// ── TUI state ─────────────────────────────────────────────────────────────────
 
 export type Phase = 'overview' | 'item-review' | 'final';
 
 export type InputMode =
   | null
-  | { kind: 'comment'; buffer: string }
-  | { kind: 'freetext'; buffer: string }
-  | { kind: 'custom-option'; buffer: string };
+  | { kind: 'comment'; buffer: string; selectedOptionId?: string }
+  | { kind: 'freetext'; buffer: string };
 
 export interface TuiState {
   phase: Phase;
   currentIndex: number;
-  questions: Question[];
-  answers: Map<string, Answer>;
+  interactions: Interaction[];
+  responses: Map<string, InteractionResponse>;
   visuals: Map<string, VisualBlock>;
   inputMode: InputMode;
   selectedAction: number;
   detailExpanded: boolean;
   scrollOffset: number;
   persist?: () => void;
+}
+
+// ── Public panel API ──────────────────────────────────────────────────────────
+
+export type GenerateVisual = (
+  interaction: Interaction,
+) => Promise<
+  | { ok: true; ansi: string; markdown: string }
+  | { ok: false; error: string }
+>;
+
+export interface MountedPanelOpts {
+  deck: Deck;
+  progressPath?: string;
+  generateVisual?: GenerateVisual;
+  cols: number;
+  rows: number;
+  onProgress?: (responses: InteractionResponse[]) => void;
+  onComplete?: (responses: InteractionResponse[]) => void;
+  onExit?: () => void;
+}
+
+export interface MountedPanel {
+  handleKey(input: string, key: Key): void;
+  render(): string[];
+  handleResize(cols: number, rows: number): string[];
+  unmount(): void;
+  loadDeck(deck: Deck, opts?: { progressPath?: string }): void;
+  canAcceptHostKeys(): boolean;
 }

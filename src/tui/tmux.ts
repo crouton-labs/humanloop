@@ -2,12 +2,18 @@ import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { DecisionsOutput } from '../types.js';
+import type { InteractionResponse } from '../types.js';
+
+export interface TuiOutput {
+  responses: InteractionResponse[];
+  completedAt: string;
+}
 
 export interface TmuxDispatchOpts {
   sessionId?: string;
   visuals: boolean;
 }
+
 
 function shellQuote(s: string): string {
   if (s.length > 0 && /^[a-zA-Z0-9_\-./:@%+=]+$/.test(s)) return s;
@@ -39,7 +45,7 @@ function buildChildCmd(file: string, resultPath: string, opts: TmuxDispatchOpts)
 export async function dispatchToTmuxPane(
   file: string,
   opts: TmuxDispatchOpts,
-): Promise<DecisionsOutput> {
+): Promise<TuiOutput> {
   const dir = mkdtempSync(join(tmpdir(), 'hl-'));
   const resultPath = join(dir, 'result.json');
 
@@ -79,5 +85,5 @@ export async function dispatchToTmuxPane(
   const json = readFileSync(resultPath, 'utf8');
   try { unlinkSync(resultPath); } catch { /* ignore */ }
   try { rmdirSync(dir); } catch { /* ignore */ }
-  return JSON.parse(json) as DecisionsOutput;
+  return JSON.parse(json) as TuiOutput;
 }
