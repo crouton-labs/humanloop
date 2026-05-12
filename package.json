@@ -1,6 +1,6 @@
 {
   "name": "@crouton-kit/humanloop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Human-in-the-loop decision TUI — agents write questions, humans answer them",
   "type": "module",
   "main": "dist/index.js",
