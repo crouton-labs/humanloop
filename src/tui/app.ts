@@ -108,8 +108,11 @@ export function validateInput(parsed: unknown): Deck {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 function buildInitialState(deck: Deck): TuiState {
+  // Single-question decks skip the overview list — there's nothing to overview,
+  // and overview hides the option hotkeys so users press 'y' and nothing happens.
+  const initialPhase = deck.interactions.length === 1 ? 'item-review' : 'overview';
   return {
-    phase: 'overview',
+    phase: initialPhase,
     currentIndex: 0,
     interactions: deck.interactions,
     responses: new Map(),

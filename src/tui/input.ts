@@ -79,19 +79,39 @@ function handleOverview(
   if (input === 'j' || key.downArrow) {
     state.currentIndex = Math.min(state.currentIndex + 1, state.interactions.length - 1);
     render();
-  } else if (input === 'k' || key.upArrow) {
+    return;
+  }
+  if (input === 'k' || key.upArrow) {
     state.currentIndex = Math.max(state.currentIndex - 1, 0);
     render();
-  } else if (key.return) {
+    return;
+  }
+  if (key.return || input === ' ') {
     state.phase = 'item-review';
     state.selectedAction = 0;
     state.detailExpanded = false;
     render();
-  } else if (input === 'q') {
+    return;
+  }
+  if (input === 'q') {
     if (state.responses.size >= state.interactions.length) {
       exit();
     } else {
       state.phase = 'final';
+      render();
+    }
+    return;
+  }
+
+  // Quick-answer: option shortcut for the focused interaction. Lets users
+  // answer from the overview list without pressing Enter first.
+  const interaction = state.interactions[state.currentIndex];
+  if (interaction !== undefined) {
+    const matched = interaction.options.find((o) => o.shortcut === input);
+    if (matched !== undefined) {
+      submitOption(state, interaction, matched.id, undefined);
+      // Don't auto-advance the cursor — users may want to re-answer the same
+      // question. The response icon flips ✓ and they can j/k away when ready.
       render();
     }
   }

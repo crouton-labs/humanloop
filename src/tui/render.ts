@@ -163,6 +163,23 @@ function hardWrap(text: string, maxWidth: number): string[] {
   return out;
 }
 
+// ── Horizontal centering ─────────────────────────────────────────────────────
+
+/**
+ * Pad each non-empty line with leading spaces to horizontally center the
+ * `contentWidth`-wide block within `cols`. Wide terminals (dashboard, full
+ * screen) get visual breathing room; narrow panes (split tmux pane next to a
+ * spawning agent) skip centering because there's nothing to center.
+ *
+ * Empty lines stay empty so frame diffing can keep them as cheap no-ops.
+ */
+function centerHorizontal(lines: string[], cols: number, contentWidth: number): string[] {
+  const extraPad = Math.max(0, Math.floor((cols - contentWidth) / 2));
+  if (extraPad === 0) return lines;
+  const pad = ' '.repeat(extraPad);
+  return lines.map((line) => (line === '' ? '' : pad + line));
+}
+
 // ── Frame buffer ─────────────────────────────────────────────────────────────
 
 export function diffFrame(
@@ -242,7 +259,10 @@ export function renderOverview(state: TuiState, cols: number, rows: number): str
   lines.push(`  ${DIM}enter${RESET} review  ${DIM}j/k${RESET} navigate  ${DIM}q${RESET} finish`);
 
   while (lines.length < rows) lines.push('');
-  return lines.slice(0, rows);
+  // Overview content extends roughly cols-16 wide for option labels; center
+  // against a 60-col cap (the divider width) when the terminal is much wider.
+  const centered = centerHorizontal(lines.slice(0, rows), cols, Math.min(cols, 60) + 2);
+  return centered;
 }
 
 export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
@@ -316,7 +336,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
           ? opts.find((o) => o.id === attachedId)
           : undefined;
         const valueText = attached !== undefined
-          ? `${CYAN}${sanitize(attached.label)}${RESET}`
+          ? `${CYAN}${singleLine(attached.label)}${RESET}`
           : `${DIM}none${RESET}`;
         attachedLine = `  ${DIM}attached:${RESET} ${valueText}  ${DIM}[tab to cycle]${RESET}`;
       }
@@ -335,7 +355,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
     postLines.push('');
     postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}esc${RESET} cancel`);
   } else {
-    postLines.push(...renderActions(interaction, state.selectedAction, response));
+    postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
   }
 
   // Window the body
@@ -376,27 +396,45 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   lines.push(footer);
 
   // Final clamp (safety net for very small terminals)
-  if (lines.length > rows) {
-    return [...lines.slice(0, rows - 1), footer];
-  }
-  return lines;
+  const clamped = lines.length > rows
+    ? [...lines.slice(0, rows - 1), footer]
+    : lines;
+  // Content occupies maxW cols of body + 2 cols of left prefix — center the
+  // whole block when the terminal is wider than that.
+  return centerHorizontal(clamped, cols, maxW + 2);
 }
 
 function renderActions(
   interaction: Interaction,
   selectedAction: number,
+  maxW: number,
   existing?: InteractionResponse,
 ): string[] {
   const lines: string[] = [];
   const opts = interaction.options;
+  // Prefix on first row: "  X [s] " — 2 + 1 (cursor) + 1 + 3 ([s]) + 1 = 8 visible cols.
+  // Continuation rows align under the label so each option reads as a block.
+  const prefixWidth = 8;
+  const indent = ' '.repeat(prefixWidth);
+  const contentMax = Math.max(20, maxW - prefixWidth);
 
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i]!;
     const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     const sc = o.shortcut ?? ' ';
     const keyBadge = `${DIM}[${sc}]${RESET}`;
-    const desc = o.description ? ` ${DIM}— ${sanitize(o.description)}${RESET}` : '';
-    lines.push(`  ${cursor} ${keyBadge} ${sanitize(o.label)}${desc}`);
+
+    const labelLines = wrap(sanitize(o.label), contentMax);
+    for (let j = 0; j < labelLines.length; j++) {
+      const prefix = j === 0 ? `  ${cursor} ${keyBadge} ` : indent;
+      lines.push(`${prefix}${labelLines[j]}`);
+    }
+    if (o.description) {
+      const descLines = wrap(`— ${sanitize(o.description)}`, contentMax);
+      for (const dl of descLines) {
+        lines.push(`${indent}${DIM}${dl}${RESET}`);
+      }
+    }
   }
 
   if (interaction.allowFreetext && opts.length > 0) {
@@ -459,7 +497,7 @@ export function renderFinal(state: TuiState, cols: number, rows: number): string
 
   const lines = [...header, ...visible, ...footer];
   while (lines.length < rows) lines.push('');
-  return lines.slice(0, rows);
+  return centerHorizontal(lines.slice(0, rows), cols, maxW + 2);
 }
 
 export function responseSummary(r: InteractionResponse, interaction: Interaction): string {
