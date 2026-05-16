@@ -1,45 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import stringWidth from 'string-width';
 import type { TuiState, Interaction, InteractionResponse, VisualBlock } from '../types.js';
-
-// ── Termrender body rendering ────────────────────────────────────────────────
-
-let _termrenderAvail: boolean | null = null;
-function isTermrenderAvailable(): boolean {
-  if (_termrenderAvail !== null) return _termrenderAvail;
-  try {
-    execFileSync('termrender', ['--version'], { stdio: 'pipe', timeout: 3000 });
-    _termrenderAvail = true;
-  } catch {
-    _termrenderAvail = false;
-  }
-  return _termrenderAvail;
-}
-
-const _bodyCache = new Map<string, string[]>();
-
-function renderBody(text: string, width: number): string[] {
-  const key = `${text}\0${width}`;
-  const cached = _bodyCache.get(key);
-  if (cached) return cached;
-  if (isTermrenderAvailable()) {
-    try {
-      const out = execFileSync('termrender', ['--width', String(width)], {
-        input: text,
-        encoding: 'utf-8',
-        timeout: 5000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      const lines = out.split('\n');
-      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-      _bodyCache.set(key, lines);
-      return lines;
-    } catch { /* fall through */ }
-  }
-  const fallback = wrap(sanitize(text), width);
-  _bodyCache.set(key, fallback);
-  return fallback;
-}
+import { renderMarkdown } from '../render/termrender.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -291,7 +252,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   const bodyLines: string[] = [];
   if (interaction.body) {
     bodyLines.push('');
-    for (const line of renderBody(interaction.body, maxW)) {
+    for (const line of renderMarkdown(interaction.body, maxW)) {
       bodyLines.push(`  ${line}`);
     }
   }

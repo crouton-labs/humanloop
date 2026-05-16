@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync } from 'fs';
+import { dirname, resolve as resolvePath } from 'node:path';
 import type {
   Deck, TuiState, Interaction, InteractionResponse,
   MountedPanel, MountedPanelOpts, GenerateVisual,
@@ -8,101 +9,14 @@ import { diffFrame, renderOverview, renderItemReview, renderFinal } from './rend
 import { handleKeypress, assignShortcuts } from './input.js';
 import { readConversation } from '../conversation/reader.js';
 import { defaultGenerateVisual } from '../visuals/generate.js';
+import { validateDeck } from '../inbox/deck-schema.js';
+import { progressPath as progressPathFor, writeResponse, clearProgress } from '../inbox/convention.js';
 
+/** Validate an arbitrary parsed value as a Deck. Delegates to the canonical
+ * Zod validator in `inbox/deck-schema.ts` (the single source of truth shared
+ * with sisyphus). Kept exported for back-compat. */
 export function validateInput(parsed: unknown): Deck {
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Deck file must be a JSON object with an `interactions` array');
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (!Array.isArray(obj.interactions)) {
-    throw new Error('`interactions` must be an array');
-  }
-  if (obj.interactions.length === 0) {
-    throw new Error('No interactions in deck file');
-  }
-  if (obj.title !== undefined && typeof obj.title !== 'string') {
-    throw new Error('`title` must be a string when present');
-  }
-
-  const seen = new Set<string>();
-  const validated: Interaction[] = [];
-  for (let i = 0; i < obj.interactions.length; i++) {
-    const raw = obj.interactions[i] as Record<string, unknown> | null;
-    const where = `interactions[${i}]`;
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      throw new Error(`${where} must be an object`);
-    }
-    if (typeof raw.id !== 'string' || raw.id === '') {
-      throw new Error(`${where}.id must be a non-empty string`);
-    }
-    if (seen.has(raw.id)) {
-      throw new Error(`Duplicate interaction id: ${JSON.stringify(raw.id)}`);
-    }
-    seen.add(raw.id);
-
-    if (typeof raw.title !== 'string' || raw.title === '') {
-      throw new Error(`${where}.title must be a non-empty string`);
-    }
-
-    if (!Array.isArray(raw.options)) {
-      throw new Error(`${where}.options must be an array`);
-    }
-
-    const opts: Interaction['options'] = [];
-    for (let j = 0; j < raw.options.length; j++) {
-      const o = raw.options[j] as Record<string, unknown> | null;
-      const owhere = `${where}.options[${j}]`;
-      if (typeof o !== 'object' || o === null || Array.isArray(o)) {
-        throw new Error(`${owhere} must be an object`);
-      }
-      if (typeof o.id !== 'string' || o.id === '') {
-        throw new Error(`${owhere}.id must be a non-empty string`);
-      }
-      if (typeof o.label !== 'string') {
-        throw new Error(`${owhere}.label must be a string`);
-      }
-      const opt: Interaction['options'][number] = { id: o.id, label: o.label };
-      if (o.description !== undefined) {
-        if (typeof o.description !== 'string') throw new Error(`${owhere}.description must be a string`);
-        opt.description = o.description;
-      }
-      if (o.shortcut !== undefined) {
-        if (typeof o.shortcut !== 'string') throw new Error(`${owhere}.shortcut must be a string`);
-        opt.shortcut = o.shortcut;
-      }
-      opts.push(opt);
-    }
-
-    const interaction: Interaction = { id: raw.id, title: raw.title, options: opts };
-    if (raw.subtitle !== undefined) {
-      if (typeof raw.subtitle !== 'string') throw new Error(`${where}.subtitle must be a string`);
-      interaction.subtitle = raw.subtitle;
-    }
-    if (raw.body !== undefined) {
-      if (typeof raw.body !== 'string') throw new Error(`${where}.body must be a string`);
-      interaction.body = raw.body;
-    }
-    if (raw.bodyPath !== undefined) {
-      if (typeof raw.bodyPath !== 'string') throw new Error(`${where}.bodyPath must be a string`);
-      interaction.bodyPath = raw.bodyPath;
-    }
-    if (raw.freetextLabel !== undefined) {
-      if (typeof raw.freetextLabel !== 'string') throw new Error(`${where}.freetextLabel must be a string`);
-      interaction.freetextLabel = raw.freetextLabel;
-    }
-    if (raw.allowFreetext !== undefined) {
-      if (typeof raw.allowFreetext !== 'boolean') throw new Error(`${where}.allowFreetext must be a boolean`);
-      interaction.allowFreetext = raw.allowFreetext;
-    }
-    if (raw.kind !== undefined) {
-      interaction.kind = raw.kind as Interaction['kind'];
-    }
-    validated.push(interaction);
-  }
-
-  const deck: Deck = { interactions: validated };
-  if (obj.title !== undefined) deck.title = obj.title as string;
-  return deck;
+  return validateDeck(parsed);
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -288,23 +202,33 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
   };
 }
 
-// ── launchTui shim ────────────────────────────────────────────────────────────
+// ── Dir-based resolver (interaction-directory convention) ─────────────────────
 
-export async function launchTui(
-  decisionsPath: string,
-  sessionId?: string,
-): Promise<{ responses: InteractionResponse[]; completedAt: string }> {
-  if (!existsSync(decisionsPath)) {
-    throw new Error(`Decisions file not found: ${decisionsPath}`);
-  }
+export interface ResolveDirOpts {
+  /** Claude session id → per-interaction visual context from history. */
+  sessionId?: string;
+  /** Explicit visual generator; overrides the sessionId default. */
+  generateVisual?: GenerateVisual;
+  cols?: number;
+  rows?: number;
+}
 
-  const raw = readFileSync(decisionsPath, 'utf8');
-  const deck = validateInput(JSON.parse(raw));
-
+/**
+ * Resolve an interaction directory in place: mount the panel TUI keyed off
+ * `<dir>/progress.json`, and on finish (full completion OR human-finished
+ * with skips) write `<dir>/response.json` atomically and drop the progress
+ * file. A hard process kill leaves `progress.json` for a later resume —
+ * `tryResume` (unchanged logic) reads the new dir-derived path.
+ */
+export async function resolveInteractionDir(
+  dir: string,
+  deck: Deck,
+  opts: ResolveDirOpts = {},
+): Promise<{ responses: InteractionResponse[]; completedAt: string; responsePath: string }> {
   let conversationContext = '';
-  if (sessionId !== undefined) {
+  if (opts.sessionId !== undefined) {
     try {
-      const conv = readConversation(sessionId);
+      const conv = readConversation(opts.sessionId);
       conversationContext = conv.map((m) => `${m.role}: ${m.content}`).join('\n\n');
     } catch {
       // empty context — proceed without visuals context
@@ -312,9 +236,17 @@ export async function launchTui(
   }
 
   setupTerminal();
-  const { cols, rows } = getTerminalSize();
+  const term = getTerminalSize();
+  const cols = opts.cols ?? term.cols;
+  const rows = opts.rows ?? term.rows;
 
-  return new Promise<{ responses: InteractionResponse[]; completedAt: string }>((resolve) => {
+  const generateVisual: GenerateVisual | undefined =
+    opts.generateVisual ??
+    (opts.sessionId !== undefined
+      ? (interaction) => defaultGenerateVisual(interaction, conversationContext)
+      : undefined);
+
+  return new Promise<{ responses: InteractionResponse[]; completedAt: string; responsePath: string }>((resolve) => {
     let panel: MountedPanel | null = null;
     let prevFrameLocal: string[] = [];
     let lastResponses: InteractionResponse[] = [];
@@ -329,28 +261,30 @@ export async function launchTui(
       prevFrameLocal = nextPrevFrame;
     };
 
-    const onComplete = (responses: InteractionResponse[]) => {
+    const finalize = (responses: InteractionResponse[]) => {
       restoreTerminal();
       process.stdin.removeListener('data', onData);
       panel?.unmount();
-      resolve({ responses, completedAt: new Date().toISOString() });
+      const completedAt = new Date().toISOString();
+      // Resolved supersedes in-progress: write response.json, drop progress.json.
+      const rp = writeResponse(dir, responses, completedAt);
+      clearProgress(dir);
+      resolve({ responses, completedAt, responsePath: rp });
     };
 
     panel = mountPanel({
       deck,
-      progressPath: `${decisionsPath}.progress.json`,
+      progressPath: progressPathFor(dir),
       cols,
       rows,
-      generateVisual: sessionId !== undefined
-        ? (interaction) => defaultGenerateVisual(interaction, conversationContext)
-        : undefined,
+      generateVisual,
       onProgress: (responses) => {
         lastResponses = responses;
         if (panel !== null) flushHost(panel.render());
       },
-      onComplete,
+      onComplete: finalize,
       onExit: () => {
-        onComplete(lastResponses);
+        finalize(lastResponses);
       },
     });
 
@@ -363,4 +297,25 @@ export async function launchTui(
     };
     process.stdin.on('data', onData);
   });
+}
+
+// ── launchTui — file-path entry over the dir resolver (a kept public export
+//    per the interaction-layer plan; consumed until consumers move to ask()) ──
+
+export async function launchTui(
+  decisionsPath: string,
+  sessionId?: string,
+): Promise<{ responses: InteractionResponse[]; completedAt: string }> {
+  if (!existsSync(decisionsPath)) {
+    throw new Error(`Decisions file not found: ${decisionsPath}`);
+  }
+
+  const raw = readFileSync(decisionsPath, 'utf8');
+  const deck = validateInput(JSON.parse(raw));
+  // The interaction dir is the deck file's directory; progress/response live
+  // there per the convention.
+  const dir = dirname(resolvePath(decisionsPath));
+
+  const { responses, completedAt } = await resolveInteractionDir(dir, deck, { sessionId });
+  return { responses, completedAt };
 }

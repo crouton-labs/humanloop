@@ -1,6 +1,6 @@
 import { query } from '@r-cli/sdk';
-import { execSync } from 'child_process';
 import type { Interaction } from '../types.js';
+import { renderMarkdown } from '../render/termrender.js';
 
 const VISUAL_SYSTEM_PROMPT = `You're briefing a CTO-level engineer in the 30 seconds before they decide. They've been off this problem for days; they need a fast re-ground in what *already exists* — the files, data flow, or constraint they're deciding inside of — not a lecture on tradeoffs.
 
@@ -72,32 +72,6 @@ async function callHaiku(prompt: string, systemPrompt: string): Promise<string |
   }
 }
 
-function renderWithTermrender(markdown: string, width: number): string {
-  // First attempt
-  const result = tryTermrender(markdown, width);
-  if (result !== null) return result;
-
-  // Fallback: strip all directives and render as plain markdown
-  const stripped = markdown.replace(/^:{3,}\w*.*$/gm, '').trim();
-  const fallback = tryTermrender(stripped, width);
-  return fallback ?? markdown;
-}
-
-function tryTermrender(markdown: string, width: number): string | null {
-  try {
-    return execSync(`termrender -w ${width}`, {
-      input: markdown,
-      encoding: 'utf8',
-      timeout: 5000,
-      env: { ...process.env, TERMRENDER_COLOR: '1' },
-    }).trimEnd();
-  } catch (err) {
-    const stderr = (err as { stderr?: string }).stderr || '';
-    process.stderr.write(`[hl] termrender: ${stderr.split('\n')[0]}\n`);
-    return null;
-  }
-}
-
 // defaultGenerateVisual matches the GenerateVisual contract for use with
 // mountPanel. Width is read from process.stdout.columns so callers that
 // embed humanloop in a sub-region should supply their own closure that bakes
@@ -122,7 +96,7 @@ export async function defaultGenerateVisual(interaction: Interaction, conversati
       .replace(/^```[\w]*\n?/gm, '')
       .replace(/^```\s*$/gm, '')
       .trim();
-    const ansi = renderWithTermrender(markdown, width);
+    const ansi = renderMarkdown(markdown, width).join('\n');
     return { ok: true, ansi, markdown };
   }
   return { ok: false, error: 'haiku returned no output' };

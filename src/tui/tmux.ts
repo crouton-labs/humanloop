@@ -2,16 +2,13 @@ import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { InteractionResponse } from '../types.js';
-
-export interface TuiOutput {
-  responses: InteractionResponse[];
-  completedAt: string;
-}
+import type { ResolutionEnvelope } from '../types.js';
 
 export interface TmuxDispatchOpts {
   sessionId?: string;
   visuals: boolean;
+  /** Interaction dir forwarded to the child so response.json lands there. */
+  dir: string;
 }
 
 
@@ -28,8 +25,10 @@ function buildChildCmd(file: string, resultPath: string, opts: TmuxDispatchOpts)
   const parts = [
     shellQuote(process.execPath),
     shellQuote(scriptPath),
-    'create',
+    'ask',
     shellQuote(file),
+    '--dir',
+    shellQuote(opts.dir),
     '--write-to',
     shellQuote(resultPath),
   ];
@@ -45,9 +44,9 @@ function buildChildCmd(file: string, resultPath: string, opts: TmuxDispatchOpts)
 export async function dispatchToTmuxPane(
   file: string,
   opts: TmuxDispatchOpts,
-): Promise<TuiOutput> {
-  const dir = mkdtempSync(join(tmpdir(), 'hl-'));
-  const resultPath = join(dir, 'result.json');
+): Promise<ResolutionEnvelope> {
+  const parentTmp = mkdtempSync(join(tmpdir(), 'hl-'));
+  const resultPath = join(parentTmp, 'result.json');
 
   const cmd = buildChildCmd(file, resultPath, opts);
   // Capture the spawned pane id so we can detect if the user closes it
@@ -84,6 +83,6 @@ export async function dispatchToTmuxPane(
 
   const json = readFileSync(resultPath, 'utf8');
   try { unlinkSync(resultPath); } catch { /* ignore */ }
-  try { rmdirSync(dir); } catch { /* ignore */ }
-  return JSON.parse(json) as TuiOutput;
+  try { rmdirSync(parentTmp); } catch { /* ignore */ }
+  return JSON.parse(json) as ResolutionEnvelope;
 }
