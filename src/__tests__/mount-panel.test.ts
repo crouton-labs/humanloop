@@ -93,7 +93,7 @@ const roundTripDeck: Deck = {
     },
     {
       id: 'i2', title: 'Pick ORM',
-      options: [{ id: 'opt-0', label: 'Prisma', shortcut: 'p' }, { id: 'opt-1', label: 'Drizzle', shortcut: 'd' }],
+      options: [{ id: 'opt-0', label: 'Prisma', shortcut: 'p' }, { id: 'opt-1', label: 'Drizzle', shortcut: 'z' }],
       allowFreetext: true,
       kind: 'decision',
     },
@@ -127,8 +127,8 @@ for (const ch of 'looks good') {
 }
 rtPanel2.handleKey('', RETURN); // commit option + comment
 
-// Now at i2: press 'd' for Drizzle
-rtPanel2.handleKey('d', mkKey({}));
+// Now at i2: press 'z' for Drizzle
+rtPanel2.handleKey('z', mkKey({}));
 
 // Now at i3 (freetext-only): press 'r' to open freetext mode
 rtPanel2.handleKey('r', mkKey({}));
@@ -227,9 +227,7 @@ const ftPanel = mountPanel({
   onComplete: (responses) => { capturedFreetextEmpty = responses; },
 });
 
-// overview → item-review
-ftPanel.handleKey('', RETURN);
-// Enter input mode ('r' opens freetext)
+// Single-item deck starts directly in item-review (no overview). 'r' opens freetext.
 ftPanel.handleKey('r', mkKey({}));
 // Submit with empty buffer (no typing)
 ftPanel.handleKey('', RETURN);
@@ -263,9 +261,7 @@ const cmPanel = mountPanel({
   onComplete: (responses) => { capturedCommentEmpty = responses; },
 });
 
-// overview → item-review
-cmPanel.handleKey('', RETURN);
-// Navigate to [c] row to enter comment mode WITHOUT pre-attaching an option
+// Single-item deck starts directly in item-review. Navigate to [c] row WITHOUT pre-attaching.
 cmPanel.handleKey('j', mkKey({}));
 // Enter comment mode (no option attached — cursor on [c] row)
 cmPanel.handleKey('c', mkKey({}));
@@ -306,9 +302,7 @@ const stPanel = mountPanel({
   onComplete: (responses) => { capturedShortcutTyping = responses; },
 });
 
-// overview → item-review
-stPanel.handleKey('', RETURN);
-// Navigate to [c] row so 'c' enters comment mode without pre-attaching an option
+// Single-item deck starts directly in item-review. Navigate to [c] row.
 stPanel.handleKey('j', mkKey({}));
 stPanel.handleKey('j', mkKey({}));
 // Enter comment mode (no option attached)
@@ -351,7 +345,7 @@ const atPanel = mountPanel({
   onComplete: (responses) => { capturedAttach = responses; },
 });
 
-atPanel.handleKey('', RETURN); // overview → item-review (selectedAction = 0, on 'yes' row)
+// Single-item deck starts directly in item-review (selectedAction = 0, on 'yes' row)
 atPanel.handleKey('c', mkKey({})); // enter comment with 'yes' pre-attached
 for (const ch of 'lgtm') atPanel.handleKey(ch, mkKey({}));
 atPanel.handleKey('', RETURN); // submit
@@ -374,7 +368,7 @@ const tabPanel = mountPanel({
   onComplete: (responses) => { capturedTab = responses; },
 });
 
-tabPanel.handleKey('', RETURN); // overview → item-review
+// Single-item deck starts directly in item-review. Navigate to [c] row.
 // Navigate cursor to [c] row (selectedAction = 2 — past both option rows)
 tabPanel.handleKey('j', mkKey({}));
 tabPanel.handleKey('j', mkKey({}));
@@ -397,5 +391,49 @@ assert.deepEqual(
   'Tab in comment mode must cycle attached option (none → opt1 → opt2 → none)',
 );
 tabPanel.unmount();
+
+// ── Test 12: multi-select — Space/shortcut toggle, Enter confirms set ─────────
+
+const multiDeck: Deck = {
+  interactions: [
+    {
+      id: 'ms1', title: 'Pick toppings', multiSelect: true,
+      options: [
+        { id: 'mush', label: 'Mushroom', shortcut: 'a' },
+        { id: 'onion', label: 'Onion', shortcut: 'b' },
+        { id: 'olive', label: 'Olive', shortcut: 'x' },
+      ],
+    },
+  ],
+};
+
+let capturedMulti: InteractionResponse[] = [];
+const msPanel = mountPanel({
+  deck: multiDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: (responses) => { capturedMulti = responses; },
+});
+
+// Single-item deck starts in item-review, cursor on option 0 ('mush').
+msPanel.handleKey(' ', mkKey({}));          // toggle 'mush' on
+msPanel.handleKey('j', mkKey({}));          // cursor → 'onion'
+msPanel.handleKey(' ', mkKey({}));          // toggle 'onion' on
+msPanel.handleKey(' ', mkKey({}));          // toggle 'onion' back off
+const midRender = msPanel.render().join('\n');
+assert.ok(
+  midRender.includes('[x]') && midRender.includes('[ ]'),
+  'multi-select must render checked [x] and unchecked [ ] boxes',
+);
+msPanel.handleKey('x', mkKey({}));          // shortcut toggles 'olive' on (no advance)
+msPanel.handleKey('', RETURN);              // confirm set + advance → final
+msPanel.handleKey('', RETURN);              // final → complete
+
+assert.deepEqual(
+  capturedMulti,
+  [{ id: 'ms1', selectedOptionIds: ['mush', 'olive'] }],
+  'multi-select must accumulate toggled options and return them as selectedOptionIds',
+);
+msPanel.unmount();
 
 console.log('OK');

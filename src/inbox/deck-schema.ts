@@ -21,6 +21,7 @@ const interactionSchema = z.object({
   body: z.string().optional(),
   bodyPath: z.string().optional(),
   options: z.array(interactionOptionSchema),
+  multiSelect: z.boolean().optional(),
   allowFreetext: z.boolean().optional(),
   freetextLabel: z.string().optional(),
   kind: z.enum(['notify', 'validation', 'decision', 'context', 'error']).optional(),

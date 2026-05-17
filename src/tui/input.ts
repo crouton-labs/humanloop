@@ -109,7 +109,11 @@ function handleOverview(
   if (interaction !== undefined) {
     const matched = interaction.options.find((o) => o.shortcut === input);
     if (matched !== undefined) {
-      submitOption(state, interaction, matched.id, undefined);
+      if (interaction.multiSelect) {
+        toggleMulti(state, interaction, matched.id);
+      } else {
+        submitOption(state, interaction, matched.id, undefined);
+      }
       // Don't auto-advance the cursor — users may want to re-answer the same
       // question. The response icon flips ✓ and they can j/k away when ready.
       render();
@@ -130,6 +134,13 @@ function handleItemReview(
   if (input === 'n') { advanceItem(state, 1); render(); return; }
   if (input === 'p') { advanceItem(state, -1); render(); return; }
   if (input === 'q') { state.phase = 'overview'; render(); return; }
+  // Space toggles the focused option for multi-select; otherwise expand context.
+  if (input === ' ' && interaction.multiSelect
+      && state.selectedAction < interaction.options.length) {
+    toggleMulti(state, interaction, interaction.options[state.selectedAction]!.id);
+    render();
+    return;
+  }
   if (input === ' ') { state.detailExpanded = !state.detailExpanded; render(); return; }
 
   // Body scroll: u/d or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
@@ -171,19 +182,24 @@ function handleInteractionAction(
 ): void {
   const opts = interaction.options;
 
-  // Match by shortcut
+  // Match by shortcut. Multi-select toggles (stay put); single-select submits.
   const matched = opts.find((o) => o.shortcut === input);
   if (matched !== undefined) {
+    if (interaction.multiSelect) {
+      toggleMulti(state, interaction, matched.id);
+      render();
+      return;
+    }
     submitOption(state, interaction, matched.id, undefined);
     advanceItem(state, 1);
     render();
     return;
   }
 
-  // Comment mode: allowFreetext + options exist
-  // If the cursor is on an option row, pre-attach that option to the comment.
+  // Comment mode: allowFreetext + options exist. Multi-select carries its
+  // checked set on submit, so don't pre-attach a single option.
   if (input === 'c' && interaction.allowFreetext && opts.length > 0) {
-    const preselected = state.selectedAction < opts.length
+    const preselected = !interaction.multiSelect && state.selectedAction < opts.length
       ? opts[state.selectedAction]!.id
       : undefined;
     state.inputMode = preselected !== undefined
@@ -204,8 +220,15 @@ function handleInteractionAction(
     }
   }
 
-  // Enter on selected option row
+  // Enter on selected option row. Multi-select confirms the accumulated set
+  // and advances; single-select picks that one option.
   if (key.return && state.selectedAction < opts.length) {
+    if (interaction.multiSelect) {
+      commitMulti(state, interaction);
+      advanceItem(state, 1);
+      render();
+      return;
+    }
     const o = opts[state.selectedAction]!;
     submitOption(state, interaction, o.id, undefined);
     advanceItem(state, 1);
@@ -258,8 +281,12 @@ function handleInputMode(
 
   if (key.return) {
     const interaction = state.interactions[state.currentIndex]!;
-    const attached = mode.kind === 'comment' ? mode.selectedOptionId : undefined;
-    submitOption(state, interaction, attached, mode.buffer);
+    if (interaction.multiSelect) {
+      commitMulti(state, interaction, mode.buffer);
+    } else {
+      const attached = mode.kind === 'comment' ? mode.selectedOptionId : undefined;
+      submitOption(state, interaction, attached, mode.buffer);
+    }
     state.inputMode = null;
     advanceItem(state, 1);
     render();
@@ -330,6 +357,39 @@ function submitOption(
   const response: InteractionResponse = { id: interaction.id };
   if (selectedOptionId !== undefined) response.selectedOptionId = selectedOptionId;
   if (freetext !== undefined) response.freetext = freetext;
+  state.responses.set(interaction.id, response);
+  state.persist?.();
+}
+
+// ── Multi-select ─────────────────────────────────────────────────────────────
+// Toggle/commit write progressively into state.responses (mirrors single-select
+// submitOption immediacy); Enter just confirms the accumulated set + advances.
+
+function toggleMulti(state: TuiState, interaction: Interaction, optionId: string): void {
+  const existing = state.responses.get(interaction.id);
+  const set = new Set(existing?.selectedOptionIds ?? []);
+  if (set.has(optionId)) set.delete(optionId);
+  else set.add(optionId);
+  const response: InteractionResponse = { id: interaction.id, selectedOptionIds: [...set] };
+  if (existing?.freetext !== undefined) response.freetext = existing.freetext;
+  state.responses.set(interaction.id, response);
+  state.persist?.();
+}
+
+/** Ensure a (possibly empty) response exists so the interaction counts as
+ *  answered, optionally setting/replacing freetext. */
+function commitMulti(
+  state: TuiState,
+  interaction: Interaction,
+  freetext?: string,
+): void {
+  const existing = state.responses.get(interaction.id);
+  const response: InteractionResponse = {
+    id: interaction.id,
+    selectedOptionIds: [...(existing?.selectedOptionIds ?? [])],
+  };
+  const ft = freetext ?? existing?.freetext;
+  if (ft !== undefined) response.freetext = ft;
   state.responses.set(interaction.id, response);
   state.persist?.();
 }

@@ -18,6 +18,9 @@ export interface Interaction {
   body?: string;
   bodyPath?: string;
   options: InteractionOption[];
+  /** When true the human can check multiple options; the response carries
+   *  `selectedOptionIds`. Absent/false = single-select (unchanged). */
+  multiSelect?: boolean;
   allowFreetext?: boolean;
   freetextLabel?: string;
   kind?: InteractionKind;
@@ -25,7 +28,10 @@ export interface Interaction {
 
 export interface InteractionResponse {
   id: string;
+  /** Single-select pick. */
   selectedOptionId?: string;
+  /** Multi-select picks (set only for `multiSelect` interactions). */
+  selectedOptionIds?: string[];
   freetext?: string;
 }
 

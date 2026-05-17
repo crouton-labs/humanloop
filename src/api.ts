@@ -26,13 +26,20 @@ function buildSummary(deck: Deck, responses: InteractionResponse[]): string {
   for (const it of deck.interactions) {
     const r = byId.get(it.id);
     if (r === undefined) continue;
-    const opt = r.selectedOptionId !== undefined
-      ? it.options.find((o) => o.id === r.selectedOptionId)
-      : undefined;
     const ft = r.freetext !== undefined && r.freetext !== '' ? r.freetext : undefined;
+    let picked: string | undefined;
+    if (r.selectedOptionIds !== undefined) {
+      const labels = r.selectedOptionIds
+        .map((id) => it.options.find((o) => o.id === id))
+        .filter((o): o is NonNullable<typeof o> => o !== undefined)
+        .map((o) => o.label);
+      picked = labels.length > 0 ? labels.join(', ') : undefined;
+    } else if (r.selectedOptionId !== undefined) {
+      picked = it.options.find((o) => o.id === r.selectedOptionId)?.label;
+    }
     let val: string;
-    if (opt !== undefined && ft !== undefined) val = `${opt.label} — ${ft}`;
-    else if (opt !== undefined) val = opt.label;
+    if (picked !== undefined && ft !== undefined) val = `${picked} — ${ft}`;
+    else if (picked !== undefined) val = picked;
     else if (ft !== undefined) val = ft;
     else val = '(skipped)';
     lines.push(`${it.title}: ${val}`);

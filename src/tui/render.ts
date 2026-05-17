@@ -287,9 +287,10 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
       ? interaction.freetextLabel
       : state.inputMode.kind === 'comment' ? 'Comment' : 'Response';
 
-    // Show attached option (comment mode only) — Tab cycles
+    // Show attached option (single-select comment mode only) — Tab cycles.
+    // Multi-select comments carry the checked set, so no attach line.
     let attachedLine: string | undefined;
-    if (state.inputMode.kind === 'comment') {
+    if (state.inputMode.kind === 'comment' && !interaction.multiSelect) {
       const attachedId = state.inputMode.selectedOptionId;
       const opts = interaction.options;
       if (opts.length > 0) {
@@ -343,11 +344,18 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   }
 
   // Footer hint — mention scroll keys when body overflows
-  const footerParts = [
-    `${DIM}n/p${RESET} prev/next`,
-    `${DIM}space${RESET} expand`,
-    `${DIM}q${RESET} overview`,
-  ];
+  const footerParts = interaction.multiSelect === true
+    ? [
+        `${DIM}n/p${RESET} prev/next`,
+        `${DIM}space${RESET} toggle`,
+        `${DIM}enter${RESET} confirm`,
+        `${DIM}q${RESET} overview`,
+      ]
+    : [
+        `${DIM}n/p${RESET} prev/next`,
+        `${DIM}space${RESET} expand`,
+        `${DIM}q${RESET} overview`,
+      ];
   if (overflows) footerParts.unshift(`${DIM}u/d${RESET} scroll`);
   const footer = `  ${footerParts.join('  ')}`;
 
@@ -375,7 +383,9 @@ function renderActions(
   const opts = interaction.options;
   // Prefix on first row: "  X [s] " — 2 + 1 (cursor) + 1 + 3 ([s]) + 1 = 8 visible cols.
   // Continuation rows align under the label so each option reads as a block.
-  const prefixWidth = 8;
+  const multi = interaction.multiSelect === true;
+  const checked = new Set(existing?.selectedOptionIds ?? []);
+  const prefixWidth = multi ? 12 : 8;
   const indent = ' '.repeat(prefixWidth);
   const contentMax = Math.max(20, maxW - prefixWidth);
 
@@ -384,10 +394,13 @@ function renderActions(
     const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     const sc = o.shortcut ?? ' ';
     const keyBadge = `${DIM}[${sc}]${RESET}`;
+    const box = multi
+      ? (checked.has(o.id) ? `${GREEN}[x]${RESET}` : `${DIM}[ ]${RESET}`) + ' '
+      : '';
 
     const labelLines = wrap(sanitize(o.label), contentMax);
     for (let j = 0; j < labelLines.length; j++) {
-      const prefix = j === 0 ? `  ${cursor} ${keyBadge} ` : indent;
+      const prefix = j === 0 ? `  ${cursor} ${box}${keyBadge} ` : indent;
       lines.push(`${prefix}${labelLines[j]}`);
     }
     if (o.description) {
@@ -462,6 +475,15 @@ export function renderFinal(state: TuiState, cols: number, rows: number): string
 }
 
 export function responseSummary(r: InteractionResponse, interaction: Interaction): string {
+  if (r.selectedOptionIds !== undefined) {
+    const labels = r.selectedOptionIds
+      .map((id) => interaction.options.find((o) => o.id === id))
+      .filter((o): o is NonNullable<typeof o> => o !== undefined)
+      .map((o) => sanitize(o.label));
+    const picks = labels.length > 0 ? labels.join(', ') : '(none)';
+    if (r.freetext) return `${picks}: "${sanitize(r.freetext)}"`;
+    return picks;
+  }
   const opt = r.selectedOptionId
     ? interaction.options.find((o) => o.id === r.selectedOptionId)
     : undefined;

@@ -35,13 +35,13 @@ let rendererState: RendererState = 'unchecked';
 function binaryOk(): boolean {
   if (!existsSync(VENV_BIN)) return false;
   try {
-    const out = execFileSync(VENV_BIN, ['--version'], {
+    // v2 contract: no --version flag; use -h (exit 0) as a liveness check.
+    execFileSync(VENV_BIN, ['-h'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 5000,
     });
-    const m = out.match(/\d+\.\d+\.\d+/);
-    return m?.[0] === TERMRENDER_VERSION;
+    return true;
   } catch {
     return false;
   }
@@ -105,7 +105,7 @@ export function ensureRenderer(): void {
 
   rendererState = binaryOk() ? 'ready' : 'unavailable';
   if (rendererState === 'unavailable') {
-    process.stderr.write('[hl] termrender install completed but version check failed; using plaintext fallback\n');
+    process.stderr.write('[hl] termrender install completed but health check failed; using plaintext fallback\n');
   }
 }
 
@@ -185,12 +185,12 @@ export function renderMarkdown(md: string, width: number): string[] {
   ensureRenderer();
   if (rendererState === 'ready') {
     try {
-      const out = execFileSync(VENV_BIN, ['--width', String(width)], {
-        input: md,
+      const input = JSON.stringify({ source: md, width, color: true });
+      const out = execFileSync(VENV_BIN, ['doc', 'render'], {
+        input,
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, TERMRENDER_COLOR: '1' },
       });
       const lines = out.split('\n');
       if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
@@ -206,29 +206,52 @@ export function renderMarkdown(md: string, width: number): string[] {
   return fallback;
 }
 
-/** Validate markdown via `termrender --check` (exit 0 ok / non-zero error). */
+/** Validate markdown via `termrender doc check`. */
 export function checkMarkdown(md: string): { ok: true } | { ok: false; error: string } {
   ensureRenderer();
   // Renderer unavailable → don't block validation; the body just renders as
   // plaintext later. Bricking deck validation here would be the wrong default.
   if (rendererState !== 'ready') return { ok: true };
 
-  const result = spawnSync(VENV_BIN, ['--check'], {
-    input: md,
+  const input = JSON.stringify({ source: md });
+  const result = spawnSync(VENV_BIN, ['doc', 'check'], {
+    input,
     encoding: 'utf-8',
     timeout: 5000,
   });
+
   if (result.error) {
-    return { ok: false, error: `termrender invocation failed: ${result.error.message}` };
+    return { ok: false, error: `termrender: invocation failed: ${result.error.message}` };
   }
+
+  type CheckResult = { ok: boolean; errors?: Array<{ kind?: string; message?: string }> };
+  let parsed: CheckResult | null = null;
+  const rawStdout: string = typeof result.stdout === 'string' ? result.stdout : '';
+  if (rawStdout) {
+    try {
+      parsed = JSON.parse(rawStdout.trim()) as CheckResult;
+    } catch {
+      // stdout not parseable — fall through to exit-code handling
+    }
+  }
+
+  if (parsed !== null) {
+    if (parsed.ok) return { ok: true };
+    const first = Array.isArray(parsed.errors) ? parsed.errors[0] : undefined;
+    const msg = (first && typeof first.message === 'string' && first.message) ? first.message : 'invalid markdown';
+    return { ok: false, error: `termrender: ${msg}` };
+  }
+
+  // exit code 2 = invalid per contract; any non-zero is an error
   if (result.status !== 0) {
-    return { ok: false, error: `termrender --check exited ${result.status}: ${(result.stderr || '').toString().trim()}` };
+    return { ok: false, error: `termrender: doc check exited ${result.status}` };
   }
+
   return { ok: true };
 }
 
 export interface DisplayInPaneOpts {
-  /** Pass `--watch` so the pane live-updates on file edits. Default true. */
+  /** Pass watch so the pane live-updates on file edits. Default true. */
   watch?: boolean;
   /** Open in a new tmux window instead of splitting the current one. */
   newWindow?: boolean;
@@ -243,13 +266,33 @@ export function displayInPane(path: string, opts: DisplayInPaneOpts = {}): { pan
   ensureRenderer();
   if (rendererState !== 'ready') return {};
 
-  const args = ['--tmux'];
-  if (opts.watch !== false) args.push('--watch');
-  if (opts.newWindow) args.push('--tmux-new-window');
-  args.push(path);
+  const input = JSON.stringify({
+    path,
+    watch: opts.watch !== false,
+    window: opts.newWindow ? 'new' : 'split',
+  });
 
-  const result = spawnSync(VENV_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = spawnSync(VENV_BIN, ['pane', 'open'], {
+    input,
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
   if (result.error || result.status !== 0) return {};
-  const paneId = (result.stdout?.toString() || '').trim();
-  return paneId ? { paneId } : {};
+
+  // `encoding: 'utf-8'` makes spawnSync return stdout as a string.
+  const rawStdout = result.stdout;
+  if (!rawStdout) return {};
+
+  let parsed: { pane_id?: string } | null = null;
+  try {
+    parsed = JSON.parse(rawStdout.trim()) as { pane_id?: string };
+  } catch {
+    return {};
+  }
+
+  if (parsed && typeof parsed.pane_id === 'string' && parsed.pane_id) {
+    return { paneId: parsed.pane_id };
+  }
+  return {};
 }
