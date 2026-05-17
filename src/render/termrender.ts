@@ -47,6 +47,25 @@ function binaryOk(): boolean {
   }
 }
 
+// Returns the termrender version installed in the managed venv (via
+// importlib.metadata), or null if the venv is missing/broken or termrender is
+// not installed. Used by ensureRenderer() to detect drift from the pin and
+// trigger a reinstall — otherwise a venv provisioned at an older pin sticks
+// forever (binaryOk passes for any working binary, regardless of version).
+function installedVersion(): string | null {
+  if (!existsSync(VENV_PYTHON)) return null;
+  try {
+    const out = execFileSync(
+      VENV_PYTHON,
+      ['-c', 'import importlib.metadata as m; print(m.version("termrender"))'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 },
+    );
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function uvAvailable(): boolean {
   try {
     execFileSync('uv', ['--version'], { stdio: 'pipe', timeout: 5000 });
@@ -74,7 +93,7 @@ export function ensureRenderer(): void {
     return;
   }
 
-  if (binaryOk()) {
+  if (binaryOk() && installedVersion() === TERMRENDER_VERSION) {
     rendererState = 'ready';
     return;
   }
@@ -89,7 +108,12 @@ export function ensureRenderer(): void {
   }
 
   try {
-    execFileSync('uv', ['venv', VENV_DIR], { stdio: 'pipe', timeout: 60000 });
+    // Skip venv creation on drift (venv exists with wrong termrender version)
+    // — `uv pip install` into the existing venv replaces it in place. Only
+    // create when the venv directory is genuinely absent.
+    if (!existsSync(VENV_DIR)) {
+      execFileSync('uv', ['venv', VENV_DIR], { stdio: 'pipe', timeout: 60000 });
+    }
     execFileSync(
       'uv',
       ['pip', 'install', '--python', VENV_PYTHON, `termrender==${TERMRENDER_VERSION}`],
@@ -103,7 +127,7 @@ export function ensureRenderer(): void {
     return;
   }
 
-  rendererState = binaryOk() ? 'ready' : 'unavailable';
+  rendererState = (binaryOk() && installedVersion() === TERMRENDER_VERSION) ? 'ready' : 'unavailable';
   if (rendererState === 'unavailable') {
     process.stderr.write('[hl] termrender install completed but health check failed; using plaintext fallback\n');
   }
