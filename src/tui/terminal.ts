@@ -4,6 +4,7 @@ export interface Key {
   return: boolean;
   escape: boolean;
   ctrl: boolean;
+  meta: boolean;
   tab: boolean;
   backspace: boolean;
 }
@@ -17,6 +18,7 @@ function emptyKey(): Key {
     return: false,
     escape: false,
     ctrl: false,
+    meta: false,
     tab: false,
     backspace: false,
   };
@@ -29,6 +31,13 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
   if (str === '\x1b[A') { key.upArrow = true; return { input: '', key }; }
   if (str === '\x1b[B') { key.downArrow = true; return { input: '', key }; }
   if (str === '\r' || str === '\n') { key.return = true; return { input: '', key }; }
+  // Alt+Backspace: terminals send ESC followed by DEL/BS. Must precede the
+  // bare-ESC check so the two-byte sequence isn't swallowed as plain escape.
+  if (str === '\x1b\x7f' || str === '\x1b\b') {
+    key.meta = true;
+    key.backspace = true;
+    return { input: '', key };
+  }
   if (str === '\x1b') { key.escape = true; return { input: '', key }; }
   if (str === '\t') { key.tab = true; return { input: '', key }; }
   if (str === '\x7f' || str === '\b') { key.backspace = true; return { input: '', key }; }

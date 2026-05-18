@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 function mkKey(partial: Partial<Key>): Key {
   return {
     ctrl: false,
+    meta: false,
     upArrow: false,
     downArrow: false,
     return: false,

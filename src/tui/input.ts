@@ -294,6 +294,12 @@ function handleInputMode(
     return;
   }
 
+  if (key.backspace && key.meta) {
+    mode.buffer = deleteWordBack(mode.buffer);
+    render();
+    return;
+  }
+
   if (key.backspace) {
     const chars = [...mode.buffer];
     chars.pop();
@@ -310,6 +316,13 @@ function handleInputMode(
     mode.buffer += cleaned;
     render();
   }
+}
+
+function deleteWordBack(buffer: string): string {
+  const chars = [...buffer];
+  while (chars.length > 0 && /\s/.test(chars[chars.length - 1]!)) chars.pop();
+  while (chars.length > 0 && !/\s/.test(chars[chars.length - 1]!)) chars.pop();
+  return chars.join('');
 }
 
 // ── Final ────────────────────────────────────────────────────────────────────
