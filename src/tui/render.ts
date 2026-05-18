@@ -175,7 +175,10 @@ export function renderOverview(state: TuiState, cols: number, rows: number): str
   for (let i = 0; i < state.interactions.length; i++) {
     const interaction = state.interactions[i]!;
     const response = state.responses.get(interaction.id);
-    const icon = response ? `${GREEN}✓${RESET}` : `${DIM}○${RESET}`;
+    const preAnswered = state.preAnsweredIds.has(interaction.id);
+    const icon = response
+      ? (preAnswered ? `${DIM}◆${RESET}` : `${GREEN}✓${RESET}`)
+      : `${DIM}○${RESET}`;
     const label = singleLine(interaction.title);
     const cursor = i === state.currentIndex ? `${CYAN}▸${RESET} ` : '  ';
     const labelMax = Math.max(10, cols - 16);
@@ -246,6 +249,16 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
     for (const line of wrap(sanitize(interaction.subtitle), maxW)) {
       preLines.push(`  ${DIM}${line}${RESET}`);
     }
+  }
+  // "Previously answered" marker — shown only while the seed is intact (no user
+  // override yet). The label comes from preAnswered.label so callers can be
+  // domain-specific ("Previously approved", "Carried over from prior pass").
+  if (state.preAnsweredIds.has(interaction.id)) {
+    const customLabel = interaction.preAnswered !== undefined ? interaction.preAnswered.label : undefined;
+    const label = typeof customLabel === 'string' && customLabel.length > 0
+      ? customLabel
+      : 'Previously answered';
+    preLines.push(`  ${DIM}${ITALIC}◆ ${sanitize(label)} — press n/p to review, or any option to override${RESET}`);
   }
 
   // Body: rendered question body + expanded visual block (scrollable)
@@ -452,7 +465,10 @@ export function renderFinal(state: TuiState, cols: number, rows: number): string
   const questionRows: string[] = [];
   for (const interaction of state.interactions) {
     const response = state.responses.get(interaction.id);
-    const icon = response ? `${GREEN}✓${RESET}` : `${YELLOW}○${RESET}`;
+    const preAnswered = state.preAnsweredIds.has(interaction.id);
+    const icon = response
+      ? (preAnswered ? `${DIM}◆${RESET}` : `${GREEN}✓${RESET}`)
+      : `${YELLOW}○${RESET}`;
     const label = singleLine(interaction.title);
     questionRows.push(`  ${icon} ${truncate(label, Math.max(10, maxW - 4))}`);
     if (response) {

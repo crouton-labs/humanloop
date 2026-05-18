@@ -14,6 +14,13 @@ export const interactionOptionSchema = z.object({
   shortcut: z.string().optional(),
 });
 
+export const preAnswerSchema = z.object({
+  selectedOptionId: z.string().optional(),
+  selectedOptionIds: z.array(z.string()).optional(),
+  freetext: z.string().optional(),
+  label: z.string().optional(),
+});
+
 const interactionSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]+$/, { error: 'interaction id must match /^[A-Za-z0-9_-]+$/' }).min(1).max(64),
   title: z.string().min(1, { error: 'title must be non-empty' }),
@@ -25,6 +32,7 @@ const interactionSchema = z.object({
   allowFreetext: z.boolean().optional(),
   freetextLabel: z.string().optional(),
   kind: z.enum(['notify', 'validation', 'decision', 'context', 'error']).optional(),
+  preAnswered: preAnswerSchema.optional(),
 });
 
 const deckSourceSchema = z.object({

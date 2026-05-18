@@ -437,4 +437,211 @@ assert.deepEqual(
 );
 msPanel.unmount();
 
+// ── Test 13: preAnswered seeds responses and renders with ◆ marker ────────────
+
+const preAnsweredDeck: Deck = {
+  interactions: [
+    {
+      id: 'r1', title: 'Carry-over requirement',
+      options: [
+        { id: 'approve', label: 'Approve', shortcut: 'a' },
+        { id: 'reject',  label: 'Reject',  shortcut: 'r' },
+      ],
+      allowFreetext: true,
+      preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
+    },
+    {
+      id: 'r2', title: 'Fresh requirement',
+      options: [
+        { id: 'approve', label: 'Approve', shortcut: 'a' },
+        { id: 'reject',  label: 'Reject',  shortcut: 'r' },
+      ],
+    },
+  ],
+};
+
+const paPanel = mountPanel({ deck: preAnsweredDeck, cols: 80, rows: 24 });
+const paOverview = paPanel.render().join('\n');
+assert.ok(
+  paOverview.includes('◆'),
+  'overview must render ◆ marker for preAnswered interaction',
+);
+assert.ok(
+  paOverview.includes('1/2'),
+  'overview must count preAnswered as answered (1/2)',
+);
+paPanel.unmount();
+
+// ── Test 14: currentIndex starts on first unanswered ──────────────────────────
+
+const skipStartDeck: Deck = {
+  interactions: [
+    {
+      id: 's1', title: 'Carried-1',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+      preAnswered: { selectedOptionId: 'approve' },
+    },
+    {
+      id: 's2', title: 'Carried-2',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+      preAnswered: { selectedOptionId: 'approve' },
+    },
+    {
+      id: 's3', title: 'Needs answer',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+  ],
+};
+
+const startPanel = mountPanel({ deck: skipStartDeck, cols: 80, rows: 24 });
+// Enter overview → item-review. Cursor should already be on s3 (first unanswered).
+startPanel.handleKey('', RETURN);
+const startReview = startPanel.render().join('\n');
+assert.ok(
+  startReview.includes('Needs answer'),
+  'cursor lands on first unanswered interaction at mount, not the first preAnswered',
+);
+assert.ok(
+  startReview.includes('3/3'),
+  'item-review position counter shows 3/3 — third of three',
+);
+startPanel.unmount();
+
+// ── Test 15: post-answer submit skips pre-answered, lands on next unanswered ──
+
+const skipMidDeck: Deck = {
+  interactions: [
+    {
+      id: 'm1', title: 'Fresh-1',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+    {
+      id: 'm2', title: 'Carried',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+      preAnswered: { selectedOptionId: 'approve' },
+    },
+    {
+      id: 'm3', title: 'Fresh-2',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+  ],
+};
+
+let capturedSkip: InteractionResponse[] = [];
+const skipMidPanel = mountPanel({
+  deck: skipMidDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: (responses) => { capturedSkip = responses; },
+});
+
+// overview → item-review on m1 (first unanswered).
+skipMidPanel.handleKey('', RETURN);
+// Answer m1 with shortcut 'a' — post-submit advance should skip m2, land on m3.
+skipMidPanel.handleKey('a', mkKey({}));
+const afterFirst = skipMidPanel.render().join('\n');
+assert.ok(
+  afterFirst.includes('Fresh-2'),
+  'after answering m1, post-submit advance must skip preAnswered m2 and land on m3',
+);
+// Answer m3 with 'a' — should now exit to final.
+skipMidPanel.handleKey('a', mkKey({}));
+skipMidPanel.handleKey('', RETURN); // final → complete
+assert.deepEqual(
+  capturedSkip,
+  [
+    { id: 'm1', selectedOptionId: 'approve' },
+    { id: 'm2', selectedOptionId: 'approve' },
+    { id: 'm3', selectedOptionId: 'approve' },
+  ],
+  'preAnswered response carried through to onComplete output',
+);
+skipMidPanel.unmount();
+
+// ── Test 16: n/p still steps onto pre-answered (no skip) ──────────────────────
+
+const npReachDeck: Deck = {
+  interactions: [
+    {
+      id: 'n1', title: 'Fresh',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+    {
+      id: 'n2', title: 'Carried',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+      preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
+    },
+    {
+      id: 'n3', title: 'Also fresh',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+  ],
+};
+
+const npPanel = mountPanel({ deck: npReachDeck, cols: 80, rows: 24 });
+npPanel.handleKey('', RETURN);          // overview → item-review on n1 (first unanswered)
+npPanel.handleKey('n', mkKey({}));      // raw 'n' should step to n2 even though it's pre-answered
+const onPreAnswered = npPanel.render().join('\n');
+assert.ok(
+  onPreAnswered.includes('Carried'),
+  'raw n must reach the pre-answered interaction (no skip on single-step nav)',
+);
+assert.ok(
+  onPreAnswered.includes('Previously approved'),
+  'item-review of pre-answered shows the preAnswered.label marker',
+);
+npPanel.handleKey('p', mkKey({}));      // raw 'p' steps back to n1
+const backToFirst = npPanel.render().join('\n');
+assert.ok(
+  backToFirst.includes('Fresh') && !backToFirst.includes('Carried'),
+  'raw p steps back single-step',
+);
+npPanel.unmount();
+
+// ── Test 17: user override clears preAnsweredIds and updates response ─────────
+
+const overrideDeck: Deck = {
+  interactions: [
+    {
+      id: 'o1', title: 'Carried, may override',
+      options: [
+        { id: 'approve', label: 'Approve', shortcut: 'a' },
+        { id: 'reject',  label: 'Reject',  shortcut: 'r' },
+      ],
+      preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
+    },
+    {
+      id: 'o2', title: 'Fresh',
+      options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
+    },
+  ],
+};
+
+let capturedOverride: InteractionResponse[] = [];
+const ovPanel = mountPanel({
+  deck: overrideDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: (responses) => { capturedOverride = responses; },
+});
+
+// Cursor lands on o2 (first unanswered). Step back to o1 with 'p'.
+ovPanel.handleKey('', RETURN);
+ovPanel.handleKey('p', mkKey({}));
+// Override: pick 'reject' via shortcut.
+ovPanel.handleKey('r', mkKey({}));
+// Post-submit advance lands on o2 (next unanswered).
+ovPanel.handleKey('a', mkKey({}));
+ovPanel.handleKey('', RETURN); // final → complete
+
+assert.deepEqual(
+  capturedOverride,
+  [
+    { id: 'o1', selectedOptionId: 'reject' },
+    { id: 'o2', selectedOptionId: 'approve' },
+  ],
+  'user override of preAnswered must replace the seeded selectedOptionId',
+);
+ovPanel.unmount();
+
 console.log('OK');

@@ -25,12 +25,32 @@ function buildInitialState(deck: Deck): TuiState {
   // Single-question decks skip the overview list — there's nothing to overview,
   // and overview hides the option hotkeys so users press 'y' and nothing happens.
   const initialPhase = deck.interactions.length === 1 ? 'item-review' : 'overview';
+  const responses = new Map<string, InteractionResponse>();
+  const preAnsweredIds = new Set<string>();
+  // Seed responses + preAnsweredIds from any `preAnswered` field. The seeded
+  // response counts as answered for navigation/auto-advance, but is rendered
+  // distinctly so the human knows it carried over. `tryResume` runs after and
+  // takes priority — mid-deck progress should not be overwritten by defaults.
+  for (const interaction of deck.interactions) {
+    const pa = interaction.preAnswered;
+    if (pa === undefined) continue;
+    const response: InteractionResponse = { id: interaction.id };
+    if (pa.selectedOptionId !== undefined) response.selectedOptionId = pa.selectedOptionId;
+    if (pa.selectedOptionIds !== undefined) response.selectedOptionIds = [...pa.selectedOptionIds];
+    if (pa.freetext !== undefined) response.freetext = pa.freetext;
+    responses.set(interaction.id, response);
+    preAnsweredIds.add(interaction.id);
+  }
+  // Start cursor on the first unanswered interaction — humans land where they
+  // need to act. If every interaction is pre-answered, fall back to index 0.
+  const firstUnanswered = deck.interactions.findIndex((i) => !responses.has(i.id));
   return {
     phase: initialPhase,
-    currentIndex: 0,
+    currentIndex: firstUnanswered >= 0 ? firstUnanswered : 0,
     interactions: deck.interactions,
-    responses: new Map(),
+    responses,
     visuals: new Map(),
+    preAnsweredIds,
     inputMode: null,
     selectedAction: 0,
     detailExpanded: false,

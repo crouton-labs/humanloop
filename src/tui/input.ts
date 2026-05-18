@@ -192,7 +192,7 @@ function handleInteractionAction(
       return;
     }
     submitOption(state, interaction, matched.id, undefined);
-    advanceItem(state, 1);
+    advanceToNextUnanswered(state);
     render();
     return;
   }
@@ -226,13 +226,13 @@ function handleInteractionAction(
   if (key.return && state.selectedAction < opts.length) {
     if (interaction.multiSelect) {
       commitMulti(state, interaction);
-      advanceItem(state, 1);
+      advanceToNextUnanswered(state);
       render();
       return;
     }
     const o = opts[state.selectedAction]!;
     submitOption(state, interaction, o.id, undefined);
-    advanceItem(state, 1);
+    advanceToNextUnanswered(state);
     render();
     return;
   }
@@ -289,7 +289,7 @@ function handleInputMode(
       submitOption(state, interaction, attached, mode.buffer);
     }
     state.inputMode = null;
-    advanceItem(state, 1);
+    advanceToNextUnanswered(state);
     render();
     return;
   }
@@ -361,6 +361,28 @@ function advanceItem(state: TuiState, direction: number): void {
   state.scrollOffset = 0;
 }
 
+/**
+ * Move to the next interaction WITHOUT a response, falling through to the
+ * final phase if every following interaction is already answered (whether
+ * user-answered or `preAnswered`-seeded). Used by all post-submit advance
+ * sites so the human flies through pre-approved items by hitting Enter; raw
+ * `n`/`p` still step one at a time via `advanceItem`.
+ */
+function advanceToNextUnanswered(state: TuiState): void {
+  let next = state.currentIndex + 1;
+  while (next < state.interactions.length && state.responses.has(state.interactions[next]!.id)) {
+    next++;
+  }
+  if (next >= state.interactions.length) {
+    state.phase = 'final';
+    return;
+  }
+  state.currentIndex = next;
+  state.selectedAction = 0;
+  state.detailExpanded = false;
+  state.scrollOffset = 0;
+}
+
 function actionCount(interaction: Interaction): number {
   return interaction.options.length + (interaction.allowFreetext && interaction.options.length > 0 ? 1 : 0);
 }
@@ -375,6 +397,9 @@ function submitOption(
   if (selectedOptionId !== undefined) response.selectedOptionId = selectedOptionId;
   if (freetext !== undefined) response.freetext = freetext;
   state.responses.set(interaction.id, response);
+  // Explicit user submission overrides any preAnswered seed — flip the icon
+  // from "previously answered" to user-answered.
+  state.preAnsweredIds.delete(interaction.id);
   state.persist?.();
 }
 
@@ -390,6 +415,8 @@ function toggleMulti(state: TuiState, interaction: Interaction, optionId: string
   const response: InteractionResponse = { id: interaction.id, selectedOptionIds: [...set] };
   if (existing?.freetext !== undefined) response.freetext = existing.freetext;
   state.responses.set(interaction.id, response);
+  // User edited the checked set — no longer a passive carry-over.
+  state.preAnsweredIds.delete(interaction.id);
   state.persist?.();
 }
 
@@ -408,5 +435,7 @@ function commitMulti(
   const ft = freetext ?? existing?.freetext;
   if (ft !== undefined) response.freetext = ft;
   state.responses.set(interaction.id, response);
+  // Explicit confirm overrides any preAnswered seed.
+  state.preAnsweredIds.delete(interaction.id);
   state.persist?.();
 }
