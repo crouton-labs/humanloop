@@ -108,11 +108,14 @@ export function ensureRenderer(): void {
   }
 
   try {
-    // Skip venv creation on drift (venv exists with wrong termrender version)
-    // — `uv pip install` into the existing venv replaces it in place. Only
-    // create when the venv directory is genuinely absent.
-    if (!existsSync(VENV_DIR)) {
-      execFileSync('uv', ['venv', VENV_DIR], { stdio: 'pipe', timeout: 60000 });
+    // (Re)create the venv whenever the interpreter is missing — covers both
+    // "directory absent" and "directory present but bin/python stripped"
+    // (seen in the wild when pnpm rebuilds/dedupes node_modules or uv rotates
+    // its managed Python store). `--clear` makes uv wipe any partial state
+    // rather than refusing on the existing dir. If the interpreter is intact,
+    // skip straight to `uv pip install` so version drift reuses the venv.
+    if (!existsSync(VENV_PYTHON)) {
+      execFileSync('uv', ['venv', '--clear', VENV_DIR], { stdio: 'pipe', timeout: 60000 });
     }
     execFileSync(
       'uv',
@@ -209,9 +212,8 @@ export function renderMarkdown(md: string, width: number): string[] {
   ensureRenderer();
   if (rendererState === 'ready') {
     try {
-      const input = JSON.stringify({ source: md, width, color: true });
-      const out = execFileSync(VENV_BIN, ['doc', 'render'], {
-        input,
+      const out = execFileSync(VENV_BIN, ['doc', 'render', '--width', String(width), '--color', 'on'], {
+        input: md,
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -237,9 +239,8 @@ export function checkMarkdown(md: string): { ok: true } | { ok: false; error: st
   // plaintext later. Bricking deck validation here would be the wrong default.
   if (rendererState !== 'ready') return { ok: true };
 
-  const input = JSON.stringify({ source: md });
   const result = spawnSync(VENV_BIN, ['doc', 'check'], {
-    input,
+    input: md,
     encoding: 'utf-8',
     timeout: 5000,
   });
@@ -290,14 +291,11 @@ export function displayInPane(path: string, opts: DisplayInPaneOpts = {}): { pan
   ensureRenderer();
   if (rendererState !== 'ready') return {};
 
-  const input = JSON.stringify({
-    path,
-    watch: opts.watch !== false,
-    window: opts.newWindow ? 'new' : 'split',
-  });
+  const args = ['pane', 'open', path];
+  if (opts.watch !== false) args.push('--watch');
+  args.push('--window', opts.newWindow ? 'new' : 'split');
 
-  const result = spawnSync(VENV_BIN, ['pane', 'open'], {
-    input,
+  const result = spawnSync(VENV_BIN, args, {
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
   });
