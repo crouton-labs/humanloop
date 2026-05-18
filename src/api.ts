@@ -65,14 +65,16 @@ export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnv
   mkdirSync(dir, { recursive: true });
   atomicWriteJson(deckPath(dir), deck);
 
-  const { responses, completedAt, responsePath } = await resolveInteractionDir(dir, deck, {
+  const { responses, completedAt, responsePath, deck: answeredDeck } = await resolveInteractionDir(dir, deck, {
     sessionId: opts.sessionId,
     cols: opts.cols,
     rows: opts.rows,
   });
 
   return {
-    summary: buildSummary(deck, responses),
+    // `answeredDeck` === `deck` unless an agent ran `hl deck update`
+    // mid-flight; the summary must describe the questions actually answered.
+    summary: buildSummary(answeredDeck, responses),
     responsePath,
     schema: RESPONSE_SCHEMA_ID,
     responses,

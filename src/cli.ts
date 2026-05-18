@@ -32,6 +32,7 @@ type ErrorCode =
   | 'file_not_found'
   | 'editor_not_found'
   | 'job_not_found'
+  | 'job_not_live'
   | 'not_ready'
   | 'not_in_tmux'
   | 'internal';
@@ -104,6 +105,7 @@ function parseStdinJson<T = Record<string, unknown>>(): T {
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type StableEvent =
   | 'job_started'
+  | 'deck_updated'
   | 'interaction_shown'
   | 'interaction_answered'
   | 'interaction_skipped'
@@ -375,7 +377,19 @@ program
 
 // ── deck ──────────────────────────────────────────────────────────────────────
 
-const deckCmd = program.command('deck').description('Write questions, get answers from the human.');
+const deckCmd = program.command('deck').description(
+  'Write questions, get answers from the human.\n' +
+  '\n' +
+  'Children:\n' +
+  '  hl deck ask      — spawn the decisions TUI, return a job handle | use when: posing material decisions\n' +
+  '  hl deck update   — replace the deck of a LIVE ask job in place   | use when: the questions changed after ask\n' +
+  '  hl deck validate — preflight a deck object, no side effects      | use when: checking a deck before ask\n' +
+  '\n' +
+  'A `deck update` rewrites the live job\'s deck.json; the TUI pane the\n' +
+  'human is looking at reloads it automatically within ~1s (answers whose\n' +
+  'interaction ids still exist are kept). Read this leaf\'s -h before calling\n' +
+  'it — it mutates a session a human is actively in.',
+);
 
 deckCmd
   .command('ask')
@@ -388,7 +402,9 @@ deckCmd
     '\n' +
     'Effects: writes <dir>/deck.json, <dir>/progress.json (live),\n' +
     '         <dir>/response.json (on finish), <dir>/job.log (JSONL).\n' +
-    '         Spawns TUI detached in a tmux pane when tmux=true and $TMUX set.\n',
+    '         Spawns TUI detached in a tmux pane when tmux=true and $TMUX set.\n' +
+    '         While the job is live the TUI watches <dir>/deck.json: a later\n' +
+    '         `hl deck update` rewrites it and the pane reloads automatically.\n',
   )
   .helpOption('-h, --help', 'Show help')
   .action(async () => {
@@ -483,7 +499,7 @@ deckCmd
       process.stdout.write(JSON.stringify({
         job_id: jobId,
         dir,
-        follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to block until the human finishes.`,
+        follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to block until the human finishes. If the questions change before they answer, pipe {"job_id":"${jobId}","deck":{...}} to hl deck update — the pane reloads automatically.`,
       }) + '\n');
       process.exit(0);
     }
@@ -513,6 +529,76 @@ deckCmd
         next: 'Set tmux:true (or run inside tmux) so the TUI can open an interactive pane.',
       });
     }
+  });
+
+deckCmd
+  .command('update')
+  .description(
+    'Replace the deck of a LIVE ask job; the human\'s TUI pane reloads.\n' +
+    '\n' +
+    'stdin  { job_id: string (required), deck: object (required) }\n' +
+    'stdout { ok: true, job_id: string, interactions: int, follow_up: string }\n' +
+    '\n' +
+    'The TUI watches deck.json and reloads within ~1s of this write. Answers\n' +
+    'whose interaction id still exists in the new deck are preserved; new or\n' +
+    'id-changed interactions appear unanswered. In-flight unsubmitted input\n' +
+    '(a comment being typed) is discarded on reload.\n' +
+    '\n' +
+    'Errors: job_not_found (no such job_id) | job_not_live (already\n' +
+    'done/failed/canceled — nothing to reload) | deck_invalid (deck rejected;\n' +
+    'the old deck stays in place, run hl deck validate first).\n' +
+    '\n' +
+    'Effects: atomically rewrites <dir>/deck.json; appends a deck_updated\n' +
+    'event to <dir>/job.log. No effect on response.json/progress.json.\n',
+  )
+  .helpOption('-h, --help', 'Show help')
+  .action(() => {
+    type UpdateInput = { job_id?: string; deck?: unknown };
+    const input = parseStdinJson<UpdateInput>();
+    if (!input.job_id || typeof input.job_id !== 'string') {
+      emitError({ error: 'bad_input', message: 'job_id is required', field: 'job_id', next: 'Provide: {"job_id": "<id>", "deck": {...}}' });
+    }
+    if (!input.deck || typeof input.deck !== 'object') {
+      emitError({ error: 'bad_input', message: 'deck is required and must be an object', field: 'deck', next: "Run: echo '{\"kind\":\"deck\"}' | hl schema show" });
+    }
+    const dir = resolveJobDir(input.job_id!);
+    if (!existsSync(dir) || !existsSync(deckPath(dir))) {
+      emitError({ error: 'job_not_found', message: `Job not found: ${input.job_id}`, next: 'Check the job_id returned by hl deck ask.' });
+    }
+    const state = detectJobState(dir);
+    if (state !== 'live') {
+      emitError({
+        error: 'job_not_live',
+        message: `Job is ${state}; its deck can no longer be reloaded.`,
+        received: state,
+        next: 'The human already finished. Start a fresh deck with hl deck ask.',
+      });
+    }
+    let deck: Deck;
+    try {
+      const _v = {}; void _v;
+      deck = validateDeck(input.deck) as Deck;
+    } catch (validationErr) {
+      emitError({
+        error: 'deck_invalid',
+        message: `deck validation failed: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}`,
+        received: input.deck,
+        next: "The live deck is unchanged. Fix the deck, then: echo '{\"deck\":{...}}' | hl deck validate",
+      });
+    }
+    atomicWriteJson(deckPath(dir), deck);
+    appendJobLog(dir, {
+      level: 'info', event: 'deck_updated',
+      message: `deck replaced (${deck.interactions.length} interaction(s)); pane reloads on next watch tick`,
+      data: { jobId: basename(dir), interactions: deck.interactions.length },
+    });
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      job_id: basename(dir),
+      interactions: deck.interactions.length,
+      follow_up: `The pane reloads within ~1s. Still resolve with hl job result {"job_id":"${basename(dir)}","wait":true}.`,
+    }) + '\n');
+    process.exit(0);
   });
 
 deckCmd
