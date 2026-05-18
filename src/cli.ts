@@ -13,6 +13,7 @@ import { launchReview } from './editor/review.js';
 import { validateDeck } from './inbox/deck-schema.js';
 import { ask, inbox } from './api.js';
 import { display } from './surfaces/display.js';
+import { renderMarkdown, checkMarkdown } from './render/termrender.js';
 import { scanInbox } from './inbox/scan.js';
 import {
   deckPath, atomicWriteJson, readJson, responsePath,
@@ -358,6 +359,7 @@ program
     '  deck       — structured set of interactions (questions) for the human\n' +
     '  review     — freeform markdown document review with anchored comments\n' +
     '  view       — passive live render of a file in a tmux pane\n' +
+    '  doc        — render or validate directive-flavored markdown to stdout\n' +
     '  inbox      — list/resolve all pending interactions across root dirs\n' +
     '  job        — a running or completed kickoff (deck ask / review / inbox)\n' +
     '  schema     — JSON Schema for deck, resolution, or feedback payloads\n' +
@@ -366,6 +368,7 @@ program
     '  hl deck   — write questions, get answers      | use when: material decisions\n' +
     '  hl review — markdown doc review               | use when: doc feedback needed\n' +
     '  hl view   — live render in pane               | use when: displaying a file\n' +
+    '  hl doc    — render/validate to stdout         | use when: piping rendered markdown\n' +
     '  hl inbox  — browse pending interactions       | use when: clearing a backlog\n' +
     '  hl job    — inspect/wait/cancel running jobs  | use when: polling job output\n' +
     '  hl schema — print JSON Schemas                | use when: validating inputs\n' +
@@ -728,6 +731,90 @@ viewCmd
     }
     process.exit(0);
   });
+
+// ── doc ───────────────────────────────────────────────────────────────────────
+
+const docCmd = program.command('doc').description(
+  'Render or validate directive-flavored markdown to stdout.\n' +
+  '\n' +
+  'Children:\n' +
+  '  hl doc check  — validate directive syntax, no output | use when: preflighting before write\n' +
+  '  hl doc render — render markdown to ANSI/plain stdout | use when: piping rendered text to a file or consumer\n' +
+  '\n' +
+  'These wrap the pinned termrender binary that humanloop manages. Consumers\n' +
+  'should never call `termrender` directly — go through hl/SDK so there is one\n' +
+  'org-wide caller.\n',
+);
+
+docCmd
+  .command('check')
+  .description(
+    'Validate directive-flavored markdown without rendering.\n' +
+    '\n' +
+    'stdin  { source?: string, path?: string }   exactly one required\n' +
+    'stdout { ok: bool, error?: string }\n' +
+    'exit   0 always (validation failures are not process errors)\n',
+  )
+  .helpOption('-h, --help', 'Show help')
+  .action(() => {
+    type CheckInput = { source?: string; path?: string };
+    const input = parseStdinJson<CheckInput>();
+    const src = resolveDocSource(input);
+    const res = checkMarkdown(src);
+    process.stdout.write(JSON.stringify(res) + '\n');
+    process.exit(0);
+  });
+
+docCmd
+  .command('render')
+  .description(
+    'Render directive-flavored markdown to ANSI or plain text on stdout.\n' +
+    '\n' +
+    'stdin  { source?: string, path?: string, width?: int=process.stdout.columns||100, color?: bool=true }\n' +
+    'stdout the rendered text (raw bytes; not JSON)\n' +
+    'exit   0 on success, non-zero on bad input\n' +
+    '\n' +
+    'When color=false, ANSI escape sequences are stripped from the output.\n' +
+    'Use this for feeding rendered content to other agents that need plain\n' +
+    'text without color codes.\n',
+  )
+  .helpOption('-h, --help', 'Show help')
+  .action(() => {
+    type RenderInput = { source?: string; path?: string; width?: number; color?: boolean };
+    const input = parseStdinJson<RenderInput>();
+    const src = resolveDocSource(input);
+    const width = typeof input.width === 'number' && input.width > 0
+      ? input.width
+      : (process.stdout.columns || 100);
+    const lines = renderMarkdown(src, width);
+    let out = lines.join('\n');
+    if (input.color === false) {
+      // Strip ANSI escape sequences for plain-text consumers.
+      // eslint-disable-next-line no-control-regex
+      out = out.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    }
+    process.stdout.write(out);
+    if (!out.endsWith('\n')) process.stdout.write('\n');
+    process.exit(0);
+  });
+
+function resolveDocSource(input: { source?: string; path?: string }): string {
+  const hasSource = typeof input.source === 'string' && input.source.length > 0;
+  const hasPath = typeof input.path === 'string' && input.path.length > 0;
+  if (hasSource === hasPath) {
+    emitError({
+      error: 'bad_input',
+      message: 'provide exactly one of {source, path}',
+      next: 'stdin like {"source": "..."} or {"path": "/abs/file.md"}',
+    });
+  }
+  if (hasSource) return input.source!;
+  const abs = resolve(input.path!);
+  if (!existsSync(abs)) {
+    emitError({ error: 'file_not_found', message: `path not found: ${abs}`, next: 'check the path' });
+  }
+  return readFileSync(abs, 'utf-8');
+}
 
 // ── inbox ─────────────────────────────────────────────────────────────────────
 
