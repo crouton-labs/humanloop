@@ -178,4 +178,10 @@ export interface MountedPanel {
   unmount(): void;
   loadDeck(deck: Deck, opts?: { progressPath?: string }): void;
   canAcceptHostKeys(): boolean;
+  /**
+   * True when the deck is at its top level: overview phase with no active
+   * comment/freetext input. A host that owns mount/unmount uses this to decide
+   * whether Esc should step back inside the deck (false) or tear it down (true).
+   */
+  atDeckTop(): boolean;
 }

@@ -133,7 +133,8 @@ function handleItemReview(
 
   if (input === 'n') { advanceItem(state, 1); render(); return; }
   if (input === 'p') { advanceItem(state, -1); render(); return; }
-  if (input === 'q') { state.phase = 'overview'; render(); return; }
+  // q / Esc step back to the deck overview (one level up from a card).
+  if (input === 'q' || key.escape) { state.phase = 'overview'; render(); return; }
   // Space toggles the focused option for multi-select; otherwise expand context.
   if (input === ' ' && interaction.multiSelect
       && state.selectedAction < interaction.options.length) {
@@ -322,6 +323,9 @@ function handleFinal(
 ): void {
   if (key.return) {
     exit();
+  } else if (key.escape) {
+    state.phase = 'overview';
+    render();
   } else if (input === 'p') {
     state.phase = 'item-review';
     state.currentIndex = state.interactions.length - 1;

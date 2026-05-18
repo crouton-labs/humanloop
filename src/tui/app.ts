@@ -199,6 +199,11 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       if (!internals.mounted) return false;
       return internals.state.inputMode === null;
     },
+
+    atDeckTop() {
+      if (!internals.mounted) return true;
+      return internals.state.phase === 'overview' && internals.state.inputMode === null;
+    },
   };
 }
 
