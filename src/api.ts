@@ -9,6 +9,7 @@ import { scanInbox } from './inbox/scan.js';
 import { pickFromInbox } from './inbox/tui.js';
 import { deckPath, atomicWriteJson, readJson } from './inbox/convention.js';
 import { getTerminalSize } from './tui/terminal.js';
+import { approveDeck, notifyDeck } from './inbox/deck-factories.js';
 
 const RESPONSE_SCHEMA_ID = 'humanloop.response/v2' as const;
 
@@ -91,34 +92,14 @@ export interface ApproveOpts {
 
 /** Sugar: a single `kind:'validation'` Yes/No interaction. */
 export async function approve(title: string, opts: ApproveOpts = {}): Promise<boolean> {
-  const deck: Deck = {
-    interactions: [{
-      id: 'approve',
-      title,
-      ...(opts.subtitle !== undefined ? { subtitle: opts.subtitle } : {}),
-      ...(opts.body !== undefined ? { body: opts.body } : {}),
-      kind: 'validation',
-      options: [
-        { id: 'yes', label: 'Yes' },
-        { id: 'no', label: 'No' },
-      ],
-    }],
-  };
+  const deck = approveDeck(title, { subtitle: opts.subtitle, body: opts.body });
   const env = await ask(deck, { dir: opts.dir, sessionId: opts.sessionId });
   return env.responses[0]?.selectedOptionId === 'yes';
 }
 
 /** Sugar: a single `kind:'notify'` acknowledgement. */
 export async function notify(title: string, body?: string): Promise<void> {
-  const deck: Deck = {
-    interactions: [{
-      id: 'notify',
-      title,
-      ...(body !== undefined ? { body } : {}),
-      kind: 'notify',
-      options: [{ id: 'ok', label: 'OK' }],
-    }],
-  };
+  const deck = notifyDeck(title, body !== undefined ? { body } : {});
   await ask(deck, {});
 }
 

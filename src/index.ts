@@ -18,6 +18,11 @@ export {
 // Canonical deck schema + parsing/validation (consumers stop forking it).
 export { parseDeck, validateDeck, deckSchema } from './inbox/deck-schema.js';
 
+// Deck factories — pure builders for common deck shapes (sugar for SDK consumers
+// who want validated Yes/No or notify decks without inline construction).
+export { approveDeck, notifyDeck } from './inbox/deck-factories.js';
+export type { ApproveDeckOpts, NotifyDeckOpts } from './inbox/deck-factories.js';
+
 // Interaction-directory convention helpers (§B) — names humanloop owns.
 export {
   deckPath, responsePath, progressPath, visualsDir,
