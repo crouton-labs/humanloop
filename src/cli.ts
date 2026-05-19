@@ -300,6 +300,11 @@ const RESPONSE_SCHEMA = {
           selectedOptionId: { type: 'string' },
           selectedOptionIds: { type: 'array', items: { type: 'string' } },
           freetext: { type: 'string' },
+          optionComments: {
+            type: 'object',
+            description: 'Multi-select per-option comments, keyed by option id.',
+            additionalProperties: { type: 'string' },
+          },
         },
       },
     },

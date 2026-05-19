@@ -300,10 +300,11 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
       ? interaction.freetextLabel
       : state.inputMode.kind === 'comment' ? 'Comment' : 'Response';
 
-    // Show attached option (single-select comment mode only) — Tab cycles.
-    // Multi-select comments carry the checked set, so no attach line.
+    // Show attached option in comment mode. For single-select the comment
+    // qualifies the pick; for multi-select an attached option means the
+    // comment is saved as a per-option note (and auto-checks the option).
     let attachedLine: string | undefined;
-    if (state.inputMode.kind === 'comment' && !interaction.multiSelect) {
+    if (state.inputMode.kind === 'comment') {
       const attachedId = state.inputMode.selectedOptionId;
       const opts = interaction.options;
       if (opts.length > 0) {
@@ -312,7 +313,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
           : undefined;
         const valueText = attached !== undefined
           ? `${CYAN}${singleLine(attached.label)}${RESET}`
-          : `${DIM}none${RESET}`;
+          : `${DIM}none (overall)${RESET}`;
         attachedLine = `  ${DIM}attached:${RESET} ${valueText}  ${DIM}[tab to cycle]${RESET}`;
       }
     }
@@ -402,10 +403,12 @@ function renderActions(
   const indent = ' '.repeat(prefixWidth);
   const contentMax = Math.max(20, maxW - prefixWidth);
 
+  const optionComments = existing !== undefined ? existing.optionComments : undefined;
+
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i]!;
     const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-    const sc = o.shortcut ?? ' ';
+    const sc = o.shortcut === undefined ? ' ' : o.shortcut;
     const keyBadge = `${DIM}[${sc}]${RESET}`;
     const box = multi
       ? (checked.has(o.id) ? `${GREEN}[x]${RESET}` : `${DIM}[ ]${RESET}`) + ' '
@@ -422,11 +425,23 @@ function renderActions(
         lines.push(`${indent}${DIM}${dl}${RESET}`);
       }
     }
+    if (multi && optionComments !== undefined) {
+      const note = optionComments[o.id];
+      if (typeof note === 'string' && note.length > 0) {
+        const noteLines = wrap(`✎ ${sanitize(note)}`, contentMax);
+        for (const nl of noteLines) {
+          lines.push(`${indent}${YELLOW}${nl}${RESET}`);
+        }
+      }
+    }
   }
 
   if (interaction.allowFreetext && opts.length > 0) {
     const cursor = opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
-    const label = interaction.freetextLabel !== undefined ? interaction.freetextLabel : 'Add comment';
+    let label: string;
+    if (interaction.freetextLabel !== undefined) label = interaction.freetextLabel;
+    else if (multi) label = 'Add overall comment  (c on an option for per-option)';
+    else label = 'Add comment';
     lines.push(`  ${cursor} ${DIM}[c]${RESET} ${label}`);
   } else if (interaction.allowFreetext && opts.length === 0) {
     const ftLabel = interaction.freetextLabel !== undefined ? interaction.freetextLabel : 'Enter response';
@@ -492,11 +507,17 @@ export function renderFinal(state: TuiState, cols: number, rows: number): string
 
 export function responseSummary(r: InteractionResponse, interaction: Interaction): string {
   if (r.selectedOptionIds !== undefined) {
-    const labels = r.selectedOptionIds
+    const oc = r.optionComments;
+    const parts = r.selectedOptionIds
       .map((id) => interaction.options.find((o) => o.id === id))
       .filter((o): o is NonNullable<typeof o> => o !== undefined)
-      .map((o) => sanitize(o.label));
-    const picks = labels.length > 0 ? labels.join(', ') : '(none)';
+      .map((o) => {
+        const note = oc !== undefined ? oc[o.id] : undefined;
+        return typeof note === 'string' && note.length > 0
+          ? `${sanitize(o.label)} ("${sanitize(note)}")`
+          : sanitize(o.label);
+      });
+    const picks = parts.length > 0 ? parts.join(', ') : '(none)';
     if (r.freetext) return `${picks}: "${sanitize(r.freetext)}"`;
     return picks;
   }

@@ -11,6 +11,20 @@ export interface ReviewOptions {
   editor?: string;
   /** Force running in the current terminal even when $TMUX is set. */
   noTmux?: boolean;
+  /**
+   * When set, an explicit `<Space>s` / `:HLSubmit` invocation writes a sentinel
+   * file at this path. Node-side uses the file's existence to gate `submitted: true`.
+   * When omitted, any editor exit finalizes `submitted: true` (legacy behavior).
+   */
+  submitFlagPath?: string;
+  /**
+   * When true and $TMUX is set and !opts.noTmux, launch via
+   * `tmux display-popup -E` instead of `tmux split-window`.
+   * display-popup -E is synchronous so no poll loop is needed.
+   */
+  tmuxPopup?: boolean;
+  /** Override the default 90%/90% popup size. Only used when tmuxPopup is true. */
+  popupSize?: { w: string; h: string };
 }
 
 function shellQuote(s: string): string {
@@ -191,6 +205,9 @@ function reviewVimscript(): string {
     ``,
     `function! s:Submit() abort`,
     `  call s:Save()`,
+    `  if $HL_SUBMIT_FLAG !=# ''`,
+    `    call writefile([''], $HL_SUBMIT_FLAG)`,
+    `  endif`,
     `  qa!`,
     `endfunction`,
     ``,
@@ -300,7 +317,22 @@ function rangeLabel(c: FeedbackComment): string {
 export function formatFeedbackSummary(result: FeedbackResult, feedbackJsonPath: string): string {
   const n = result.comments.length;
   const out: string[] = [];
-  if (n === 0) {
+  if (!result.submitted) {
+    if (n > 0) {
+      out.push(`hl propose — draft saved: ${n} comment${n === 1 ? '' : 's'} on ${result.file} (not yet submitted)`);
+      out.push('');
+      result.comments.forEach((c, i) => {
+        const original = c.quote && c.quote.length > 0 ? c.quote : c.lineText;
+        const lines = original.split('\n');
+        out.push(` ${i + 1}. ${rangeLabel(c)}`);
+        lines.forEach((ln, k) => out.push(k === 0 ? `    text:    ${ln}` : `             ${ln}`));
+        out.push(`    comment: ${c.comment}`);
+        out.push('');
+      });
+    } else {
+      out.push(`hl propose — draft saved: no comments yet on ${result.file}`);
+    }
+  } else if (n === 0) {
     out.push(`hl propose — approved: 0 comments on ${result.file} (human signalled looks-good; proceed)`);
   } else {
     out.push(`hl propose — ${n} comment${n === 1 ? '' : 's'} on ${result.file}`);
@@ -386,7 +418,12 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   const initPath = join(dir, 'review.vim');
   writeFileSync(initPath, reviewVimscript());
 
-  const env: NodeJS.ProcessEnv = { ...process.env, HL_OUTPUT: outPath, HL_SOURCE: absFile };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HL_OUTPUT: outPath,
+    HL_SOURCE: absFile,
+    ...(opts.submitFlagPath ? { HL_SUBMIT_FLAG: opts.submitFlagPath } : {}),
+  };
   // `-u NONE`: do NOT load the user's init.lua / LazyVim / plugins / keymaps.
   // Default runtimepath still includes the config dir (for the gloam
   // colorscheme) and the site dir (for the treesitter markdown parser), so the
@@ -405,16 +442,26 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   if (inTmux) {
     // `exec env …` so the editor replaces the shell and becomes the pane's
     // process (so tmux `#{pane_current_command}` is `nvim`, not the shell).
+    const envPairs = [
+      `HL_OUTPUT=${shellQuote(outPath)}`,
+      `HL_SOURCE=${shellQuote(absFile)}`,
+      ...(opts.submitFlagPath ? [`HL_SUBMIT_FLAG=${shellQuote(opts.submitFlagPath)}`] : []),
+    ];
     const paneCmd = [
       'exec',
       'env',
-      `HL_OUTPUT=${shellQuote(outPath)}`,
-      `HL_SOURCE=${shellQuote(absFile)}`,
+      ...envPairs,
       shellQuote(bin),
       ...editorArgs.map(shellQuote),
     ].join(' ');
     try {
-      await runInTmuxPane(paneCmd);
+      if (opts.tmuxPopup) {
+        const w = opts.popupSize ? opts.popupSize.w : '90%';
+        const h = opts.popupSize ? opts.popupSize.h : '90%';
+        execFileSync('tmux', ['display-popup', '-E', '-w', w, '-h', h, paneCmd], { stdio: 'inherit' });
+      } else {
+        await runInTmuxPane(paneCmd);
+      }
     } catch (err) {
       process.stderr.write(`tmux dispatch failed, running in current terminal: ${err instanceof Error ? err.message : String(err)}\n`);
       await runInCurrentTerminal(bin, editorArgs, env);
@@ -434,12 +481,13 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   }
 
   const now = new Date().toISOString();
+  const didSubmit = opts.submitFlagPath ? existsSync(opts.submitFlagPath) : true;
   const result: FeedbackResult = {
     file: absFile,
-    submitted: true,
-    approved: comments.length === 0,
+    submitted: didSubmit,
+    approved: didSubmit && comments.length === 0,
     comments,
-    submittedAt: now,
+    ...(didSubmit ? { submittedAt: now } : {}),
     savedAt: now,
   };
   atomicWrite(outPath, JSON.stringify(result, null, 2) + '\n');

@@ -30,11 +30,17 @@ function buildSummary(deck: Deck, responses: InteractionResponse[]): string {
     const ft = r.freetext !== undefined && r.freetext !== '' ? r.freetext : undefined;
     let picked: string | undefined;
     if (r.selectedOptionIds !== undefined) {
-      const labels = r.selectedOptionIds
+      const oc = r.optionComments;
+      const parts = r.selectedOptionIds
         .map((id) => it.options.find((o) => o.id === id))
         .filter((o): o is NonNullable<typeof o> => o !== undefined)
-        .map((o) => o.label);
-      picked = labels.length > 0 ? labels.join(', ') : undefined;
+        .map((o) => {
+          const note = oc !== undefined ? oc[o.id] : undefined;
+          return typeof note === 'string' && note.length > 0
+            ? `${o.label} ("${note}")`
+            : o.label;
+        });
+      picked = parts.length > 0 ? parts.join(', ') : undefined;
     } else if (r.selectedOptionId !== undefined) {
       picked = it.options.find((o) => o.id === r.selectedOptionId)?.label;
     }

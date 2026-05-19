@@ -644,4 +644,72 @@ assert.deepEqual(
 );
 ovPanel.unmount();
 
+// ── Test 18: multi-select per-option comments via 'c' on focused option ──────
+// 'c' on a focused option enters comment mode pre-attached to that option;
+// Enter saves to optionComments[id], auto-checks the option, stays on the same
+// interaction so further options can be commented. The [c] freetext row still
+// produces an overall comment.
+
+const optCommentDeck: Deck = {
+  interactions: [
+    {
+      id: 'oc1', title: 'Pick toppings (with notes)', multiSelect: true,
+      allowFreetext: true,
+      options: [
+        { id: 'mush', label: 'Mushroom', shortcut: 'a' },
+        { id: 'onion', label: 'Onion', shortcut: 'b' },
+        { id: 'olive', label: 'Olive', shortcut: 'x' },
+      ],
+    },
+  ],
+};
+
+let capturedOpt: InteractionResponse[] = [];
+const ocPanel = mountPanel({
+  deck: optCommentDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: (responses) => { capturedOpt = responses; },
+});
+
+// Single-item deck starts in item-review, cursor on 'mush'.
+// 'c' on 'mush' → enter comment mode pre-attached.
+ocPanel.handleKey('c', mkKey({}));
+ocPanel.handleKey('y', mkKey({}));
+ocPanel.handleKey('u', mkKey({}));
+ocPanel.handleKey('m', mkKey({}));
+ocPanel.handleKey('', RETURN); // save per-option comment, auto-check 'mush'
+// Should still be on the same interaction, NOT advanced to final.
+const afterOptComment = ocPanel.render().join('\n');
+assert.ok(
+  afterOptComment.includes('Pick toppings'),
+  'after submitting a per-option comment, stay on the same interaction',
+);
+assert.ok(
+  afterOptComment.includes('yum'),
+  'per-option comment renders inline under the option',
+);
+// Move cursor to 'onion' and comment without auto-checking via different path:
+ocPanel.handleKey('j', mkKey({})); // cursor → 'onion'
+ocPanel.handleKey('c', mkKey({}));
+ocPanel.handleKey('m', mkKey({}));
+ocPanel.handleKey('e', mkKey({}));
+ocPanel.handleKey('h', mkKey({}));
+ocPanel.handleKey('', RETURN); // save + auto-check 'onion'
+// Now confirm the multi-select set with Enter on a checked option row.
+// Cursor is still on 'onion'. Enter confirms accumulated set + advances.
+ocPanel.handleKey('', RETURN); // commit multi → advance to final
+ocPanel.handleKey('', RETURN); // final → complete
+
+assert.deepEqual(
+  capturedOpt,
+  [{
+    id: 'oc1',
+    selectedOptionIds: ['mush', 'onion'],
+    optionComments: { mush: 'yum', onion: 'meh' },
+  }],
+  'per-option comments accumulate under optionComments and auto-check their options',
+);
+ocPanel.unmount();
+
 console.log('OK');

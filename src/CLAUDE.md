@@ -1,0 +1,1 @@
+- `ask()` returns a populated `summary` in `ResolutionEnvelope`, but `response.json` on disk only stores `{ responses, completedAt }` — `hl job result` reconstructs the envelope with `summary: ''`. Consumers needing the summary must call `ask()` directly or rebuild it from `responses`; reading it from `hl job result` silently yields an empty string.
