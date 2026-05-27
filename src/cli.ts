@@ -9,7 +9,7 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { launchReview } from './editor/review.js';
+import { launchReview, reviewVimscript } from './editor/review.js';
 import { validateDeck } from './inbox/deck-schema.js';
 import { ask, inbox } from './api.js';
 import { display } from './surfaces/display.js';
@@ -656,11 +656,17 @@ reviewCmd
     '         editor?: string|null, tmux?: bool=true }\n' +
     'stdout { job_id: string, output: string (absolute), follow_up: string }\n' +
     '\n' +
-    'Effects: spawns nvim/vim read-only; autosaves feedback JSON.\n',
+    'Effects: spawns nvim/vim read-only DETACHED in a tmux pane when tmux=true\n' +
+    '         and $TMUX set; returns before the human starts. Writes\n' +
+    '         <dir>/review.vim, <dir>/feedback.json (on finish), <dir>/job.log.\n' +
+    '         autosaves feedback JSON; the open pane live-reloads the source on\n' +
+    '         disk edits. The review is open-ended (a human may take many\n' +
+    '         minutes) — collect via `hl job result` with wait:true, run\n' +
+    '         backgrounded so the call does not block on the human.\n',
   )
   .helpOption('-h, --help', 'Show help')
   .action(async () => {
-    type ReviewInput = { file: string; output?: string | null; editor?: string | null; tmux?: boolean };
+    type ReviewInput = { file: string; output?: string | null; editor?: string | null; tmux?: boolean; dir?: string | null };
     const input = parseStdinJson<ReviewInput>();
 
     if (!input.file || typeof input.file !== 'string') {
@@ -672,17 +678,55 @@ reviewCmd
     }
 
     const output = resolve(input.output ? input.output : `${absFile}.feedback.json`);
-    const noTmux = input.tmux === false;
-    const jobDir = mkdtempSync(join(tmpdir(), 'hl-review-'));
+    const useTmux = input.tmux !== false;
+
+    // Shared job dir: the detached child reuses the parent's via input.dir;
+    // a top-level call mints one. The review.vim is written up front (and the
+    // job_started logged) so the job is recognizable as a live review — and so
+    // the child sources the exact vimscript — before any pane is spawned.
+    const jobDir = input.dir ? resolve(input.dir) : mkdtempSync(join(tmpdir(), 'hl-review-'));
+    mkdirSync(jobDir, { recursive: true });
     const jobId = basename(jobDir);
+    if (!input.dir) {
+      writeFileSync(join(jobDir, 'review.vim'), reviewVimscript());
+      appendJobLog(jobDir, { level: 'info', event: 'job_started', message: 'review open job started', data: { jobId, file: absFile } });
+    }
 
-    appendJobLog(jobDir, { level: 'info', event: 'job_started', message: 'review open job started', data: { jobId, file: absFile } });
+    // tmux path: detach a child that owns the editor pane and return the handle
+    // now, mirroring `deck ask`. The child re-enters this leaf with tmux:false
+    // and the shared dir, falling through to the in-process branch below.
+    if (process.env['TMUX'] && useTmux) {
+      const scriptPath = process.argv[1];
+      if (!scriptPath) {
+        emitError({ error: 'internal', message: 'Cannot determine hl script path', next: 'Report this as a bug.' });
+      }
+      const sq = (s: string) =>
+        /^[a-zA-Z0-9_\-./:@%+=]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+      const childInput = JSON.stringify({ file: absFile, output, editor: input.editor ?? null, tmux: false, dir: jobDir });
+      const cmd = `echo ${sq(childInput)} | ${sq(process.execPath)} ${sq(scriptPath)} review open`;
+      try {
+        execFileSync('tmux', ['split-window', '-d', '-h', cmd], { stdio: 'ignore' });
+      } catch (spawnErr) {
+        const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+        appendJobLog(jobDir, { level: 'error', event: 'job_failed', message: `tmux spawn failed: ${msg}` });
+        emitError({ error: 'internal', message: `tmux spawn failed: ${msg}`, next: 'Check that $TMUX is set. Or pass tmux:false.' });
+      }
+      process.stdout.write(JSON.stringify({
+        job_id: jobId,
+        output,
+        follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to block until the human finishes the review. They may take many minutes — run this backgrounded; you will be notified on completion.`,
+      }) + '\n');
+      process.exit(0);
+    }
 
+    // In-process path: the detached child (this pane is its TTY), or a degraded
+    // top-level call with no tmux. launchReview blocks until the editor exits.
     try {
       const result = await launchReview(absFile, {
         output,
         editor: (input.editor && typeof input.editor === 'string') ? input.editor : undefined,
-        noTmux,
+        noTmux: true,
+        jobDir,
       });
       appendJobLog(jobDir, { level: 'info', event: 'job_finished', message: 'review finished', data: { comments: result.comments.length } });
       writeFileSync(join(jobDir, 'feedback.json'), JSON.stringify(result, null, 2));
@@ -690,6 +734,7 @@ reviewCmd
         job_id: jobId,
         output,
         follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to retrieve the feedback.`,
+        ...(input.dir ? {} : { _note: 'No tmux: launchReview blocked synchronously. Result is already available.' }),
       }) + '\n');
       process.exit(0);
     } catch (reviewErr) {

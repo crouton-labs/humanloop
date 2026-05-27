@@ -25,6 +25,14 @@ export interface ReviewOptions {
   tmuxPopup?: boolean;
   /** Override the default 90%/90% popup size. Only used when tmuxPopup is true. */
   popupSize?: { w: string; h: string };
+  /**
+   * Reuse this directory for `review.vim` instead of minting a fresh temp dir.
+   * The async `review open` kickoff passes its job dir so the detached child
+   * sources the same vimscript the parent already wrote there (which also lets
+   * the job be recognized as a review while it's still live). When the file
+   * already exists it is left untouched.
+   */
+  jobDir?: string;
 }
 
 function shellQuote(s: string): string {
@@ -52,7 +60,7 @@ function resolveEditor(override?: string): string {
 // The entire review UX as a clean, minimal Vimscript config sourced via `-u`.
 // Works in both Neovim and Vim 8+. The source file is opened read-only; the
 // human anchors comments to real source lines/selections and quits to submit.
-function reviewVimscript(): string {
+export function reviewVimscript(): string {
   return [
     `" hl propose — review layer. Runs on a CLEAN config (nvim -u NONE: no`,
     `" init.lua, no LazyVim, no plugins/keymaps). Look/feel is ONLY the user's`,
@@ -327,17 +335,25 @@ function reviewVimscript(): string {
     `  vim.cmd('silent! runtime plugin/render-markdown.lua')`,
     `  -- Defer the initial paint to the next tick: during VimEnter the window`,
     `  -- isn't laid out yet, so an immediate render no-ops and tables show raw`,
-    `  -- until the first cursor move. vim.schedule fires once the UI is ready;`,
-    `  -- api.render() forces a paint for the buffer's window (the live autocmds`,
-    `  -- the plugin installed keep it updated on edits/scroll thereafter).`,
-    `  vim.schedule(function()`,
+    `  -- until the first cursor move. api.render() forces a paint for the`,
+    `  -- buffer's window (the live autocmds the plugin installed keep it updated`,
+    `  -- on edits/scroll thereafter). render-markdown refuses to draw while a`,
+    `  -- prompt mode is active ('r' hit-enter, 'rm' more, 'r?' confirm) — e.g. a`,
+    `  -- wrapped :echo — so re-defer until we're back in a normal state.`,
+    `  local function paint()`,
+    `    local m = vim.api.nvim_get_mode().mode`,
+    `    if m == 'r' or m == 'rm' or m == 'r?' then`,
+    `      vim.defer_fn(paint, 60)`,
+    `      return`,
+    `    end`,
     `    pcall(function()`,
     `      require('render-markdown.api').render({`,
     `        buf = vim.api.nvim_get_current_buf(),`,
     `        win = vim.api.nvim_get_current_win(),`,
     `      })`,
     `    end)`,
-    `  end)`,
+    `  end`,
+    `  vim.schedule(paint)`,
     `end)`,
     `HLLUA`,
     `  endif`,
@@ -352,10 +368,28 @@ function reviewVimscript(): string {
     `  call s:Load()`,
     `  call s:Marks()`,
     `  redraw`,
-    `  echohl Question | echo 'hl review — <Space>c comment   <Space>l list   <Space>u undo   <Space>s submit & quit   (:HLHelp)' | echohl NONE`,
+    `  " Keep this hint short: a line that wraps past the cmdline triggers the`,
+    `  " hit-enter prompt, whose mode blocks the deferred render-markdown paint.`,
+    `  " The full key list lives in :HLHelp (and is printed to stderr on launch).`,
+    `  echohl Question | echo 'hl review — <Space>c comment · l list · u undo · s submit  (:HLHelp)' | echohl NONE`,
     `endfunction`,
     `autocmd VimEnter * call s:Setup()`,
     `autocmd VimLeavePre * call s:Save()`,
+    ``,
+    `" Watchmode: the source is opened read-only here but may be rewritten on`,
+    `" disk by the agent while the human reviews. autoread + a periodic checktime`,
+    `" (timers fire even when the tmux pane is unfocused) reload the buffer`,
+    `" silently — it is never locally modified, so there is nothing to clobber.`,
+    `" On reload, re-run Setup (read-only guard, treesitter, maps) and redraw the`,
+    `" comment anchors, which the reload cleared. Comments live in s:comments /`,
+    `" the autosave file, not the buffer, so they survive; their line anchors may`,
+    `" drift if the edit moved text, which is expected — the human sees the latest.`,
+    `set autoread`,
+    `autocmd FocusGained,BufEnter,CursorHold * silent! checktime`,
+    `autocmd FileChangedShellPost * call s:Setup() | call s:Marks() | redraw`,
+    `if exists('*timer_start')`,
+    `  let s:hl_watch = timer_start(1000, {-> execute('silent! checktime')}, {'repeat': -1})`,
+    `endif`,
     ``,
   ].join('\n');
 }
@@ -510,9 +544,11 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   const outPath = resolve(opts.output);
   const bin = resolveEditor(opts.editor);
 
-  const dir = mkdtempSync(join(tmpdir(), 'hl-review-'));
+  // When the async kickoff passes its job dir, source the review.vim the parent
+  // already wrote there; otherwise mint a private temp dir as before.
+  const dir = opts.jobDir ?? mkdtempSync(join(tmpdir(), 'hl-review-'));
   const initPath = join(dir, 'review.vim');
-  writeFileSync(initPath, reviewVimscript());
+  if (!existsSync(initPath)) writeFileSync(initPath, reviewVimscript());
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
