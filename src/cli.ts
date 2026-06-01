@@ -759,21 +759,22 @@ viewCmd
   .description(
     'Render a file live in a tmux pane — passive, no result.\n' +
     '\n' +
-    'stdin  { path: string (required), watch?: bool=true, window?: "split"|"new"="split" }\n' +
+    'The pane always watches the file and live-updates on every save.\n' +
+    '\n' +
+    'stdin  { path: string (required), window?: "split"|"new"="split" }\n' +
     'stdout { pane_id: string|null, reason: string|null }\n' +
     'exit   0 always (not-in-tmux / renderer-unavailable is NOT an error)\n',
   )
   .helpOption('-h, --help', 'Show help')
   .action(() => {
-    type ViewInput = { path: string; watch?: boolean; window?: 'split' | 'new' };
+    type ViewInput = { path: string; window?: 'split' | 'new' };
     const input = parseStdinJson<ViewInput>();
     if (!input.path || typeof input.path !== 'string') {
       emitError({ error: 'bad_input', message: 'path is required', field: 'path', next: 'Provide: {"path": "/abs/path/file.md"}' });
     }
     const absPath = resolve(input.path);
-    const watch = input.watch !== false;
     const window = input.window === 'new' ? 'new' : 'split';
-    const res = display(absPath, { watch, window });
+    const res = display(absPath, { window });
     if (res.paneId) {
       process.stdout.write(JSON.stringify({ pane_id: res.paneId, reason: null }) + '\n');
     } else {

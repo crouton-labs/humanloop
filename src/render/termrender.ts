@@ -276,8 +276,6 @@ export function checkMarkdown(md: string): { ok: true } | { ok: false; error: st
 }
 
 export interface DisplayInPaneOpts {
-  /** Pass watch so the pane live-updates on file edits. Default true. */
-  watch?: boolean;
   /** Open in a new tmux window instead of splitting the current one. */
   newWindow?: boolean;
 }
@@ -291,8 +289,8 @@ export function displayInPane(path: string, opts: DisplayInPaneOpts = {}): { pan
   ensureRenderer();
   if (rendererState !== 'ready') return {};
 
-  const args = ['pane', 'open', path];
-  if (opts.watch !== false) args.push('--watch');
+  // Always watch: a displayed pane is a live view of the file by definition.
+  const args = ['pane', 'open', path, '--watch'];
   args.push('--window', opts.newWindow ? 'new' : 'split');
 
   const result = spawnSync(VENV_BIN, args, {

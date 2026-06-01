@@ -168,10 +168,9 @@ export interface InboxItem {
   source?: DeckSource;
 }
 
-/** Options for `display()` — the live-watch tmux pane surface. */
+/** Options for `display()` — the live-watch tmux pane surface. The pane always
+ *  watches the file and live-updates on edits; there is no non-watched mode. */
 export interface DisplayOpts {
-  /** Pass `--watch` so the pane live-updates on edits. Default true. */
-  watch?: boolean;
   /** `'auto'` (default) splits until the pane budget, then opens a new window. */
   window?: 'auto' | 'split' | 'new';
   /** Pane budget per window before `'auto'` opens a new window. Default 3. */

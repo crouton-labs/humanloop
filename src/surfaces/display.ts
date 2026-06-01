@@ -12,7 +12,6 @@ export function countPanesInCurrentWindow(): number {
 }
 
 export function display(path: string, opts?: DisplayOpts): { paneId?: string } {
-  const watch = opts?.watch !== false;
   const window: 'auto' | 'split' | 'new' = (opts?.window === 'split' || opts?.window === 'new') ? opts.window : 'auto';
   const maxPanes: number = (opts?.maxPanes !== undefined && opts.maxPanes > 0) ? opts.maxPanes : 3;
 
@@ -20,5 +19,6 @@ export function display(path: string, opts?: DisplayOpts): { paneId?: string } {
     window === 'new' ||
     (window === 'auto' && countPanesInCurrentWindow() >= maxPanes);
 
-  return displayInPane(path, { watch, newWindow });
+  // The pane always watches the file — displayed docs are live by definition.
+  return displayInPane(path, { newWindow });
 }
