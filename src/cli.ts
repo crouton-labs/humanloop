@@ -650,19 +650,20 @@ const reviewCmd = program.command('review').description('Markdown document revie
 reviewCmd
   .command('open')
   .description(
-    'Kickoff: spawn the read-only editor review and return immediately.\n' +
+    'Open a read-only editor review and BLOCK until the human submits.\n' +
     '\n' +
     'stdin  { file: string (required, .md), output?: string|null,\n' +
     '         editor?: string|null, tmux?: bool=true }\n' +
-    'stdout { job_id: string, output: string (absolute), follow_up: string }\n' +
+    'stdout { job_id: string, output: string (absolute),\n' +
+    '         status: "done"|"failed"|"canceled", result?: FeedbackResult }\n' +
     '\n' +
-    'Effects: spawns nvim/vim read-only DETACHED in a tmux pane when tmux=true\n' +
-    '         and $TMUX set; returns before the human starts. Writes\n' +
+    'Effects: spawns nvim/vim read-only in a tmux pane when tmux=true and $TMUX\n' +
+    '         set, then blocks until the human finishes and submits. Writes\n' +
     '         <dir>/review.vim, <dir>/feedback.json (on finish), <dir>/job.log.\n' +
     '         autosaves feedback JSON; the open pane live-reloads the source on\n' +
     '         disk edits. The review is open-ended (a human may take many\n' +
-    '         minutes) — collect via `hl job result` with wait:true, run\n' +
-    '         backgrounded so the call does not block on the human.\n',
+    '         minutes) — if you want to keep working, run this BACKGROUNDED; your\n' +
+    '         harness notifies you when it returns with the result.\n',
   )
   .helpOption('-h, --help', 'Show help')
   .action(async () => {
@@ -711,12 +712,32 @@ reviewCmd
         appendJobLog(jobDir, { level: 'error', event: 'job_failed', message: `tmux spawn failed: ${msg}` });
         emitError({ error: 'internal', message: `tmux spawn failed: ${msg}`, next: 'Check that $TMUX is set. Or pass tmux:false.' });
       }
-      process.stdout.write(JSON.stringify({
-        job_id: jobId,
-        output,
-        follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to block until the human finishes the review. They may take many minutes — run this backgrounded; you will be notified on completion.`,
-      }) + '\n');
-      process.exit(0);
+      // BLOCK until the human submits (or the job ends). The review is
+      // open-ended — a human may take many minutes — so callers that want to
+      // keep working should background this invocation; their harness notifies
+      // them when it returns. Poll the shared job dir for feedback.json the
+      // same way `hl job result --wait` does.
+      await new Promise<void>((resolvePromise) => {
+        const poll = setInterval(() => {
+          const fp = join(jobDir, 'feedback.json');
+          if (existsSync(fp)) {
+            const result = tryParseJson<FeedbackResult>(readFileSync(fp, 'utf8'));
+            if (result !== null) {
+              clearInterval(poll);
+              process.stdout.write(JSON.stringify({ job_id: jobId, output, status: 'done', result }) + '\n');
+              process.exit(0);
+            }
+          }
+          const state = detectJobState(jobDir);
+          if (state === 'failed' || state === 'canceled') {
+            clearInterval(poll);
+            process.stdout.write(JSON.stringify({ job_id: jobId, output, status: state }) + '\n');
+            process.exit(state === 'canceled' ? 0 : 1);
+          }
+        }, 200);
+        void resolvePromise;
+      });
+      return;
     }
 
     // In-process path: the detached child (this pane is its TTY), or a degraded
@@ -733,7 +754,8 @@ reviewCmd
       process.stdout.write(JSON.stringify({
         job_id: jobId,
         output,
-        follow_up: `Call hl job result with stdin {"job_id":"${jobId}","wait":true} to retrieve the feedback.`,
+        status: 'done',
+        result,
         ...(input.dir ? {} : { _note: 'No tmux: launchReview blocked synchronously. Result is already available.' }),
       }) + '\n');
       process.exit(0);
