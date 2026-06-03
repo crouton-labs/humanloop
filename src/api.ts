@@ -7,7 +7,7 @@ import type {
 import { resolveInteractionDir } from './tui/app.js';
 import { scanInbox } from './inbox/scan.js';
 import { pickFromInbox } from './inbox/tui.js';
-import { deckPath, atomicWriteJson, readJson } from './inbox/convention.js';
+import { deckPath, atomicWriteJson, readJson, stampCanvasNode } from './inbox/convention.js';
 import { getTerminalSize } from './tui/terminal.js';
 import { approveDeck, notifyDeck } from './inbox/deck-factories.js';
 
@@ -70,6 +70,7 @@ export interface AskOpts {
 export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnvelope> {
   const dir = opts.dir ?? managedDir();
   mkdirSync(dir, { recursive: true });
+  stampCanvasNode(deck);
   atomicWriteJson(deckPath(dir), deck);
 
   const { responses, completedAt, responsePath, deck: answeredDeck } = await resolveInteractionDir(dir, deck, {

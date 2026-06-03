@@ -1,6 +1,6 @@
 import { existsSync, statSync, writeFileSync, renameSync, readFileSync, unlinkSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { InteractionResponse } from '../types.js';
+import type { Deck, InteractionResponse } from '../types.js';
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -57,6 +57,23 @@ export function isClaimed(dir: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ── Canvas-node attribution ─────────────────────────────────────────
+
+/**
+ * Stamp the originating canvas node id onto a deck's `source` so per-node
+ * attention scoping (crouter's nav chrome) can attribute the ask to the node
+ * that raised it rather than every sibling node sharing the same cwd.
+ *
+ * No-op when not inside a canvas node (CRTR_NODE_ID unset) or when the deck
+ * already carries a nodeId. Mutates `deck` in place.
+ */
+export function stampCanvasNode(deck: Deck): void {
+  const id = process.env['CRTR_NODE_ID'];
+  if (id === undefined || id.trim() === '') return;
+  if (deck.source?.nodeId != null && deck.source.nodeId !== '') return;
+  deck.source = { ...(deck.source ?? {}), nodeId: id };
 }
 
 // ── Atomic I/O ────────────────────────────────────────────────────────────────

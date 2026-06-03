@@ -62,6 +62,10 @@ export interface DeckSource {
   sessionName?: string;
   askedBy?: string;
   blockedSince?: string;
+  /** Originating canvas node id (CRTR_NODE_ID) when the ask was raised inside
+   *  a crouter canvas node. Lets per-node attention scoping attribute the ask
+   *  to the node that raised it rather than every sibling sharing the cwd. */
+  nodeId?: string;
 }
 
 export interface Deck {

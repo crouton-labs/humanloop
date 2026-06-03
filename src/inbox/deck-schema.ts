@@ -39,6 +39,7 @@ const deckSourceSchema = z.object({
   sessionName: z.string().optional(),
   askedBy: z.string().optional(),
   blockedSince: z.string().optional(),
+  nodeId: z.string().optional(),
 });
 
 export const deckSchema = z.object({

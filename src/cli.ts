@@ -16,7 +16,7 @@ import { display } from './surfaces/display.js';
 import { renderMarkdown, checkMarkdown } from './render/termrender.js';
 import { scanInbox } from './inbox/scan.js';
 import {
-  deckPath, atomicWriteJson, readJson, responsePath,
+  deckPath, atomicWriteJson, readJson, responsePath, stampCanvasNode,
 } from './inbox/convention.js';
 import type { Deck, FeedbackResult } from './types.js';
 
@@ -449,6 +449,7 @@ deckCmd
 
     const dir = input.dir ? resolve(input.dir) : mkdtempSync(join(tmpdir(), 'hl-ix-'));
     mkdirSync(dir, { recursive: true });
+    stampCanvasNode(deck);
     atomicWriteJson(deckPath(dir), deck);
 
     const jobId = basename(dir);
