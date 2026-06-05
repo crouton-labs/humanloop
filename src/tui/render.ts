@@ -334,6 +334,13 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
     postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
   }
 
+  // Transient hint (e.g. an empty multi-select Enter that was rejected). Sits
+  // just above the footer; cleared on the next keypress.
+  if (state.hint !== undefined && state.hint.length > 0) {
+    postLines.push('');
+    postLines.push(`  ${YELLOW}${sanitize(state.hint)}${RESET}`);
+  }
+
   // Window the body
   const reservedRows = preLines.length + postLines.length + 1; // +1 for footer
   const bodyHeight = Math.max(1, rows - reservedRows);

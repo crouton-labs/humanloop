@@ -135,6 +135,9 @@ export interface TuiState {
   selectedAction: number;
   detailExpanded: boolean;
   scrollOffset: number;
+  /** Transient one-line notice shown in item-review (e.g. an empty multi-select
+   *  Enter that was rejected). Cleared on the next keypress. */
+  hint?: string;
   persist?: () => void;
 }
 

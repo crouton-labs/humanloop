@@ -712,4 +712,105 @@ assert.deepEqual(
 );
 ocPanel.unmount();
 
+// ── Test 19: multi-select requires explicit confirm (no auto-finalize on 1st Enter) ──
+// Regression for: a single-interaction multiSelect deck auto-finalized the
+// instant the set was confirmed, with no Summary/confirm pause. Now the first
+// Enter lands on the Summary screen; a second deliberate Enter submits.
+
+const confirmDeck: Deck = {
+  interactions: [
+    {
+      id: 'cs1', title: 'Pick toppings', multiSelect: true,
+      options: [
+        { id: 'mush', label: 'Mushroom', shortcut: 'a' },
+        { id: 'onion', label: 'Onion', shortcut: 'b' },
+      ],
+    },
+  ],
+};
+
+let confirmFired = false;
+let confirmResponses: InteractionResponse[] = [];
+const confirmPanel = mountPanel({
+  deck: confirmDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: (responses) => { confirmFired = true; confirmResponses = responses; },
+});
+
+// Single-item deck starts in item-review, cursor on 'mush'.
+confirmPanel.handleKey(' ', mkKey({})); // toggle 'mush' on
+confirmPanel.handleKey('', RETURN);     // confirm set → lands on Summary, must NOT finalize
+assert.equal(
+  confirmFired,
+  false,
+  'multi-select first Enter must NOT auto-finalize (lands on the confirm screen)',
+);
+const confirmScreen = confirmPanel.render().join('\n');
+assert.ok(
+  confirmScreen.includes('Summary'),
+  'after confirming a multi-select set, the deck shows the Summary/confirm screen',
+);
+// Second deliberate Enter on the Summary screen finalizes.
+confirmPanel.handleKey('', RETURN);
+assert.equal(
+  confirmFired,
+  true,
+  'second Enter on the Summary screen finalizes the multi-select deck',
+);
+assert.deepEqual(
+  confirmResponses,
+  [{ id: 'cs1', selectedOptionIds: ['mush'] }],
+  'confirmed multi-select set returned on finalize',
+);
+confirmPanel.unmount();
+
+// ── Test 20: empty multi-select Enter is a no-op (does not finalize or advance) ──
+// Regression for: Enter with zero options toggled committed {selectedOptionIds:[]}
+// and finalized the deck. Now it's a no-op with an inline hint; the deck is not
+// stuck — picking an option and confirming still works.
+
+const emptyDeck: Deck = {
+  interactions: [
+    {
+      id: 'es1', title: 'Pick toppings', multiSelect: true,
+      options: [
+        { id: 'mush', label: 'Mushroom', shortcut: 'a' },
+        { id: 'onion', label: 'Onion', shortcut: 'b' },
+      ],
+    },
+  ],
+};
+
+let emptyFired = false;
+const emptyPanel = mountPanel({
+  deck: emptyDeck,
+  cols: 80,
+  rows: 24,
+  onComplete: () => { emptyFired = true; },
+});
+
+// Cursor on 'mush', nothing toggled. Enter must be a no-op.
+emptyPanel.handleKey('', RETURN);
+assert.equal(emptyFired, false, 'Enter with an empty multi-select set must NOT finalize');
+const stillReview = emptyPanel.render().join('\n');
+assert.ok(
+  stillReview.includes('Pick toppings'),
+  'after empty Enter, still on the interaction (no advance)',
+);
+assert.ok(
+  !stillReview.includes('Summary'),
+  'after empty Enter, the deck did NOT advance to the Summary screen',
+);
+assert.ok(
+  stillReview.toLowerCase().includes('select at least one'),
+  'empty multi-select Enter surfaces an inline hint',
+);
+// Prove the deck is not trapped: pick an option, then confirm.
+emptyPanel.handleKey('a', mkKey({})); // shortcut toggles 'mush' on
+emptyPanel.handleKey('', RETURN);     // confirm → Summary
+emptyPanel.handleKey('', RETURN);     // second Enter → finalize
+assert.equal(emptyFired, true, 'after picking an option, the multi-select deck can still be confirmed');
+emptyPanel.unmount();
+
 console.log('OK');

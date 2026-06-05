@@ -41,6 +41,11 @@ export function handleKeypress(
     return;
   }
 
+  // Clear any transient hint from the previous keypress. Handlers below may set
+  // a fresh one (e.g. an empty multi-select Enter), so it survives exactly one
+  // render cycle.
+  state.hint = undefined;
+
   if (state.inputMode) {
     handleInputMode(input, key, state, render);
     checkAutoExit(state, exit);
@@ -62,9 +67,18 @@ export function handleKeypress(
 }
 
 function checkAutoExit(state: TuiState, exit: ExitFn): void {
-  if (state.phase === 'final' && state.responses.size >= state.interactions.length) {
-    exit();
-  }
+  if (state.phase !== 'final') return;
+  if (state.responses.size < state.interactions.length) return;
+  // Multi-select commits route THROUGH the Summary/confirm screen instead of
+  // auto-exiting on the first Enter: the commit advances the deck to `final`,
+  // but the human must press Enter again (handleFinal) to actually submit.
+  // The interaction that pushed us into `final` is still at currentIndex — the
+  // advance helpers leave it there when they fall through to `final` — so a
+  // multi-select there means "just confirmed a set, await deliberate submit".
+  // Single-select keeps its submit-on-pick fast path (auto-exit below).
+  const justCommitted = state.interactions[state.currentIndex];
+  if (justCommitted?.multiSelect === true) return;
+  exit();
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
@@ -245,6 +259,15 @@ function handleInteractionAction(
   // and advances; single-select picks that one option.
   if (key.return && state.selectedAction < opts.length) {
     if (interaction.multiSelect) {
+      const checked = state.responses.get(interaction.id)?.selectedOptionIds ?? [];
+      if (checked.length === 0) {
+        // Accidental Enter with nothing toggled is a no-op: don't finalize or
+        // advance. A deliberate empty finish is still reachable via `q` →
+        // overview → finish (partial); freetext-only via the [c] row.
+        state.hint = 'Select at least one option (space to toggle), or q to skip';
+        render();
+        return;
+      }
       commitMulti(state, interaction);
       advanceToNextUnanswered(state);
       render();
