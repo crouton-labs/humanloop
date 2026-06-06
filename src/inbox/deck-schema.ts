@@ -11,7 +11,10 @@ export const interactionOptionSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   description: z.string().optional(),
-  shortcut: z.string().optional(),
+  // No author-settable `shortcut`: option shortcuts are auto-assigned by the
+  // TUI (assignShortcuts). zod strips unknown keys, so any author-supplied
+  // `shortcut` is silently dropped here — this is the enforcement boundary that
+  // stops a deck from shadowing a reserved key (e.g. `c` = comment).
 });
 
 export const preAnswerSchema = z.object({

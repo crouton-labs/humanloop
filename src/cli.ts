@@ -267,7 +267,6 @@ const REQUEST_SCHEMA = {
                 id: { type: 'string' },
                 label: { type: 'string' },
                 description: { type: 'string' },
-                shortcut: { type: 'string', description: 'Single char. Auto-assigned if absent.' },
               },
             },
           },

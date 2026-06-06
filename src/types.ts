@@ -8,6 +8,9 @@ export interface InteractionOption {
   id: string;
   label: string;
   description?: string;
+  /** Auto-assigned by the TUI (assignShortcuts) — NOT author-settable. Omitted
+   *  from the deck schema so a deck can't create a shortcut that shadows a
+   *  reserved key (e.g. `c` = comment, which would submit+close on single-select). */
   shortcut?: string;
 }
 
