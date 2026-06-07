@@ -33,7 +33,12 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
   if (str === '\r' || str === '\n') { key.return = true; return { input: '', key }; }
   // Alt+Backspace: terminals send ESC followed by DEL/BS. Must precede the
   // bare-ESC check so the two-byte sequence isn't swallowed as plain escape.
-  if (str === '\x1b\x7f' || str === '\x1b\b') {
+  // iTerm2 (and many readline configs) instead map Option/Alt+Backspace to a
+  // bare Ctrl-W (0x17, the "word-erase" byte) with no ESC prefix — fold it into
+  // the same meta+backspace key so the word-delete path fires either way. This
+  // must also precede the generic Ctrl-<letter> branch below, which would
+  // otherwise turn 0x17 into a literal 'w' in the buffer.
+  if (str === '\x1b\x7f' || str === '\x1b\b' || str === '\x17') {
     key.meta = true;
     key.backspace = true;
     return { input: '', key };

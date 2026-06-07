@@ -1,6 +1,7 @@
 import { mountPanel } from '../index.js';
 import type { Deck, InteractionResponse } from '../index.js';
 import type { Key } from '../tui/terminal.js';
+import { parseKeypress } from '../tui/terminal.js';
 import assert from 'node:assert/strict';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -857,6 +858,56 @@ assert.equal(
   freetextAfter('solo', [ALT_BACKSPACE, ALT_BACKSPACE]),
   '',
   'Alt+Backspace at start-of-buffer is a no-op (no underflow past empty)',
+);
+
+// ── Test 22: raw iTerm2 control bytes drive word-delete / line-clear ──────────────
+// iTerm2 maps Option+Backspace → bare 0x17 (Ctrl-W) and Cmd+Backspace → bare
+// 0x15 (Ctrl-U), with no ESC prefix. These are fed through the real
+// parseKeypress so the terminal-layer mapping is exercised end-to-end, not just
+// the synthetic meta+backspace key tested above.
+
+function freetextRaw(typed: string, rawOps: string[]): string | undefined {
+  const deck: Deck = {
+    interactions: [{ id: 'w2', title: 'Notes', options: [], allowFreetext: true }],
+  };
+  let captured: InteractionResponse[] = [];
+  const p = mountPanel({ deck, cols: 80, rows: 24, onComplete: (r) => { captured = r; } });
+  p.handleKey('r', mkKey({}));                 // single-item deck → item-review; 'r' opens freetext
+  for (const ch of typed) p.handleKey(ch, mkKey({}));
+  for (const raw of rawOps) {
+    const { input, key } = parseKeypress(Buffer.from(raw, 'utf8'));
+    p.handleKey(input, key);
+  }
+  p.handleKey('', RETURN);                     // submit freetext
+  p.handleKey('', RETURN);                     // final → complete
+  p.unmount();
+  return captured[0]?.freetext;
+}
+
+assert.equal(
+  freetextRaw('hello world foo', ['\x17']),
+  'hello world ',
+  'bare 0x17 (Ctrl-W, iTerm2 Option+Backspace) deletes the trailing word',
+);
+assert.equal(
+  freetextRaw('alpha beta   ', ['\x17']),
+  'alpha ',
+  '0x17 deletes trailing whitespace then the preceding word',
+);
+assert.equal(
+  freetextRaw('one two three', ['\x17', '\x17']),
+  'one ',
+  'repeated 0x17 deletes successive words',
+);
+assert.equal(
+  freetextRaw('clear me out', ['\x15']),
+  '',
+  'bare 0x15 (Ctrl-U, iTerm2 Cmd+Backspace) deletes to line start (clears buffer)',
+);
+assert.equal(
+  freetextRaw('keep', ['\x15', '\x15']),
+  '',
+  '0x15 on an already-empty buffer is a no-op',
 );
 
 console.log('OK');

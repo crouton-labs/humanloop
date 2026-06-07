@@ -355,6 +355,16 @@ function handleInputMode(
     return;
   }
 
+  // Ctrl-U: delete to the start of the line (readline "unix-line-discard").
+  // iTerm2 maps Cmd+Backspace to a bare 0x15, which arrives here as ctrl+'u'.
+  // The buffer is end-anchored (no mid-string cursor), so "to line start" is
+  // the entire buffer.
+  if (key.ctrl && input === 'u') {
+    mode.buffer = '';
+    render();
+    return;
+  }
+
   if (key.backspace) {
     const chars = [...mode.buffer];
     chars.pop();
