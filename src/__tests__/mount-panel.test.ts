@@ -813,4 +813,50 @@ emptyPanel.handleKey('', RETURN);     // second Enter → finalize
 assert.equal(emptyFired, true, 'after picking an option, the multi-select deck can still be confirmed');
 emptyPanel.unmount();
 
+// ── Test 21: Alt+Backspace deletes the previous word in freetext input ────────
+// Required deliverable: Option/Alt+Backspace arrives as ESC+DEL (\x1b\x7f) /
+// ESC+BS (\x1b\b), parsed by parseKeypress into key.meta+key.backspace, and
+// deletes back over any trailing whitespace + the preceding word — matching
+// macOS text-input behavior. The freetext buffer is end-anchored (no mid-string
+// cursor), so forward word-delete (Option+Delete) and word-motion
+// (Option+Left/Right) are deferred: they'd require introducing a cursor index.
+
+const ALT_BACKSPACE = mkKey({ backspace: true, meta: true });
+
+function freetextAfter(typed: string, ops: Key[]): string | undefined {
+  const deck: Deck = {
+    interactions: [{ id: 'w1', title: 'Notes', options: [], allowFreetext: true }],
+  };
+  let captured: InteractionResponse[] = [];
+  const p = mountPanel({ deck, cols: 80, rows: 24, onComplete: (r) => { captured = r; } });
+  p.handleKey('r', mkKey({}));                 // single-item deck → item-review; 'r' opens freetext
+  for (const ch of typed) p.handleKey(ch, mkKey({}));
+  for (const op of ops) p.handleKey('', op);
+  p.handleKey('', RETURN);                     // submit freetext
+  p.handleKey('', RETURN);                     // final → complete
+  p.unmount();
+  return captured[0]?.freetext;
+}
+
+assert.equal(
+  freetextAfter('hello world foo', [ALT_BACKSPACE]),
+  'hello world ',
+  'Alt+Backspace deletes the trailing word, leaving the separating space',
+);
+assert.equal(
+  freetextAfter('alpha beta   ', [ALT_BACKSPACE]),
+  'alpha ',
+  'Alt+Backspace deletes trailing whitespace then the preceding word',
+);
+assert.equal(
+  freetextAfter('one two three', [ALT_BACKSPACE, ALT_BACKSPACE]),
+  'one ',
+  'repeated Alt+Backspace deletes successive words',
+);
+assert.equal(
+  freetextAfter('solo', [ALT_BACKSPACE, ALT_BACKSPACE]),
+  '',
+  'Alt+Backspace at start-of-buffer is a no-op (no underflow past empty)',
+);
+
 console.log('OK');
