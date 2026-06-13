@@ -9,7 +9,7 @@ import { scanInbox } from './inbox/scan.js';
 import { pickFromInbox } from './inbox/tui.js';
 import { deckPath, atomicWriteJson, readJson, stampCanvasNode } from './inbox/convention.js';
 import { getTerminalSize } from './tui/terminal.js';
-import { approveDeck, notifyDeck } from './inbox/deck-factories.js';
+import { notifyDeck } from './inbox/deck-factories.js';
 
 const RESPONSE_SCHEMA_ID = 'humanloop.response/v2' as const;
 
@@ -88,20 +88,6 @@ export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnv
     responses,
     completedAt,
   };
-}
-
-export interface ApproveOpts {
-  subtitle?: string;
-  body?: string;
-  dir?: string;
-  sessionId?: string;
-}
-
-/** Sugar: a single `kind:'validation'` Yes/No interaction. */
-export async function approve(title: string, opts: ApproveOpts = {}): Promise<boolean> {
-  const deck = approveDeck(title, { subtitle: opts.subtitle, body: opts.body });
-  const env = await ask(deck, { dir: opts.dir, sessionId: opts.sessionId });
-  return env.responses[0]?.selectedOptionId === 'yes';
 }
 
 /** Sugar: a single `kind:'notify'` acknowledgement. */

@@ -5,7 +5,7 @@ export { launchReview as review } from './editor/review.js';
 export type { ReviewOptions } from './editor/review.js';
 
 // Interaction-layer surface (SDK).
-export { ask, approve, notify, inbox } from './api.js';
+export { ask, notify, inbox } from './api.js';
 export { display } from './surfaces/display.js';
 export { scanInbox } from './inbox/scan.js';
 
@@ -20,8 +20,8 @@ export { parseDeck, validateDeck, deckSchema } from './inbox/deck-schema.js';
 
 // Deck factories — pure builders for common deck shapes (sugar for SDK consumers
 // who want validated Yes/No or notify decks without inline construction).
-export { approveDeck, notifyDeck } from './inbox/deck-factories.js';
-export type { ApproveDeckOpts, NotifyDeckOpts } from './inbox/deck-factories.js';
+export { notifyDeck } from './inbox/deck-factories.js';
+export type { NotifyDeckOpts } from './inbox/deck-factories.js';
 
 // Interaction-directory convention helpers (§B) — names humanloop owns.
 export {

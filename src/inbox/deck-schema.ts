@@ -34,7 +34,7 @@ const interactionSchema = z.object({
   multiSelect: z.boolean().optional(),
   allowFreetext: z.boolean().optional(),
   freetextLabel: z.string().optional(),
-  kind: z.enum(['notify', 'validation', 'decision', 'context', 'error']).optional(),
+  kind: z.enum(['notify', 'decision', 'context', 'error']).optional(),
   preAnswered: preAnswerSchema.optional(),
 });
 

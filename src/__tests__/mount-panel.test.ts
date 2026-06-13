@@ -91,7 +91,7 @@ const roundTripDeck: Deck = {
       id: 'i1', title: 'Review PR',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }, { id: 'reject', label: 'Reject', shortcut: 'r' }],
       allowFreetext: true,
-      kind: 'validation',
+      kind: 'decision',
     },
     {
       id: 'i2', title: 'Pick ORM',

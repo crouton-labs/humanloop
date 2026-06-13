@@ -2,7 +2,7 @@
 
 import type { Key } from './tui/terminal.js';
 
-export type InteractionKind = 'notify' | 'validation' | 'decision' | 'context' | 'error' | 'review';
+export type InteractionKind = 'notify' | 'decision' | 'context' | 'error' | 'review';
 
 export interface InteractionOption {
   id: string;

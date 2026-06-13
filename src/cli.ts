@@ -272,7 +272,7 @@ const REQUEST_SCHEMA = {
           },
           allowFreetext: { type: 'boolean' },
           freetextLabel: { type: 'string' },
-          kind: { type: 'string', enum: ['notify', 'validation', 'decision', 'context', 'error'] },
+          kind: { type: 'string', enum: ['notify', 'decision', 'context', 'error'] },
         },
       },
     },

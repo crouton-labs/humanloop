@@ -34,7 +34,6 @@ function ansiColor(text: string, color: string): string {
 
 export const KIND_ICON: Record<string, string> = {
   notify: '✉',
-  validation: '✓',
   decision: '◆',
   context: '✎',
   error: '⚠',
@@ -42,7 +41,6 @@ export const KIND_ICON: Record<string, string> = {
 
 export const KIND_COLOR: Record<string, string> = {
   notify: 'gray',
-  validation: 'cyan',
   decision: 'cyan',
   context: 'cyan',
   error: 'red',
