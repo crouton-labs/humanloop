@@ -1,7 +1,7 @@
 import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import { renderMarkdown } from '../render/termrender.js';
 import {
-  ESC, RESET, BOLD, DIM, ITALIC, GREEN, YELLOW, CYAN,
+  ESC, RESET, BOLD, DIM, ITALIC, GREEN, YELLOW, CYAN, REVERSE,
   sanitize, singleLine, truncate, hline, wrap, hardWrap, centerHorizontal, clipLine,
 } from './ansi.js';
 
@@ -95,6 +95,25 @@ export function renderOverview(state: TuiState, cols: number, rows: number): str
   // against a 60-col cap (the divider width) when the terminal is much wider.
   const centered = centerHorizontal(lines.slice(0, rows), cols, Math.min(cols, 60) + 2);
   return centered;
+}
+
+/**
+ * Render a (possibly multiline) input buffer with a visible cursor at
+ * `cursor` (a code-point index). A private-use sentinel is inserted at the
+ * cursor position, the result is hard-wrapped (so `\n` and width-wrapping
+ * behave exactly as they would without a cursor), then the sentinel is
+ * swapped for a reverse-video block on whichever wrapped line it landed on.
+ * `stringWidth('\uE000') === 1`, so it occupies exactly one column and never
+ * throws off the wrap math.
+ */
+export function renderInputBuffer(buffer: string, cursor: number, maxWidth: number): string[] {
+  const chars = [...buffer];
+  const at = Math.max(0, Math.min(cursor, chars.length));
+  const withCaret = [...chars.slice(0, at), '\uE000', ...chars.slice(at)].join('');
+  const wrapped = hardWrap(withCaret, maxWidth);
+  return wrapped.map((line) => (
+    line.includes('\uE000') ? line.replace('\uE000', `${REVERSE} ${RESET}`) : line
+  ));
 }
 
 interface ItemReviewLayout {
@@ -206,17 +225,14 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     for (const labelLine of wrap(`${singleLine(label)}:`, maxW)) {
       postLines.push(`  ${YELLOW}${labelLine}${RESET}`);
     }
-    const bufLines = hardWrap(state.inputMode.buffer, maxW - 1);
-    for (let i = 0; i < bufLines.length; i++) {
-      const isLast = i === bufLines.length - 1;
-      postLines.push(`  ${bufLines[i]}${isLast ? '█' : ''}`);
-    }
+    const bufLines = renderInputBuffer(state.inputMode.buffer, state.inputMode.cursor, maxW - 1);
+    for (const line of bufLines) postLines.push(`  ${line}`);
     if (attachedLine !== undefined) {
       postLines.push('');
       postLines.push(attachedLine);
     }
     postLines.push('');
-    postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}esc${RESET} cancel`);
+    postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}^J/⌥⏎${RESET} newline  ${DIM}^O${RESET} editor  ${DIM}esc${RESET} cancel`);
   } else {
     postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
   }

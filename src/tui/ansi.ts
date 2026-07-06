@@ -14,6 +14,7 @@ export const GREEN = `${ESC}32m`;
 export const YELLOW = `${ESC}33m`;
 export const CYAN = `${ESC}36m`;
 export const GRAY = `${ESC}90m`;
+export const REVERSE = `${ESC}7m`;
 
 // ── Text helpers ──────────────────────────────────────────────────────────────
 

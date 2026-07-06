@@ -1,7 +1,18 @@
 export interface Key {
   upArrow: boolean;
   downArrow: boolean;
+  leftArrow: boolean;
+  rightArrow: boolean;
+  /** Word-wise cursor motion (ctrl/alt + arrow, or readline alt-b / alt-f). */
+  wordLeft: boolean;
+  wordRight: boolean;
+  home: boolean;
+  end: boolean;
+  /** Forward delete (the Del key / \x1b[3~). */
+  del: boolean;
   return: boolean;
+  /** Newline-insert chord (ctrl+j / alt+enter) — distinct from return=submit. */
+  newline: boolean;
   escape: boolean;
   ctrl: boolean;
   meta: boolean;
@@ -15,7 +26,15 @@ function emptyKey(): Key {
   return {
     upArrow: false,
     downArrow: false,
+    leftArrow: false,
+    rightArrow: false,
+    wordLeft: false,
+    wordRight: false,
+    home: false,
+    end: false,
+    del: false,
     return: false,
+    newline: false,
     escape: false,
     ctrl: false,
     meta: false,
@@ -30,7 +49,24 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
 
   if (str === '\x1b[A') { key.upArrow = true; return { input: '', key }; }
   if (str === '\x1b[B') { key.downArrow = true; return { input: '', key }; }
-  if (str === '\r' || str === '\n') { key.return = true; return { input: '', key }; }
+  if (str === '\x1b[C') { key.rightArrow = true; return { input: '', key }; }
+  if (str === '\x1b[D') { key.leftArrow = true; return { input: '', key }; }
+  // Word-wise motion: ctrl/alt + left/right (xterm modifier encodings) and the
+  // readline alt-b / alt-f bindings. Must precede the bare-ESC checks below.
+  if (str === '\x1b[1;5C' || str === '\x1b[1;3C' || str === '\x1bf') { key.wordRight = true; return { input: '', key }; }
+  if (str === '\x1b[1;5D' || str === '\x1b[1;3D' || str === '\x1bb') { key.wordLeft = true; return { input: '', key }; }
+  if (str === '\x1b[H' || str === '\x1b[1~') { key.home = true; return { input: '', key }; }
+  if (str === '\x1b[F' || str === '\x1b[4~') { key.end = true; return { input: '', key }; }
+  if (str === '\x1b[3~') { key.del = true; return { input: '', key }; }
+  // Alt+Enter inserts a newline in freetext (distinct from Enter=submit). Must
+  // precede the bare-ESC and meta-backspace checks so the two-byte sequence
+  // isn't swallowed as a lone escape.
+  if (str === '\x1b\r' || str === '\x1b\n') { key.newline = true; return { input: '', key }; }
+  // Enter (submit) is CR; ctrl+j (LF) inserts a newline. Splitting them lets
+  // freetext use ctrl+j for a hard newline while Enter still submits. In a raw
+  // TTY the Enter key sends CR, so this split is safe.
+  if (str === '\r') { key.return = true; return { input: '', key }; }
+  if (str === '\n') { key.newline = true; return { input: '', key }; }
   // Alt+Backspace: terminals send ESC followed by DEL/BS. Must precede the
   // bare-ESC check so the two-byte sequence isn't swallowed as plain escape.
   // iTerm2 (and many readline configs) instead map Option/Alt+Backspace to a

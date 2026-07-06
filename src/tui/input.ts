@@ -228,7 +228,7 @@ function handleInteractionAction(
         const prior = existing?.optionComments?.[optId];
         if (typeof prior === 'string') prefill = prior;
       }
-      state.inputMode = { kind: 'comment', buffer: prefill, selectedOptionId: optId };
+      state.inputMode = { kind: 'comment', buffer: prefill, cursor: [...prefill].length, selectedOptionId: optId };
     } else {
       // On the [c] row in multi-select: pre-fill from existing overall freetext.
       let prefill = '';
@@ -238,7 +238,7 @@ function handleInteractionAction(
           prefill = existing.freetext;
         }
       }
-      state.inputMode = { kind: 'comment', buffer: prefill };
+      state.inputMode = { kind: 'comment', buffer: prefill, cursor: [...prefill].length };
     }
     render();
     return;
@@ -249,7 +249,7 @@ function handleInteractionAction(
     if (input === 'r' || key.return) {
       const existing = state.responses.get(interaction.id);
       const prefill = existing !== undefined && existing.freetext !== undefined ? existing.freetext : '';
-      state.inputMode = { kind: 'freetext', buffer: prefill };
+      state.inputMode = { kind: 'freetext', buffer: prefill, cursor: [...prefill].length };
       render();
       return;
     }
@@ -283,7 +283,7 @@ function handleInteractionAction(
   // Enter on the [c] row (allowFreetext + options exist)
   if (key.return && state.selectedAction === opts.length
       && interaction.allowFreetext && opts.length > 0) {
-    state.inputMode = { kind: 'comment', buffer: '' };
+    state.inputMode = { kind: 'comment', buffer: '', cursor: 0 };
     render();
     return;
   }
@@ -349,45 +349,171 @@ function handleInputMode(
     return;
   }
 
-  if (key.backspace && key.meta) {
-    mode.buffer = deleteWordBack(mode.buffer);
+  // Newline-insert chord (ctrl+j / alt+enter) — distinct from key.return
+  // (submit), handled above.
+  if (key.newline) {
+    insertAtCursor(mode, '\n');
     render();
     return;
   }
 
-  // Ctrl-U: delete to the start of the line (readline "unix-line-discard").
+  // ── Cursor motion ──────────────────────────────────────────────────────
+  if (key.leftArrow) {
+    mode.cursor = Math.max(0, mode.cursor - 1);
+    render();
+    return;
+  }
+  if (key.rightArrow) {
+    mode.cursor = Math.min([...mode.buffer].length, mode.cursor + 1);
+    render();
+    return;
+  }
+  if (key.wordLeft) {
+    mode.cursor = wordLeftIndex(mode.buffer, mode.cursor);
+    render();
+    return;
+  }
+  if (key.wordRight) {
+    mode.cursor = wordRightIndex(mode.buffer, mode.cursor);
+    render();
+    return;
+  }
+  if (key.home || (key.ctrl && input === 'a')) {
+    mode.cursor = lineStart(mode.buffer, mode.cursor);
+    render();
+    return;
+  }
+  if (key.end || (key.ctrl && input === 'e')) {
+    mode.cursor = lineEnd(mode.buffer, mode.cursor);
+    render();
+    return;
+  }
+
+  // ── Edits ───────────────────────────────────────────────────────────────
+  if (key.backspace && key.meta) {
+    deleteWordAtCursor(mode);
+    render();
+    return;
+  }
+
+  // Ctrl-U: delete from line start to cursor (readline "unix-line-discard").
   // iTerm2 maps Cmd+Backspace to a bare 0x15, which arrives here as ctrl+'u'.
-  // The buffer is end-anchored (no mid-string cursor), so "to line start" is
-  // the entire buffer.
   if (key.ctrl && input === 'u') {
-    mode.buffer = '';
+    deleteToLineStart(mode);
+    render();
+    return;
+  }
+
+  if (key.del) {
+    deleteAtCursor(mode);
     render();
     return;
   }
 
   if (key.backspace) {
-    const chars = [...mode.buffer];
-    chars.pop();
-    mode.buffer = chars.join('');
+    backspaceAtCursor(mode);
     render();
     return;
   }
 
+  // Typed input / paste. Bracketed-paste markers and other control chars are
+  // stripped, but \n (0x0A) is preserved so pasted newlines land as real
+  // newlines in the buffer instead of vanishing (CRLF is normalized to LF).
   const cleaned = input
     .replace(/\x1b\[20[01]~/g, '')
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
-    .replace(/[\x00-\x1F\x7F]/g, '');
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '');
   if (cleaned.length > 0) {
-    mode.buffer += cleaned;
+    insertAtCursor(mode, cleaned);
     render();
   }
 }
 
-function deleteWordBack(buffer: string): string {
+// ── Cursor-aware editing helpers ────────────────────────────────────────────
+// Operate on code-point arrays (not UTF-16 code units) so multi-byte chars
+// (emoji, combining marks) move/delete as one unit under the cursor.
+
+interface EditableInput {
+  buffer: string;
+  cursor: number;
+}
+
+function insertAtCursor(mode: EditableInput, text: string): void {
+  const chars = [...mode.buffer];
+  const insert = [...text];
+  chars.splice(mode.cursor, 0, ...insert);
+  mode.buffer = chars.join('');
+  mode.cursor += insert.length;
+}
+
+function backspaceAtCursor(mode: EditableInput): void {
+  if (mode.cursor <= 0) return;
+  const chars = [...mode.buffer];
+  chars.splice(mode.cursor - 1, 1);
+  mode.buffer = chars.join('');
+  mode.cursor -= 1;
+}
+
+function deleteAtCursor(mode: EditableInput): void {
+  const chars = [...mode.buffer];
+  if (mode.cursor >= chars.length) return;
+  chars.splice(mode.cursor, 1);
+  mode.buffer = chars.join('');
+}
+
+function deleteWordAtCursor(mode: EditableInput): void {
+  const start = wordLeftIndex(mode.buffer, mode.cursor);
+  const chars = [...mode.buffer];
+  chars.splice(start, mode.cursor - start);
+  mode.buffer = chars.join('');
+  mode.cursor = start;
+}
+
+function deleteToLineStart(mode: EditableInput): void {
+  const start = lineStart(mode.buffer, mode.cursor);
+  const chars = [...mode.buffer];
+  chars.splice(start, mode.cursor - start);
+  mode.buffer = chars.join('');
+  mode.cursor = start;
+}
+
+/** Skip whitespace backward from `cursor`, then skip the non-whitespace word
+ *  before it — lands on the word's start (readline alt-b / ctrl+left). */
+function wordLeftIndex(buffer: string, cursor: number): number {
   const chars = [...buffer];
-  while (chars.length > 0 && /\s/.test(chars[chars.length - 1]!)) chars.pop();
-  while (chars.length > 0 && !/\s/.test(chars[chars.length - 1]!)) chars.pop();
-  return chars.join('');
+  let i = Math.min(cursor, chars.length);
+  while (i > 0 && /\s/.test(chars[i - 1]!)) i--;
+  while (i > 0 && !/\s/.test(chars[i - 1]!)) i--;
+  return i;
+}
+
+/** Skip whitespace forward from `cursor`, then skip the non-whitespace word
+ *  after it — lands just past the word's end (readline alt-f / ctrl+right). */
+function wordRightIndex(buffer: string, cursor: number): number {
+  const chars = [...buffer];
+  let i = Math.min(cursor, chars.length);
+  while (i < chars.length && /\s/.test(chars[i]!)) i++;
+  while (i < chars.length && !/\s/.test(chars[i]!)) i++;
+  return i;
+}
+
+/** Index just after the previous `\n` (or 0), i.e. the start of the current
+ *  visual line — the multiline analog of ctrl+a/home. */
+function lineStart(buffer: string, cursor: number): number {
+  const chars = [...buffer];
+  let i = Math.min(cursor, chars.length);
+  while (i > 0 && chars[i - 1] !== '\n') i--;
+  return i;
+}
+
+/** Index at the next `\n` (or end of buffer) — the multiline analog of
+ *  ctrl+e/end. */
+function lineEnd(buffer: string, cursor: number): number {
+  const chars = [...buffer];
+  let i = Math.min(cursor, chars.length);
+  while (i < chars.length && chars[i] !== '\n') i++;
+  return i;
 }
 
 // ── Final ────────────────────────────────────────────────────────────────────

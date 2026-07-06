@@ -121,8 +121,8 @@ export type Phase = 'overview' | 'item-review' | 'final';
 
 export type InputMode =
   | null
-  | { kind: 'comment'; buffer: string; selectedOptionId?: string }
-  | { kind: 'freetext'; buffer: string };
+  | { kind: 'comment'; buffer: string; cursor: number; selectedOptionId?: string }
+  | { kind: 'freetext'; buffer: string; cursor: number };
 
 export interface TuiState {
   phase: Phase;
