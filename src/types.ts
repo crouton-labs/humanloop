@@ -225,4 +225,15 @@ export interface MountedPanel {
    * whether Esc should step back inside the deck (false) or tear it down (true).
    */
   atDeckTop(): boolean;
+  /**
+   * Live comment/freetext buffer, or undefined when not in input mode. Lets a
+   * host implement the $EDITOR escape hatch (ctrl+o) without reaching into
+   * panel-internal state: read the buffer here before spawning the editor.
+   */
+  getInputBuffer(): string | undefined;
+  /**
+   * Replace the input-mode buffer (e.g. after an $EDITOR round-trip) and move
+   * the cursor to the end. No-op when not in input mode.
+   */
+  setInputBuffer(text: string): void;
 }

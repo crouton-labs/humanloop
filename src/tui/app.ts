@@ -1,5 +1,8 @@
 import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync, statSync } from 'fs';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { dirname, resolve as resolvePath, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import type {
   Deck, TuiState, Interaction, InteractionResponse,
   MountedPanel, MountedPanelOpts, GenerateVisual,
@@ -237,6 +240,17 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       if (!internals.mounted) return true;
       return internals.state.phase === 'overview' && internals.state.inputMode === null;
     },
+
+    getInputBuffer() {
+      if (!internals.mounted || internals.state.inputMode === null) return undefined;
+      return internals.state.inputMode.buffer;
+    },
+
+    setInputBuffer(text) {
+      if (!internals.mounted || internals.state.inputMode === null) return;
+      internals.state.inputMode.buffer = text;
+      internals.state.inputMode.cursor = [...text].length;
+    },
   };
 }
 
@@ -394,8 +408,79 @@ export async function resolveInteractionDir(
       flushHost(panel.render());
     }, 500);
 
+    // $EDITOR escape hatch (ctrl+o): the host owns the stdin listener + raw
+    // mode, so it — not handleInputMode — is where the editor round-trip has
+    // to live. Detected here before delegating to the panel; only acts while
+    // an input-mode buffer exists (panel.getInputBuffer() undefined otherwise).
+    const runEditorEscapeHatch = (buffer: string) => {
+      if (panel === null) return;
+      process.stdin.removeListener('data', onData);
+      process.stdout.removeListener('resize', onResize);
+
+      const tmpFile = join(tmpdir(), `hl-input-${randomUUID()}.txt`);
+      const editor = process.env.EDITOR || 'vi';
+      let next = buffer;
+      let errorMessage: string | null = null;
+
+      // Everything from suspending the TUI through the editor round-trip can
+      // throw (tmpfile write, spawn, readback) — a tmpdir write failure alone
+      // (e.g. /tmp full) used to escape with the listeners detached and the
+      // real terminal never restored. The try/finally below guarantees the
+      // finally branch — tmpfile cleanup, TUI restore, listener re-attach,
+      // resize-aware redraw — runs on every path, success or failure.
+      try {
+        restoreTerminal();
+        writeFileSync(tmpFile, buffer);
+        const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
+        if (result.error) {
+          errorMessage = `$EDITOR ("${editor}") failed to launch: ${result.error.message}`;
+        } else if (result.signal !== null) {
+          errorMessage = `$EDITOR ("${editor}") was killed by signal ${result.signal}`;
+        } else if (result.status !== 0) {
+          errorMessage = `$EDITOR ("${editor}") exited with status ${result.status}`;
+        } else {
+          let read = readFileSync(tmpFile, 'utf8');
+          // Editors conventionally append a trailing newline on save; strip
+          // exactly one so a round-trip that added nothing doesn't grow the
+          // buffer by a blank line.
+          if (read.endsWith('\n') && !buffer.endsWith('\n')) read = read.slice(0, -1);
+          next = read;
+        }
+      } catch (err) {
+        errorMessage = `$EDITOR round-trip failed: ${err instanceof Error ? err.message : String(err)}`;
+      } finally {
+        try { unlinkSync(tmpFile); } catch { /* best-effort cleanup — may never have been created */ }
+
+        setupTerminal();
+        process.stdin.on('data', onData);
+        process.stdout.on('resize', onResize);
+
+        // On any failure the original buffer is kept untouched. Re-sample the
+        // terminal size (it may have changed while the editor had it) so the
+        // post-editor redraw lays out for the CURRENT dimensions rather than
+        // the panel's stale cols/rows, same as the live resize listener does.
+        panel.setInputBuffer(errorMessage === null ? next : buffer);
+        const { cols: c, rows: r } = getTerminalSize();
+        const lines = panel.handleResize(c, r);
+        if (errorMessage !== null) {
+          while (lines.length < r) lines.push('');
+          lines[r - 1] = `  ${errorMessage}`.slice(0, c);
+        }
+        prevFrameLocal = [];
+        process.stdout.write('\x1b[2J\x1b[H');
+        flushHost(lines);
+      }
+    };
+
     onData = (data: Buffer) => {
       const { input: inp, key } = parseKeypress(data);
+      if (key.ctrl && inp === 'o') {
+        const buf = panel!.getInputBuffer();
+        if (buf !== undefined) {
+          runEditorEscapeHatch(buf);
+          return;
+        }
+      }
       panel!.handleKey(inp, key);
       flushHost(panel!.render());
     };
