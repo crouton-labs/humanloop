@@ -431,11 +431,17 @@ export async function resolveInteractionDir(
       try {
         restoreTerminal();
         writeFileSync(tmpFile, buffer);
-        const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
+        // $EDITOR is conventionally a shell fragment, not a bare binary —
+        // "code --wait", "emacsclient -t" — so run it through the shell (as
+        // git does) with the filename passed safely as a positional arg.
+        const result = spawnSync('/bin/sh', ['-c', `${editor} "$1"`, 'sh', tmpFile], { stdio: 'inherit' });
         if (result.error) {
           errorMessage = `$EDITOR ("${editor}") failed to launch: ${result.error.message}`;
         } else if (result.signal !== null) {
           errorMessage = `$EDITOR ("${editor}") was killed by signal ${result.signal}`;
+        } else if (result.status === 127 || result.status === 126) {
+          // Shell couldn't exec the editor: 127 = not found, 126 = not executable.
+          errorMessage = `$EDITOR ("${editor}") failed to launch (shell exit ${result.status})`;
         } else if (result.status !== 0) {
           errorMessage = `$EDITOR ("${editor}") exited with status ${result.status}`;
         } else {
