@@ -205,6 +205,11 @@ export interface MountedPanelOpts {
   onProgress?: (responses: InteractionResponse[]) => void;
   onComplete?: (responses: InteractionResponse[]) => void;
   onExit?: () => void;
+  /** Fired when panel state changes outside a keypress — currently when an
+   *  async visual finishes loading. Hosts wire this to a repaint so
+   *  "loading context..." is replaced the moment context arrives, rather than
+   *  sticking until the next keystroke. Optional / backward-compatible. */
+  onDirty?: () => void;
 }
 
 export interface MountedPanel {

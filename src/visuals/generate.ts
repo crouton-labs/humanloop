@@ -2,48 +2,22 @@ import { query } from '@r-cli/sdk';
 import type { Interaction } from '../types.js';
 import { renderMarkdown } from '../render/termrender.js';
 
-const VISUAL_SYSTEM_PROMPT = `You're briefing a CTO-level engineer in the 30 seconds before they decide. They've been off this problem for days; they need a fast re-ground in what *already exists* — the files, data flow, or constraint they're deciding inside of — not a lecture on tradeoffs.
+const VISUAL_SYSTEM_PROMPT = `You are re-grounding a decision-maker in the moment before they answer the question below. They were deep in this problem but got pulled away; in the next 20 seconds they need to remember *what is actually in play* — the current state, the files, the constraint this decision lives inside — so the question stops feeling cold and they can answer with confidence.
 
-# Length
+Write from the conversation history you're given. Lead with what *is*: the real files, functions, data, and constraints that ground this decision, named concretely (as \`path/to/file.ts:123\` so they can jump straight there). Reconstruct just enough of how they arrived here to make the question legible — no more.
 
-Target 15–25 lines. Hard cap 30. A tight paragraph with two file refs is often perfect — don't pad.
+Keep it tight: usually a short paragraph or a few bullets, 30 lines hard cap. Say less when less is true. Choose whatever shape carries the meaning fastest — prose by default, a list when enumerating, a table only to compare several things across the same dimensions, a small diagram when the structure itself is the point. You're trusted to pick; don't force a format.
 
-# What to write
+The one rule that matters: **only reference files, identifiers, and facts that actually appear in the conversation.** Never invent a plausible-looking path or name. If the conversation is thin, write a short honest briefing about what little is grounded — that beats confident fabrication every time.
 
-Lead with *what is*, not *what could be*. Name the actual files, functions, tables, or data structures in play. Reference them as \`path/to/file.ts:123\` so they can jump to it. Skip preamble. Skip "here are the tradeoffs." Skip explaining the alternative — they're deciding, they know the alternative exists.
+And stay in your lane: don't restate the question, don't recommend an option or tell them how to decide, don't lay out tradeoffs or sketch alternatives. They own the decision; you only reconstruct the ground it stands on.
 
-If one sentence captures the current state, write one sentence. If they need to see a flow, draw it. If they need to compare 3+ options across same dimensions, use a table. Don't reach for a directive unless it genuinely clarifies — plain prose + bullet lists is the default.
-
-# Directives (termrender-flavored markdown)
-
-  :::panel{title="T" color="c"}                 Bordered box (colors: red|green|yellow|blue|magenta|cyan|white|gray)
-  :::tree{color="c"}                            Indented hierarchy (2-space indent = nesting)
-  :::callout{type="info|warning|error|success"} Status callout with icon
-  ::::columns / :::col{width="50%"}             Side-by-side layout (use 4 colons on the outer columns)
-
-Each opens with ::: and closes with :::. GFM tables (\`| col | col |\` with a \`| --- |\` separator) render directly — no directive needed. Standard markdown also works: **bold**, *italic*, \`code\`, bullets.
-
-# Critical: ASCII art must live inside a :::panel
-
-Plain text outside directives gets reflowed — box-drawing will be destroyed. If you draw a flow diagram or ASCII box, wrap it in \`:::panel\` to preserve it verbatim.
-
-# Grounding — the single most important rule
-
-**Only name files, functions, variables, or patterns that actually appear in the conversation history provided.** Do not invent plausible-sounding file paths, class names, or dependencies. If the conversation doesn't ground a fact, don't assert it. When in doubt, speak at a higher level of abstraction ("the state file," "the render loop") rather than making up a specific identifier.
-
-If the conversation doesn't contain enough context to write a grounded briefing, write a very short briefing that honestly reflects what little is known — a one-paragraph summary is better than a confident fabrication.
-
-# Hard rules
-
-- When nesting directives, the outer fence needs strictly more colons than the inner — e.g. \`::::columns\` wrapping \`:::col\`. Don't nest a panel inside a panel.
-- Never wrap output in backtick fences
-- Never repeat the question/statement text
-- Never write "tradeoffs to consider" or "here are some options"
-- Never describe an alternative architecture — just describe the current one
-- Never recommend an option or tell the user how to decide. They are the decider. You describe.
-- Never ask the user a question back. You are producing a briefing, not a conversation.
-- Do NOT use these section headings: **Recommendation:**, **Decide by:**, **Trade-off:**, **Why it matters:**, **What you're locking in:**. These invite editorializing. Use neutral labels like **Current state:**, **Constraint:**, or none at all.
-- 30 lines maximum`;
+Formatting: plain markdown renders (**bold**, *italic*, \`code\`, bullets, and GFM tables). These termrender directives are available if one genuinely helps — anything you draw with box-drawing/ASCII must sit inside a :::panel or it will be reflowed and destroyed:
+  :::panel{title="T" color="cyan"}                bordered box (red|green|yellow|blue|magenta|cyan|white|gray)
+  :::tree{color="c"}                              indented hierarchy (2-space indent = nesting)
+  :::callout{type="info|warning|error|success"}   status callout
+  ::::columns / :::col{width="50%"}               side-by-side (outer fence needs strictly more colons)
+Never wrap the whole output in a code fence.`;
 
 async function callHaiku(prompt: string, systemPrompt: string): Promise<string | null> {
   try {
@@ -76,6 +50,11 @@ async function callHaiku(prompt: string, systemPrompt: string): Promise<string |
 // mountPanel. Width is read from process.stdout.columns so callers that
 // embed humanloop in a sub-region should supply their own closure that bakes
 // in the correct width.
+// Cap on how much conversation we hand the generator. Recency is what grounds
+// the decision in front of the human, so when history is long we keep the tail
+// (most recent messages) rather than the head.
+const MAX_CONTEXT_CHARS = 24000;
+
 export async function defaultGenerateVisual(interaction: Interaction, conversationContext: string): Promise<{ ok: true; ansi: string; markdown: string } | { ok: false; error: string }> {
   const width = Math.max(40, Math.min((process.stdout.columns || 80) - 4, 76));
 
@@ -83,11 +62,18 @@ export async function defaultGenerateVisual(interaction: Interaction, conversati
     ? `\nOptions: ${interaction.options.map((o) => o.label).join(' | ')}`
     : '';
   const subtitleLine = interaction.subtitle ? `\nContext: ${interaction.subtitle}` : '';
-  const questionText = `Title: "${interaction.title}"${subtitleLine}${optionsSummary}`;
+  // The body is the richest statement of what's being asked — hand it to the
+  // generator so the briefing grounds in the actual question, not just its title.
+  const bodyLine = interaction.body ? `\nDetail:\n${interaction.body}` : '';
+  const questionText = `Title: "${interaction.title}"${subtitleLine}${bodyLine}${optionsSummary}`;
 
-  const prompt = conversationContext
-    ? `Here is the conversation so far:\n\n${conversationContext}\n\n---\n\nGenerate a visual context block for this decision point:\n\n${questionText}`
-    : `Generate a visual context block for this decision point:\n\n${questionText}`;
+  const trimmedContext = conversationContext.length > MAX_CONTEXT_CHARS
+    ? `…(earlier conversation trimmed)…\n\n${conversationContext.slice(-MAX_CONTEXT_CHARS)}`
+    : conversationContext;
+
+  const prompt = trimmedContext
+    ? `Here is the conversation so far:\n\n${trimmedContext}\n\n---\n\nThe human is about to answer this decision. Re-ground them in what's in play:\n\n${questionText}`
+    : `The human is about to answer this decision. Re-ground them in what's in play:\n\n${questionText}`;
 
   const result = await callHaiku(prompt, VISUAL_SYSTEM_PROMPT);
 

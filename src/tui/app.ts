@@ -106,6 +106,7 @@ interface PanelInternals {
     onProgress: MountedPanelOpts['onProgress'];
     onComplete: MountedPanelOpts['onComplete'];
     onExit: MountedPanelOpts['onExit'];
+    onDirty: MountedPanelOpts['onDirty'];
   };
 }
 
@@ -128,10 +129,12 @@ function fireVisuals(internals: PanelInternals, interactions: Interaction[]): vo
       internals.state.visuals.set(interaction.id, r.ok
         ? { questionId: interaction.id, content: r.ansi, status: 'ready' }
         : { questionId: interaction.id, content: '', status: 'error' });
+      internals.callbacks.onDirty?.();
     }).catch(() => {
       if (!internals.mounted) return;
       if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'error' });
+      internals.callbacks.onDirty?.();
     });
   }
 }
@@ -144,7 +147,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     mounted: true,
     generateVisual: opts.generateVisual,
     progressPath: opts.progressPath,
-    callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit },
+    callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit, onDirty: opts.onDirty },
   };
 
   assignShortcuts(internals.state.interactions);
@@ -336,6 +339,11 @@ export async function resolveInteractionDir(
       onComplete: finalize,
       onExit: () => {
         finalize(lastResponses);
+      },
+      // Async visual finished loading between keystrokes — repaint so the
+      // "loading context..." placeholder is replaced immediately.
+      onDirty: () => {
+        if (panel !== null) flushHost(panel.render());
       },
     });
 
