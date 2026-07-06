@@ -318,7 +318,7 @@ export async function resolveInteractionDir(
       panel?.unmount();
       const completedAt = new Date().toISOString();
       // Resolved supersedes in-progress: write response.json, drop progress.json.
-      const rp = writeResponse(dir, responses, completedAt);
+      const rp = writeResponse(dir, responses, completedAt, currentDeck);
       clearProgress(dir);
       resolve({ responses, completedAt, responsePath: rp, deck: currentDeck });
     };

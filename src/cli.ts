@@ -18,7 +18,8 @@ import { scanInbox } from './inbox/scan.js';
 import {
   deckPath, atomicWriteJson, readJson, responsePath, stampCanvasNode,
 } from './inbox/convention.js';
-import type { Deck, FeedbackResult } from './types.js';
+import { buildSummary } from './summary.js';
+import type { Deck, FeedbackResult, InteractionResponse } from './types.js';
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
@@ -1020,13 +1021,20 @@ function tryReadJobResult(dir: string, kind: JobKind): unknown | null {
   if (kind === 'deck') {
     const rp = responsePath(dir);
     if (!existsSync(rp)) return null;
-    const raw = tryParseJson<{ responses: unknown[]; completedAt: string }>(
+    const raw = tryParseJson<{ responses: unknown[]; completedAt: string; summary?: string }>(
       readFileSync(rp, 'utf8'),
     );
     if (!raw) return null;
     const dk = readJson<Deck>(deckPath(dir));
+    // Prefer the summary persisted at write time. Legacy response.json files
+    // (written before the summary field existed) lack it — rebuild it from the
+    // deck if it's still on disk, else fall back to ''.
+    let summary = typeof raw.summary === 'string' ? raw.summary : '';
+    if (summary === '' && dk) {
+      summary = buildSummary(dk, raw.responses as InteractionResponse[]);
+    }
     return {
-      summary: '',
+      summary,
       responsePath: rp,
       schema: 'humanloop.response/v2',
       responses: raw.responses,

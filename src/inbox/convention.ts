@@ -1,6 +1,7 @@
 import { existsSync, statSync, writeFileSync, renameSync, readFileSync, unlinkSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { Deck, InteractionResponse } from '../types.js';
+import { buildSummary } from '../summary.js';
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -100,9 +101,16 @@ export function writeResponse(
   dir: string,
   responses: InteractionResponse[],
   completedAt: string,
+  deck?: Deck,
 ): string {
   const p = responsePath(dir);
-  atomicWriteJson(p, { responses, completedAt });
+  // Persist the deterministic summary alongside the raw responses so
+  // `hl job result` can return a populated summary without re-deriving it (or
+  // silently emitting ''). When the deck is known at write time we compute it
+  // here; the deck is deterministic input so this never diverges from ask()'s
+  // envelope summary.
+  const summary = deck !== undefined ? buildSummary(deck, responses) : '';
+  atomicWriteJson(p, { responses, completedAt, summary });
   return p;
 }
 
