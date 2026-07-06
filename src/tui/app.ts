@@ -5,7 +5,7 @@ import type {
   MountedPanel, MountedPanelOpts, GenerateVisual,
 } from '../types.js';
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
-import { diffFrame, renderOverview, renderItemReview, renderFinal } from './render.js';
+import { diffFrame, renderOverview, renderItemReview, renderFinal, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
 import { readConversation } from '../conversation/reader.js';
 import { defaultGenerateVisual } from '../visuals/generate.js';
@@ -185,6 +185,12 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
           internals.callbacks.onExit?.();
         }
       });
+
+      // Pre-render clamp (input layer): keep scrollOffset within the current
+      // body's bounds so u/d stay responsive. The renderer itself is pure.
+      if (internals.state.phase === 'item-review') {
+        clampItemReviewScroll(internals.state, internals.cols, internals.rows);
+      }
     },
 
     render() {
@@ -195,6 +201,10 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     handleResize(cols, rows) {
       internals.cols = cols;
       internals.rows = rows;
+      // New dimensions change the scroll bounds — re-clamp before laying out.
+      if (internals.state.phase === 'item-review') {
+        clampItemReviewScroll(internals.state, cols, rows);
+      }
       return renderLines();
     },
 

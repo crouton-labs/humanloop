@@ -1,4 +1,3 @@
-import stringWidth from 'string-width';
 import type { InboxItem } from '../types.js';
 import {
   setupTerminal,
@@ -7,18 +6,9 @@ import {
   getTerminalSize,
 } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
+import { RESET, BOLD, DIM, ITALIC, CYAN, RED, GRAY, YELLOW, truncateRow } from '../tui/ansi.js';
 
 // ── ANSI helpers (local to this module) ──────────────────────────────────────
-
-const ESC = '\x1b[';
-const RESET = `${ESC}0m`;
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const ITALIC = `${ESC}3m`;
-const CYAN = `${ESC}36m`;
-const RED = `${ESC}31m`;
-const GRAY = `${ESC}90m`;
-const YELLOW = `${ESC}33m`;
 
 function ansiColor(text: string, color: string): string {
   switch (color) {
@@ -55,25 +45,6 @@ export function formatTimeAgo(iso: string): string {
   if (hours > 0) return `${hours}h ago`;
   if (minutes > 0) return `${minutes}m ago`;
   return 'just now';
-}
-
-// ── truncate (ported from sisyphus src/tui/lib/format.ts:19-37) ──────────────
-
-function truncate(text: string, max: number): string {
-  const clean = text.replace(/\n/g, ' ').replace(/✅/g, '✓').replace(/❌/g, '✗').replace(/\p{Emoji_Presentation}/gu, '');
-  if (max < 4) return clean.slice(0, max);
-  const w = stringWidth(clean);
-  if (w <= max) return clean;
-  let result = clean;
-  while (stringWidth(result) > max - 1 && result.length > 0) {
-    const cut = result.lastIndexOf(' ', result.length - 2);
-    if (cut > max * 0.4) {
-      result = result.slice(0, cut);
-    } else {
-      result = result.slice(0, result.length - 1);
-    }
-  }
-  return result + '…';
 }
 
 // ── buildInboxLines ───────────────────────────────────────────────────────────
@@ -117,13 +88,13 @@ export function buildInboxLines(
     } else {
       row += ' ';
     }
-    row += `${BOLD}${truncate(titleText, maxTitle)}${RESET}`;
+    row += `${BOLD}${truncateRow(titleText, maxTitle)}${RESET}`;
     row += `  ${DIM}${blocked}${RESET}`;
 
     lines.push(row);
 
     if (item.subtitle) {
-      lines.push(`      ${DIM}${truncate(item.subtitle, contentWidth - 6)}${RESET}`);
+      lines.push(`      ${DIM}${truncateRow(item.subtitle, contentWidth - 6)}${RESET}`);
     }
   }
 

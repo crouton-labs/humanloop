@@ -1,181 +1,11 @@
-import stringWidth from 'string-width';
-import type { TuiState, Interaction, InteractionResponse, VisualBlock } from '../types.js';
+import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import { renderMarkdown } from '../render/termrender.js';
-
-// ── ANSI helpers ─────────────────────────────────────────────────────────────
-
-const ESC = '\x1b[';
-const RESET = `${ESC}0m`;
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const ITALIC = `${ESC}3m`;
-const GREEN = `${ESC}32m`;
-const YELLOW = `${ESC}33m`;
-const CYAN = `${ESC}36m`;
-
-const CONTROL_CHARS_RE = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[@-_]|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F]/g;
-export function sanitize(text: string): string {
-  if (typeof text !== 'string') return '';
-  return text.replace(CONTROL_CHARS_RE, '');
-}
-
-function singleLine(text: string): string {
-  return sanitize(text).replace(/\s+/g, ' ').trim();
-}
-
-function truncate(text: string, maxWidth: number): string {
-  if (maxWidth < 1) return '';
-  if (stringWidth(text) <= maxWidth) return text;
-  const chars = [...text];
-  let w = 0;
-  let out = '';
-  for (const ch of chars) {
-    const cw = stringWidth(ch);
-    if (w + cw + 1 > maxWidth) break;
-    out += ch;
-    w += cw;
-  }
-  return out + '…';
-}
-
-function padRight(text: string, width: number): string {
-  const w = stringWidth(text);
-  if (w >= width) return text;
-  return text + ' '.repeat(width - w);
-}
-
-function hline(width: number, char = '─'): string {
-  if (width < 1) return '';
-  return char.repeat(width);
-}
-
-function wrap(text: string, maxWidth: number): string[] {
-  if (maxWidth < 1) return [text];
-  const out: string[] = [];
-  const paragraphs = text.split('\n');
-  for (let p = 0; p < paragraphs.length; p++) {
-    const para = paragraphs[p]!;
-    if (para === '') {
-      out.push('');
-      continue;
-    }
-    const words = para.split(/[ \t]+/).filter(Boolean);
-    let current = '';
-    for (let word of words) {
-      while (stringWidth(word) > maxWidth) {
-        if (current) {
-          out.push(current);
-          current = '';
-        }
-        const piece = sliceByWidth(word, maxWidth);
-        out.push(piece);
-        word = word.slice(piece.length);
-      }
-      const candidate = current ? `${current} ${word}` : word;
-      if (stringWidth(candidate) <= maxWidth) {
-        current = candidate;
-      } else {
-        if (current) out.push(current);
-        current = word;
-      }
-    }
-    if (current) out.push(current);
-  }
-  return out.length > 0 ? out : [''];
-}
-
-function sliceByWidth(s: string, maxWidth: number): string {
-  let w = 0;
-  let out = '';
-  for (const ch of s) {
-    const cw = stringWidth(ch);
-    if (w + cw > maxWidth) break;
-    out += ch;
-    w += cw;
-  }
-  if (out === '' && s.length > 0) out = [...s][0]!;
-  return out;
-}
-
-function hardWrap(text: string, maxWidth: number): string[] {
-  if (maxWidth < 1) return [text];
-  const segments = text.split('\n');
-  const out: string[] = [];
-  for (const seg of segments) {
-    if (seg.length === 0) {
-      out.push('');
-      continue;
-    }
-    let current = '';
-    let currentW = 0;
-    for (const ch of [...seg]) {
-      const cw = stringWidth(ch);
-      if (currentW + cw > maxWidth) {
-        out.push(current);
-        current = ch;
-        currentW = cw;
-      } else {
-        current += ch;
-        currentW += cw;
-      }
-    }
-    out.push(current);
-  }
-  return out;
-}
-
-// ── Horizontal centering ─────────────────────────────────────────────────────
-
-/**
- * Pad each non-empty line with leading spaces to horizontally center the
- * `contentWidth`-wide block within `cols`. Wide terminals (dashboard, full
- * screen) get visual breathing room; narrow panes (split tmux pane next to a
- * spawning agent) skip centering because there's nothing to center.
- *
- * Empty lines stay empty so frame diffing can keep them as cheap no-ops.
- */
-function centerHorizontal(lines: string[], cols: number, contentWidth: number): string[] {
-  const extraPad = Math.max(0, Math.floor((cols - contentWidth) / 2));
-  if (extraPad === 0) return lines;
-  const pad = ' '.repeat(extraPad);
-  return lines.map((line) => (line === '' ? '' : pad + line));
-}
+import {
+  ESC, RESET, BOLD, DIM, ITALIC, GREEN, YELLOW, CYAN,
+  sanitize, singleLine, truncate, hline, wrap, hardWrap, centerHorizontal, clipLine,
+} from './ansi.js';
 
 // ── Frame buffer ─────────────────────────────────────────────────────────────
-
-/**
- * ANSI-aware clip: truncate a line's *visible* width to `maxWidth`, passing
- * escape sequences through untouched. Every line written to the terminal must
- * fit within the columns, or it physically wraps onto the next row — which
- * breaks diffFrame's one-logical-line-per-row model and strands spillover text
- * on rows the differ believes are empty (so it never erases them).
- */
-export function clipLine(line: string, maxWidth: number): string {
-  if (maxWidth < 1) return '';
-  if (stringWidth(line) <= maxWidth) return line; // string-width ignores ANSI
-  let out = '';
-  let w = 0;
-  let i = 0;
-  let sawAnsi = false;
-  while (i < line.length) {
-    if (line[i] === '\x1b') {
-      const m = /^\x1b\[[0-9;?]*[a-zA-Z]|^\x1b[@-_]/.exec(line.slice(i));
-      if (m !== null) {
-        out += m[0];
-        i += m[0].length;
-        sawAnsi = true;
-        continue;
-      }
-    }
-    const ch = String.fromCodePoint(line.codePointAt(i)!);
-    const cw = stringWidth(ch);
-    if (w + cw > maxWidth) break;
-    out += ch;
-    w += cw;
-    i += ch.length;
-  }
-  return sawAnsi ? out + RESET : out;
-}
 
 export function diffFrame(
   prevFrame: string[],
@@ -267,7 +97,24 @@ export function renderOverview(state: TuiState, cols: number, rows: number): str
   return centered;
 }
 
-export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
+interface ItemReviewLayout {
+  interaction: Interaction;
+  preLines: string[];
+  bodyLines: string[];
+  postLines: string[];
+  maxW: number;
+  bodyHeight: number;
+  maxScroll: number;
+  overflows: boolean;
+}
+
+/**
+ * Build the item-review frame parts (pre/body/post) and derive the body's
+ * scroll bounds. Pure: reads state, mutates nothing. Both `renderItemReview`
+ * and the pre-render `clampItemReviewScroll` go through this, so the layout
+ * math has a single source of truth.
+ */
+function buildItemReviewLayout(state: TuiState, cols: number, rows: number): ItemReviewLayout {
   const interaction = state.interactions[state.currentIndex]!;
   const visual = state.visuals.get(interaction.id);
   const response = state.responses.get(interaction.id);
@@ -383,14 +230,34 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
     }
   }
 
-  // Window the body
+  // Derive the scroll window bounds. This builder never writes back into state
+  // — the host clamps state.scrollOffset via clampItemReviewScroll before render.
   const reservedRows = preLines.length + postLines.length + 1; // +1 for footer
   const bodyHeight = Math.max(1, rows - reservedRows);
-  const overflows = bodyLines.length > bodyHeight;
-  let scroll = state.scrollOffset || 0;
   const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
-  scroll = Math.max(0, Math.min(scroll, maxScroll));
-  state.scrollOffset = scroll;
+  return {
+    interaction, preLines, bodyLines, postLines,
+    maxW, bodyHeight, maxScroll, overflows: bodyLines.length > bodyHeight,
+  };
+}
+
+/**
+ * Clamp state.scrollOffset to the current body's scroll bounds. The host runs
+ * this as a pre-render step (from the input path) so `renderItemReview` stays a
+ * pure function of state — the clamp keeps u/d scrolling responsive without the
+ * renderer mutating state mid-frame.
+ */
+export function clampItemReviewScroll(state: TuiState, cols: number, rows: number): void {
+  const { maxScroll } = buildItemReviewLayout(state, cols, rows);
+  state.scrollOffset = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
+}
+
+export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
+  const { interaction, preLines, bodyLines, postLines, maxW, bodyHeight, maxScroll, overflows } =
+    buildItemReviewLayout(state, cols, rows);
+  // Read-only clamp: renderer never mutates state (clampItemReviewScroll, run
+  // pre-render, keeps state.scrollOffset itself in bounds).
+  const scroll = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
 
   let visibleBody: string[];
   if (overflows) {
