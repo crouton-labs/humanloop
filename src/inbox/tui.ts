@@ -146,17 +146,25 @@ export function pickFromInbox(
     const flush = () => {
       const { cols: currentCols, rows: currentRows } = getTerminalSize();
       const lines = buildInboxLines(items, currentCols, selectedIndex);
-      const { writes, nextPrevFrame } = diffFrame(prevFrame, lines, currentRows);
+      const { writes, nextPrevFrame } = diffFrame(prevFrame, lines, currentRows, currentCols);
       process.stdout.write('\x1b[?2026h');
       for (const w of writes) process.stdout.write(w);
       process.stdout.write('\x1b[?2026l');
       prevFrame = nextPrevFrame;
     };
 
+    // Resize reflows/scrolls what's already on screen, invalidating the diff
+    // model — clear and redraw from scratch at the new size.
+    const onResize = () => {
+      prevFrame = [];
+      process.stdout.write('\x1b[2J\x1b[H');
+      flush();
+    };
+
     const done = (result: InboxItem | null) => {
       restoreTerminal();
       process.stdin.removeListener('data', onData);
-      process.stdout.removeListener('resize', flush);
+      process.stdout.removeListener('resize', onResize);
       resolve(result);
     };
 
@@ -189,6 +197,6 @@ export function pickFromInbox(
 
     process.stdin.on('data', onData);
 
-    process.stdout.on('resize', flush);
+    process.stdout.on('resize', onResize);
   });
 }

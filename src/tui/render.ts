@@ -143,19 +143,57 @@ function centerHorizontal(lines: string[], cols: number, contentWidth: number): 
 
 // ── Frame buffer ─────────────────────────────────────────────────────────────
 
+/**
+ * ANSI-aware clip: truncate a line's *visible* width to `maxWidth`, passing
+ * escape sequences through untouched. Every line written to the terminal must
+ * fit within the columns, or it physically wraps onto the next row — which
+ * breaks diffFrame's one-logical-line-per-row model and strands spillover text
+ * on rows the differ believes are empty (so it never erases them).
+ */
+export function clipLine(line: string, maxWidth: number): string {
+  if (maxWidth < 1) return '';
+  if (stringWidth(line) <= maxWidth) return line; // string-width ignores ANSI
+  let out = '';
+  let w = 0;
+  let i = 0;
+  let sawAnsi = false;
+  while (i < line.length) {
+    if (line[i] === '\x1b') {
+      const m = /^\x1b\[[0-9;?]*[a-zA-Z]|^\x1b[@-_]/.exec(line.slice(i));
+      if (m !== null) {
+        out += m[0];
+        i += m[0].length;
+        sawAnsi = true;
+        continue;
+      }
+    }
+    const ch = String.fromCodePoint(line.codePointAt(i)!);
+    const cw = stringWidth(ch);
+    if (w + cw > maxWidth) break;
+    out += ch;
+    w += cw;
+    i += ch.length;
+  }
+  return sawAnsi ? out + RESET : out;
+}
+
 export function diffFrame(
   prevFrame: string[],
   nextLines: string[],
   rows: number,
+  cols?: number,
 ): { writes: string[]; nextPrevFrame: string[] } {
+  const clipped = cols !== undefined
+    ? nextLines.map((l) => clipLine(l, cols))
+    : nextLines;
   const writes: string[] = [];
   for (let i = 0; i < rows; i++) {
-    const line = i < nextLines.length ? nextLines[i]! : '';
+    const line = i < clipped.length ? clipped[i]! : '';
     if (prevFrame[i] !== line) {
       writes.push(`${ESC}${i + 1};1H${ESC}2K${line}`);
     }
   }
-  return { writes, nextPrevFrame: [...nextLines] };
+  return { writes, nextPrevFrame: [...clipped] };
 }
 
 // ── Renderers ────────────────────────────────────────────────────────────────
@@ -312,13 +350,15 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
           ? opts.find((o) => o.id === attachedId)
           : undefined;
         const valueText = attached !== undefined
-          ? `${CYAN}${singleLine(attached.label)}${RESET}`
+          ? `${CYAN}${truncate(singleLine(attached.label), Math.max(10, maxW - 28))}${RESET}`
           : `${DIM}none (overall)${RESET}`;
         attachedLine = `  ${DIM}attached:${RESET} ${valueText}  ${DIM}[tab to cycle]${RESET}`;
       }
     }
 
-    postLines.push(`  ${YELLOW}${label}:${RESET}`);
+    for (const labelLine of wrap(`${singleLine(label)}:`, maxW)) {
+      postLines.push(`  ${YELLOW}${labelLine}${RESET}`);
+    }
     const bufLines = hardWrap(state.inputMode.buffer, maxW - 1);
     for (let i = 0; i < bufLines.length; i++) {
       const isLast = i === bufLines.length - 1;
@@ -338,7 +378,9 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   // just above the footer; cleared on the next keypress.
   if (state.hint !== undefined && state.hint.length > 0) {
     postLines.push('');
-    postLines.push(`  ${YELLOW}${sanitize(state.hint)}${RESET}`);
+    for (const hintLine of wrap(sanitize(state.hint), maxW)) {
+      postLines.push(`  ${YELLOW}${hintLine}${RESET}`);
+    }
   }
 
   // Window the body
@@ -449,15 +491,25 @@ function renderActions(
     if (interaction.freetextLabel !== undefined) label = interaction.freetextLabel;
     else if (multi) label = 'Add overall comment  (c on an option for per-option)';
     else label = 'Add comment';
-    lines.push(`  ${cursor} ${DIM}[c]${RESET} ${label}`);
+    const ftLines = wrap(sanitize(label), contentMax);
+    for (let j = 0; j < ftLines.length; j++) {
+      const prefix = j === 0 ? `  ${cursor} ${DIM}[c]${RESET} ` : ' '.repeat(8);
+      lines.push(`${prefix}${ftLines[j]}`);
+    }
   } else if (interaction.allowFreetext && opts.length === 0) {
     const ftLabel = interaction.freetextLabel !== undefined ? interaction.freetextLabel : 'Enter response';
-    lines.push(`  ${DIM}[r]${RESET} ${ftLabel}`);
+    const ftLines = wrap(sanitize(ftLabel), contentMax);
+    for (let j = 0; j < ftLines.length; j++) {
+      const prefix = j === 0 ? `  ${DIM}[r]${RESET} ` : ' '.repeat(6);
+      lines.push(`${prefix}${ftLines[j]}`);
+    }
   }
 
   if (existing) {
     lines.push('');
-    lines.push(`  ${GREEN}Current: ${responseSummary(existing, interaction)}${RESET}`);
+    for (const curLine of wrap(`Current: ${responseSummary(existing, interaction)}`, maxW)) {
+      lines.push(`  ${GREEN}${curLine}${RESET}`);
+    }
   }
 
   return lines;

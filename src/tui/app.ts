@@ -290,18 +290,31 @@ export async function resolveInteractionDir(
     let deckWatch: ReturnType<typeof setInterval> | null = null;
 
     const flushHost = (lines: string[]) => {
-      const { rows: currentRows } = getTerminalSize();
-      const { writes, nextPrevFrame } = diffFrame(prevFrameLocal, lines, currentRows);
+      const { cols: currentCols, rows: currentRows } = getTerminalSize();
+      const { writes, nextPrevFrame } = diffFrame(prevFrameLocal, lines, currentRows, currentCols);
       process.stdout.write('\x1b[?2026h');
       for (const w of writes) process.stdout.write(w);
       process.stdout.write('\x1b[?2026l');
       prevFrameLocal = nextPrevFrame;
     };
 
+    // On resize the terminal reflows/scrolls existing content, so the diff
+    // model no longer matches the screen: re-layout at the new size, clear
+    // everything, and redraw from scratch.
+    const onResize = () => {
+      if (panel === null) return;
+      const { cols: c, rows: r } = getTerminalSize();
+      const lines = panel.handleResize(c, r);
+      prevFrameLocal = [];
+      process.stdout.write('\x1b[2J\x1b[H');
+      flushHost(lines);
+    };
+
     const finalize = (responses: InteractionResponse[]) => {
       if (deckWatch !== null) { clearInterval(deckWatch); deckWatch = null; }
       restoreTerminal();
       process.stdin.removeListener('data', onData);
+      process.stdout.removeListener('resize', onResize);
       panel?.unmount();
       const completedAt = new Date().toISOString();
       // Resolved supersedes in-progress: write response.json, drop progress.json.
@@ -369,6 +382,7 @@ export async function resolveInteractionDir(
       flushHost(panel!.render());
     };
     process.stdin.on('data', onData);
+    process.stdout.on('resize', onResize);
   });
 }
 
