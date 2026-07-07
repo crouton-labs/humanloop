@@ -349,4 +349,71 @@ function nextWsJson(ws: WebSocket): Promise<Record<string, unknown>> {
   console.log('OK: review submit is single-assignment and missing source returns source_not_found');
 }
 
+// ── Test 6: multi-line comment columns survive the server persistence path ──
+// Regression for MAJOR 3 (server side): sanitizeFeedbackComments used to gate
+// colStart/colEnd on `colEnd > colStart`, which is only meaningful WITHIN a
+// single line. For a genuine multi-line range (endLine > line), colEnd is
+// relative to a DIFFERENT line than colStart, so a valid range like
+// {line:1, endLine:2, colStart:4, colEnd:1} was silently downgraded to
+// line-only columns (both undefined) on draft save AND on submit. This drives
+// the REAL server persistence boundary (PUT /api/review/draft and
+// POST /api/review/submit), not just the web-side unit helper.
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'hl-review-server-test-'));
+  const file = resolve(join(dir, 'source.md'));
+  const output = join(dir, 'feedback.json');
+  writeFileSync(file, 'first line\nsecond line\n');
+
+  const multiLineComment = {
+    id: 'c-multiline',
+    line: 1,
+    endLine: 2,
+    colStart: 4,
+    colEnd: 1,
+    quote: 'line\ns',
+    lineText: 'first line\nsecond line',
+    comment: 'spans two lines',
+    createdAt: '2026-07-07T20:00:00.000Z',
+  };
+
+  const handle = await startReviewWebServer({ jobDir: dir, file, output });
+
+  const draft = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseVersion: 0, comments: [multiLineComment] }),
+  });
+  assert.equal(draft.status, 200);
+  const draftBody = await draft.json() as { ok: boolean; version: number; result: FeedbackResult };
+  assert.equal(draftBody.ok, true);
+  assert.equal(draftBody.result.comments.length, 1);
+  assert.equal(draftBody.result.comments[0]!.colStart, 4, 'PUT /api/review/draft must preserve a valid multi-line colStart');
+  assert.equal(draftBody.result.comments[0]!.colEnd, 1, 'PUT /api/review/draft must preserve a valid multi-line colEnd');
+
+  const onDiskDraft = JSON.parse(readFileSync(output, 'utf8')) as { comments: FeedbackResult['comments'] };
+  assert.equal(onDiskDraft.comments[0]!.colStart, 4, 'the persisted draft file must keep the multi-line colStart');
+  assert.equal(onDiskDraft.comments[0]!.colEnd, 1, 'the persisted draft file must keep the multi-line colEnd');
+
+  const submit = await fetch(`${handle.url}api/review/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseVersion: draftBody.version, comments: [multiLineComment] }),
+  });
+  assert.equal(submit.status, 200);
+  const submitBody = await submit.json() as { ok: boolean; result: FeedbackResult };
+  assert.equal(submitBody.ok, true);
+  assert.equal(submitBody.result.comments.length, 1);
+  assert.equal(submitBody.result.comments[0]!.colStart, 4, 'POST /api/review/submit must preserve a valid multi-line colStart');
+  assert.equal(submitBody.result.comments[0]!.colEnd, 1, 'POST /api/review/submit must preserve a valid multi-line colEnd');
+
+  const onDiskSubmitted = JSON.parse(readFileSync(output, 'utf8')) as { comments: FeedbackResult['comments'] };
+  assert.equal(onDiskSubmitted.comments[0]!.colStart, 4, 'the persisted submitted file must keep the multi-line colStart');
+  assert.equal(onDiskSubmitted.comments[0]!.colEnd, 1, 'the persisted submitted file must keep the multi-line colEnd');
+
+  await handle.stop();
+  rmSync(dir, { recursive: true, force: true });
+  console.log('OK: multi-line comment columns survive PUT /api/review/draft and POST /api/review/submit');
+}
+
 console.log('OK');

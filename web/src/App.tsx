@@ -1,178 +1,26 @@
-import { useEffect, useState, useCallback } from 'react';
-import type { Deck, FeedbackComment, InteractionResponse, ReviewPayload } from '@/types';
+import { useCallback, useEffect, useState } from 'react';
+import type { Deck, InteractionResponse, ReviewPayload } from '@/types';
 import { StatusBanner, type SurfaceStatus } from '@/components/StatusBanner';
 import { DeckSurface } from '@/components/DeckSurface';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
+import { ReviewSurface } from '@/components/review/ReviewSurface';
+import { cn } from '@/lib/utils';
 
 type SurfaceKind = 'deck' | 'review';
 
-function parseCommentsJson(value: string): FeedbackComment[] {
-  const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed)) throw new Error('comments JSON must be an array');
-  return parsed as FeedbackComment[];
-}
-
-function ReviewSurface({
-  review,
-  status,
-  onDraftSaved,
-  onSubmitted,
-  onError,
-}: {
-  review: ReviewPayload;
-  status: SurfaceStatus;
-  onDraftSaved: (review: ReviewPayload) => void;
-  onSubmitted: (review?: ReviewPayload) => void;
-  onError: (message: string) => void;
-}) {
-  const [commentsJson, setCommentsJson] = useState(() => JSON.stringify(review.result.comments, null, 2));
-  const [version, setVersion] = useState(review.version);
-  const [saveState, setSaveState] = useState<'clean' | 'saving' | 'error'>('clean');
-  const applyCanonicalResult = useCallback((result: ReviewPayload['result'], nextVersion: number) => {
-    const nextReview = { ...review, result, version: nextVersion };
-    setVersion(nextVersion);
-    setCommentsJson(JSON.stringify(result.comments, null, 2));
-    onDraftSaved(nextReview);
-    return nextReview;
-  }, [onDraftSaved, review]);
-
-  useEffect(() => {
-    setCommentsJson(JSON.stringify(review.result.comments, null, 2));
-    setVersion(review.version);
-    setSaveState('clean');
-  }, [review.result.comments, review.version]);
-  const disabled = status === 'loading' || status === 'submitting' || status === 'submitted' || status === 'taken-back';
-
-  const saveDraft = useCallback(async () => {
-    setSaveState('saving');
-    try {
-      const comments = parseCommentsJson(commentsJson);
-      const res = await fetch('/api/review/draft', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comments, baseVersion: version }),
-      });
-      const body = await res.json() as { error?: string; version?: number; result?: ReviewPayload['result'] };
-      if (!res.ok) {
-        if (res.status === 409 && body.error === 'stale_draft') {
-          if (typeof body.version !== 'number' || !body.result) throw new Error('stale draft response missing canonical review state');
-          applyCanonicalResult(body.result, body.version);
-          setSaveState('error');
-          onError('Draft changed elsewhere; refreshed to the latest server version. Reapply your edits and save again.');
-          return;
-        }
-        if (res.status === 409 && body.error === 'already_submitted') {
-          const submittedReview = body.result
-            ? applyCanonicalResult(body.result, typeof body.version === 'number' ? body.version : version)
-            : undefined;
-          setSaveState('clean');
-          onSubmitted(submittedReview);
-          return;
-        }
-        throw new Error(body.error ?? `draft save failed: ${res.status}`);
-      }
-      if (typeof body.version !== 'number' || !body.result) throw new Error('draft save returned an invalid response');
-      applyCanonicalResult(body.result, body.version);
-      setSaveState('clean');
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setSaveState('error');
-      onError(message);
-    }
-  }, [applyCanonicalResult, commentsJson, onError, onSubmitted, version]);
-
-  const submitReview = useCallback(async () => {
-    try {
-      const comments = parseCommentsJson(commentsJson);
-      const res = await fetch('/api/review/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comments, baseVersion: version }),
-      });
-      const body = await res.json() as { error?: string; result?: ReviewPayload['result']; version?: number };
-      if (!res.ok) {
-        if (res.status === 409 && body.error === 'already_submitted') {
-          const submittedReview = body.result
-            ? applyCanonicalResult(body.result, typeof body.version === 'number' ? body.version : version)
-            : undefined;
-          onSubmitted(submittedReview);
-          return;
-        }
-        if (res.status === 409 && body.error === 'stale_draft' && typeof body.version === 'number' && body.result) {
-          applyCanonicalResult(body.result, body.version);
-        }
-        throw new Error(body.error ?? `submit failed: ${res.status}`);
-      }
-      const submittedReview = body.result ? applyCanonicalResult(body.result, version) : undefined;
-      onSubmitted(submittedReview);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  }, [applyCanonicalResult, commentsJson, onError, onSubmitted, version]);
-
-  return (
-    <div className={disabled ? 'pointer-events-none opacity-60' : ''}>
-      <div className="grid gap-4">
-        <section className="rounded-lg border bg-card p-4">
-          <div className="mb-2 text-sm text-muted-foreground">Source: {review.file}</div>
-          <pre className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{review.content}</pre>
-        </section>
-
-        <section className="rounded-lg border bg-card p-4">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="font-medium">Review comments JSON</h2>
-              <p className="text-sm text-muted-foreground">Minimal Phase 3 backend handoff surface. Full anchored review UI comes later.</p>
-            </div>
-            <div className="text-xs text-muted-foreground">version {version} · {saveState}</div>
-          </div>
-          <Textarea
-            className="min-h-56 font-mono text-sm"
-            value={commentsJson}
-            onChange={(event) => {
-              setCommentsJson(event.target.value);
-              setSaveState('clean');
-            }}
-            disabled={disabled}
-          />
-          <div className="mt-3 flex gap-2">
-            <Button type="button" variant="outline" onClick={saveDraft} disabled={disabled || saveState === 'saving'}>
-              Save draft
-            </Button>
-            <Button type="button" onClick={submitReview} disabled={disabled}>
-              Submit review
-            </Button>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
+/**
+ * Thin surface shell: connect `/ws`, fetch `/api/surface`, then hand off to
+ * either the deck app (unchanged Phase-2 behavior) or the review app. All
+ * deck/review-specific state lives inside those surfaces — this shell only
+ * owns the top-level convergence status vocabulary
+ * (loading | ready | submitting | submitted | taken-back | error).
+ */
 export default function App() {
   const [surface, setSurface] = useState<SurfaceKind | null>(null);
   const [deck, setDeck] = useState<Deck | null>(null);
   const [review, setReview] = useState<ReviewPayload | null>(null);
   const [status, setStatus] = useState<SurfaceStatus>('loading');
   const [error, setError] = useState<string | null>(null);
-
-  const loadReview = useCallback(() => {
-    fetch('/api/review')
-      .then((r) => {
-        if (!r.ok) throw new Error(`review load failed: ${r.status}`);
-        return r.json() as Promise<ReviewPayload>;
-      })
-      .then((body) => {
-        setReview(body);
-        setError(null);
-        setStatus('ready');
-      })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e));
-        setStatus('error');
-      });
-  }, []);
+  const [draftPing, setDraftPing] = useState(0);
 
   useEffect(() => {
     fetch('/api/surface')
@@ -193,14 +41,22 @@ export default function App() {
               setStatus('ready');
             });
         }
-        loadReview();
-        return undefined;
+        return fetch('/api/review')
+          .then((r) => {
+            if (!r.ok) throw new Error(`review load failed: ${r.status}`);
+            return r.json() as Promise<ReviewPayload>;
+          })
+          .then((body2) => {
+            setReview(body2);
+            if (body2.result.submitted) setStatus('submitted');
+            else setStatus('ready');
+          });
       })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e));
         setStatus('error');
       });
-  }, [loadReview]);
+  }, []);
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -209,14 +65,15 @@ export default function App() {
       try {
         const msg = JSON.parse(event.data as string) as { type?: string };
         if (msg.type === 'taken-back') setStatus('taken-back');
-        if (msg.type === 'converged') setStatus((s) => (s === 'taken-back' ? s : 'submitted'));
-        if (msg.type === 'review-draft-updated' && surface === 'review') loadReview();
+        else if (msg.type === 'converged') setStatus((s) => (s === 'taken-back' ? s : 'submitted'));
+        else if (msg.type === 'review-draft-updated') setDraftPing((n) => n + 1);
+        // unknown message types are ignored, per the protocol-growth contract
       } catch {
         // ignore malformed frames
       }
     };
     return () => ws.close();
-  }, [loadReview, surface]);
+  }, []);
 
   const submitDeck = useCallback((responses: InteractionResponse[]) => {
     setStatus('submitting');
@@ -226,9 +83,8 @@ export default function App() {
       body: JSON.stringify({ responses }),
     })
       .then((r) => {
-        // 409 means another submit (a second tab, a race) already won and
-        // wrote the canonical response.json — that's convergence, not an
-        // error, so treat it the same as this tab's own submit succeeding.
+        // 409 means another submit (a second tab, a race) already won — that's
+        // convergence, not an error.
         if (!r.ok && r.status !== 409) throw new Error(`submit failed: ${r.status}`);
         setStatus('submitted');
       })
@@ -238,11 +94,25 @@ export default function App() {
       });
   }, []);
 
+  // Stable identities so a mid-debounce `App` re-render never restarts the
+  // review autosave/submit effects (their deps include these callbacks).
+  const handleSubmitting = useCallback(() => setStatus('submitting'), []);
+  const handleSubmitted = useCallback(() => setStatus('submitted'), []);
+  const handleReviewError = useCallback((message: string) => {
+    setError(message);
+    setStatus('error');
+  }, []);
+
+  const reviewReadOnly = status === 'taken-back' || status === 'submitted';
+
+  // The review document + comment list need more width than the deck's
+  // single-column layout, so the shell width is gated per-surface — the deck
+  // keeps its narrower column, review gets the wider one.
   return (
-    <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 p-8">
+    <div className={cn('mx-auto flex min-h-screen flex-col gap-6 p-8', surface === 'review' ? 'max-w-5xl' : 'max-w-3xl')}>
       <header className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">
-          {deck?.title ?? (review ? 'humanloop — review' : 'humanloop — browser surface')}
+          {deck?.title ?? (surface === 'review' ? 'humanloop — review' : 'humanloop — browser surface')}
         </h1>
         {(deck?.source?.sessionName || deck?.source?.askedBy) && (
           <p className="text-muted-foreground text-sm">
@@ -259,21 +129,11 @@ export default function App() {
       {surface === 'review' && review && (
         <ReviewSurface
           review={review}
-          status={status}
-          onDraftSaved={(nextReview) => {
-            setReview(nextReview);
-            setError(null);
-            setStatus('ready');
-          }}
-          onSubmitted={(nextReview) => {
-            if (nextReview) setReview(nextReview);
-            setError(null);
-            setStatus('submitted');
-          }}
-          onError={(message) => {
-            setError(message);
-            setStatus('error');
-          }}
+          readOnly={reviewReadOnly}
+          draftPing={draftPing}
+          onSubmitting={handleSubmitting}
+          onSubmitted={handleSubmitted}
+          onError={handleReviewError}
         />
       )}
       {!deck && !review && status === 'loading' && (

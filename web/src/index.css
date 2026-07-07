@@ -150,3 +150,22 @@
 .hljs-type { color: oklch(0.62 0.15 200); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
+
+/* ── Review source-anchored highlights ──────────────────────────────────────
+ * Spans wrapped by lib/sourceMap.ts's rehype plugin around each source-backed
+ * text leaf. `review-source-comment` marks any visible text inside an existing
+ * comment's raw byte range; `review-source-active` marks the current active
+ * line / keyboard selection. Both highlight only the VISIBLE source text — raw
+ * markdown delimiters between islands aren't rendered, matching nvim parity. */
+.review-document { cursor: text; }
+.review-source-span { border-radius: 2px; }
+.review-source-comment {
+  background-color: oklch(0.7 0.17 60 / 25%);
+  box-shadow: inset 0 -2px 0 oklch(0.7 0.17 60 / 60%);
+}
+.review-source-active {
+  background-color: oklch(0.62 0.19 250 / 22%);
+}
+.review-source-comment.review-source-active {
+  background-color: oklch(0.66 0.19 300 / 28%);
+}

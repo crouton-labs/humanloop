@@ -10,6 +10,20 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+// Column validity is only meaningful WITHIN a single line: `colEnd > colStart`
+// compares two byte offsets into the SAME line. For a multi-line range,
+// `colStart` is relative to the START line and `colEnd` is relative to the
+// (different) END line, so a numeric `colEnd > colStart` comparison is
+// meaningless and can reject a perfectly valid range (e.g. a short last line
+// legitimately has a smaller colEnd than the start line's colStart). Mirrors
+// web/src/lib/sourceMap.ts's `hasValidRangeColumns` — src/ can't import from
+// web/, so this is the local equivalent.
+function hasValidRangeColumns(line: number, endLine: number, colStart?: number, colEnd?: number): boolean {
+  if (colStart === undefined || colEnd === undefined) return false;
+  if (line === endLine) return colEnd > colStart;
+  return true;
+}
+
 export function sanitizeFeedbackComments(raw: unknown): FeedbackComment[] {
   if (!Array.isArray(raw)) return [];
   const out: FeedbackComment[] = [];
@@ -21,12 +35,13 @@ export function sanitizeFeedbackComments(raw: unknown): FeedbackComment[] {
     const endLine = Number(r.endLine) || line;
     const colStart = Number.isInteger(r.colStart) ? (r.colStart as number) : undefined;
     const colEnd = Number.isInteger(r.colEnd) ? (r.colEnd as number) : undefined;
+    const validCols = hasValidRangeColumns(line, endLine, colStart, colEnd);
     out.push({
       id: typeof r.id === 'string' && r.id ? r.id : `c${out.length}`,
       line,
       endLine,
-      colStart: colStart !== undefined && colEnd !== undefined && colEnd > colStart ? colStart : undefined,
-      colEnd: colStart !== undefined && colEnd !== undefined && colEnd > colStart ? colEnd : undefined,
+      colStart: validCols ? colStart : undefined,
+      colEnd: validCols ? colEnd : undefined,
       quote: typeof r.quote === 'string' && r.quote ? r.quote : undefined,
       lineText: typeof r.lineText === 'string' ? r.lineText : '',
       comment,
