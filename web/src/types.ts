@@ -8,12 +8,10 @@
 // per-option comments, deck source metadata) — no longer just the phase-1
 // placeholder subset.
 //
-// Deliberately NOT mirrored here (out of scope for the deck web UI):
-// `bodyPath` (the CLI resolves it to `body` before writing deck.json — the
-// browser only ever sees the resolved string), `FeedbackComment`/
-// `FeedbackResult`/review-editor types (phase 3's own concern), `VisualBlock`
-// (generated server-side visual context has no HTTP channel to the browser
-// today — see phase2-deck-ui-notes.md for the deviation).
+// Deliberately NOT mirrored here: `bodyPath` (the CLI resolves it to `body`
+// before writing deck.json — the browser only ever sees the resolved string)
+// and `VisualBlock` (generated server-side visual context has no HTTP channel
+// to the browser today — see phase2-deck-ui-notes.md for the deviation).
 
 export type InteractionKind = 'notify' | 'decision' | 'context' | 'error' | 'review';
 
@@ -69,4 +67,35 @@ export interface Deck {
   title?: string;
   source?: DeckSource;
   interactions: Interaction[];
+}
+
+export interface FeedbackComment {
+  id: string;
+  line: number;
+  endLine: number;
+  quote?: string;
+  colStart?: number;
+  colEnd?: number;
+  lineText: string;
+  comment: string;
+  createdAt: string;
+}
+
+export interface FeedbackResult {
+  file: string;
+  submitted: boolean;
+  approved: boolean;
+  comments: FeedbackComment[];
+  submittedAt?: string;
+  savedAt: string;
+}
+
+export interface ReviewPayload {
+  kind: 'review';
+  file: string;
+  output: string;
+  jobId: string;
+  content: string;
+  result: FeedbackResult;
+  version: number;
 }

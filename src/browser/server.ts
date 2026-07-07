@@ -2,15 +2,24 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse, Server as HttpServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, extname, dirname } from 'node:path';
+import { join, extname, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Deck, InteractionResponse } from '../types.js';
+import type { Deck, FeedbackResult, InteractionResponse } from '../types.js';
 import { deckPath, readJson, writeResponse, clearProgress } from '../inbox/convention.js';
+import {
+  buildDraftFeedbackResult,
+  buildFinalFeedbackResult,
+  parseFeedbackComments,
+  readStoredDraftFeedbackResult,
+  serializeFeedbackResult,
+  writeFeedbackResult,
+  writeSubmitFlag,
+} from '../editor/feedback.js';
 
-// See $CRTR_CONTEXT_DIR/phase1-server-contract.md for the full HTTP/WS API
-// this module implements — this file is the reference implementation, that
-// doc is the stable seam phases 2/3 build against.
+// See $CRTR_CONTEXT_DIR/phase1-server-contract.md for the deck HTTP/WS API this
+// module implements — this file is the reference implementation for the deck
+// surface, and the review surface reuses the same static/WS skeleton.
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -31,6 +40,8 @@ const MIME: Record<string, string> = {
 // this never collides with tsc's own output tree.
 const STATIC_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
+type SurfaceKind = 'deck' | 'review';
+
 export interface WebServerOpts {
   /** Interaction dir — the deck.json / response.json / progress.json convention. */
   dir: string;
@@ -47,6 +58,19 @@ export interface WebServerOpts {
    * open sockets) without racing the ack the browser is waiting on.
    */
   onSubmit?: (responses: InteractionResponse[], completedAt: string, responsePath: string) => void;
+}
+
+export interface ReviewWebServerOpts {
+  /** Shared review job dir — carries review.vim and feedback.json. */
+  jobDir: string;
+  /** Absolute source file under review. */
+  file: string;
+  /** Absolute feedback JSON output path. */
+  output: string;
+  /** Optional submit sentinel written on final browser submit. */
+  submitFlagPath?: string;
+  /** Fired after the HTTP submit ack has finished flushing. */
+  onSubmit?: (result: FeedbackResult, submittedAt: string, outputPath: string) => void;
 }
 
 export interface WebServerHandle {
@@ -95,27 +119,12 @@ async function serveStatic(reqPath: string, res: ServerResponse): Promise<void> 
   }
 }
 
-/**
- * Start an on-demand local HTTP+WS server over one interaction dir. Binds to
- * an ephemeral port on 127.0.0.1 only (never 0.0.0.0 — this is a same-machine
- * handoff, not a shareable link). The caller owns the lifecycle: start it
- * when the human hands off to the browser, `stop()` it on take-back or once
- * `onSubmit` fires.
- */
-export async function startWebServer(opts: WebServerOpts): Promise<WebServerHandle> {
-  let deck = opts.deck;
-  const dir = opts.dir;
-  // Single-assignment submit boundary (Finding 2): the first accepted
-  // `/api/submit` sets this; every later submit — a double-click, a second
-  // tab, a retry — returns the same canonical result via 409 instead of
-  // re-writing response.json or re-firing onSubmit. Everything from the
-  // `submitted !== null` check through setting it below runs synchronously
-  // (no `await` in between), so two requests racing through the earlier
-  // `readRequestBody` await can't both slip past the check — Node's
-  // single-threaded execution guarantees only one synchronous section runs
-  // before `submitted` flips.
-  let submitted: { responsePath: string; completedAt: string } | null = null;
+function wrongSurface(expected: SurfaceKind): Record<string, string> {
+  return { error: 'wrong_surface', expected };
+}
 
+function createServerScaffold() {
+  let handleRequest: (req: IncomingMessage, res: ServerResponse) => Promise<void> = async () => {};
   const httpServer: HttpServer = createServer((req, res) => {
     void handleRequest(req, res);
   });
@@ -127,6 +136,7 @@ export async function startWebServer(opts: WebServerOpts): Promise<WebServerHand
     ws.on('close', () => sockets.delete(ws));
   });
 
+  let stopped = false;
   function broadcast(message: unknown): void {
     const payload = JSON.stringify(message);
     for (const ws of sockets) {
@@ -134,8 +144,48 @@ export async function startWebServer(opts: WebServerOpts): Promise<WebServerHand
     }
   }
 
-  async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  function setHandler(next: (req: IncomingMessage, res: ServerResponse) => Promise<void>): void {
+    handleRequest = next;
+  }
+
+  function stop(): Promise<void> {
+    if (stopped) return Promise.resolve();
+    stopped = true;
+    return new Promise((resolveStop) => {
+      for (const ws of sockets) ws.terminate();
+      wss.close();
+      // Ephemeral, single-purpose server: force-close any lingering keep-alive
+      // sockets rather than waiting on http.Server#close's default drain-first
+      // behavior.
+      httpServer.closeAllConnections();
+      httpServer.close(() => resolveStop());
+    });
+  }
+
+  return { httpServer, broadcast, setHandler, stop };
+}
+
+async function listen(server: HttpServer): Promise<number> {
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', () => resolveListen());
+  });
+  const address = server.address();
+  return typeof address === 'object' && address !== null ? address.port : 0;
+}
+
+async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
+  let deck = opts.deck;
+  const dir = opts.dir;
+  let submitted: { responsePath: string; completedAt: string } | null = null;
+  const scaffold = createServerScaffold();
+
+  scaffold.setHandler(async (req, res) => {
     const url = req.url ?? '/';
+    if (url === '/api/surface' && req.method === 'GET') {
+      sendJson(res, 200, { kind: 'deck' });
+      return;
+    }
     if (url === '/api/interaction' && req.method === 'GET') {
       // Re-read deck.json in case an agent rewrote it mid-handoff (mirrors
       // the terminal deck's own live-reload poll in resolveInteractionDir).
@@ -172,49 +222,210 @@ export async function startWebServer(opts: WebServerOpts): Promise<WebServerHand
       const responsePath = writeResponse(dir, responses, completedAt, deck);
       submitted = { responsePath, completedAt };
       clearProgress(dir);
-      broadcast({ type: 'converged' });
-      // Ack-ordering guarantee (Finding 1): the HTTP caller must always
-      // receive its 200 body before any lifecycle teardown can close its
-      // socket. `onSubmit` (which the TUI wires to `finalize()` → `stop()` →
-      // `closeAllConnections()`) is deferred until this response's 'finish'
-      // event — Node fires that once the response has actually been handed
-      // off to the OS for transmission, so the ack is guaranteed delivered
-      // before teardown can race it.
+      scaffold.broadcast({ type: 'converged' });
+      // Ack-ordering guarantee: the HTTP caller must always receive its 200
+      // body before any lifecycle teardown can close its socket.
       res.once('finish', () => {
         opts.onSubmit?.(responses, completedAt, responsePath);
       });
       sendJson(res, 200, { ok: true, responsePath, completedAt });
       return;
     }
+    if (url.startsWith('/api/review')) {
+      sendJson(res, 404, wrongSurface('deck'));
+      return;
+    }
     await serveStatic(url, res);
-  }
-
-  await new Promise<void>((resolveListen, rejectListen) => {
-    httpServer.once('error', rejectListen);
-    httpServer.listen(0, '127.0.0.1', () => resolveListen());
   });
 
-  const address = httpServer.address();
-  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  const port = await listen(scaffold.httpServer);
   const url = `http://127.0.0.1:${port}/`;
-
   return {
     url,
     port,
     notifyTakenBack(): void {
-      broadcast({ type: 'taken-back' });
+      scaffold.broadcast({ type: 'taken-back' });
     },
     stop(): Promise<void> {
-      return new Promise((resolveStop) => {
-        for (const ws of sockets) ws.terminate();
-        wss.close();
-        // Ephemeral, single-purpose server: force-close any lingering
-        // keep-alive sockets rather than waiting on http.Server#close's
-        // default "drain first" behavior, which would otherwise hang stop()
-        // for as long as the browser holds an idle connection open.
-        httpServer.closeAllConnections();
-        httpServer.close(() => resolveStop());
-      });
+      return scaffold.stop();
     },
   };
+}
+
+async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHandle> {
+  const { jobDir, file, output, submitFlagPath } = opts;
+  const scaffold = createServerScaffold();
+  let version = 0;
+  let currentResult = readStoredDraftFeedbackResult(output, file)
+    ?? buildDraftFeedbackResult(file, [], new Date().toISOString());
+
+  function refreshInitialDraftFromDisk(): void {
+    if (version !== 0 || currentResult.submitted) return;
+    const onDisk = readStoredDraftFeedbackResult(output, file);
+    if (onDisk === null) return;
+    if (serializeFeedbackResult(onDisk) !== serializeFeedbackResult(currentResult)) {
+      currentResult = onDisk;
+      version += 1;
+    }
+  }
+
+  function currentSnapshot(): FeedbackResult {
+    return currentResult;
+  }
+
+  scaffold.setHandler(async (req, res) => {
+    const url = req.url ?? '/';
+    if (url === '/api/surface' && req.method === 'GET') {
+      sendJson(res, 200, { kind: 'review' });
+      return;
+    }
+    if (url === '/api/review' && req.method === 'GET') {
+      refreshInitialDraftFromDisk();
+      let content: string;
+      try {
+        content = await readFile(file, 'utf8');
+      } catch (err) {
+        sendJson(res, 404, {
+          error: 'source_not_found',
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        kind: 'review',
+        file,
+        output,
+        jobId: basename(jobDir),
+        content,
+        result: currentSnapshot(),
+        version,
+      });
+      return;
+    }
+    if (url === '/api/review/draft' && req.method === 'PUT') {
+      let parsed: { comments?: unknown; baseVersion?: unknown };
+      try {
+        parsed = JSON.parse(await readRequestBody(req)) as { comments?: unknown; baseVersion?: unknown };
+      } catch {
+        sendJson(res, 400, { error: 'bad_json', message: 'Request body is not valid JSON.' });
+        return;
+      }
+      refreshInitialDraftFromDisk();
+      if (currentResult.submitted) {
+        sendJson(res, 409, { error: 'already_submitted', result: currentSnapshot() });
+        return;
+      }
+      if (!Number.isInteger(parsed.baseVersion)) {
+        sendJson(res, 400, { error: 'bad_input', message: 'baseVersion must be an integer.' });
+        return;
+      }
+      if (parsed.baseVersion !== version) {
+        sendJson(res, 409, { error: 'stale_draft', version, result: currentSnapshot() });
+        return;
+      }
+      const parsedComments = parseFeedbackComments(parsed.comments);
+      if (!parsedComments.ok) {
+        sendJson(res, 400, { error: 'bad_input', message: parsedComments.message });
+        return;
+      }
+      const savedAt = new Date().toISOString();
+      const nextResult = buildDraftFeedbackResult(file, parsedComments.comments, savedAt);
+      try {
+        writeFeedbackResult(output, nextResult);
+      } catch (err) {
+        sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      currentResult = nextResult;
+      version += 1;
+      scaffold.broadcast({ type: 'review-draft-updated', version, savedAt });
+      sendJson(res, 200, { ok: true, result: currentSnapshot(), version });
+      return;
+    }
+    if (url === '/api/review/submit' && req.method === 'POST') {
+      let parsed: { comments?: unknown; baseVersion?: unknown };
+      try {
+        parsed = JSON.parse(await readRequestBody(req)) as { comments?: unknown; baseVersion?: unknown };
+      } catch {
+        sendJson(res, 400, { error: 'bad_json', message: 'Request body is not valid JSON.' });
+        return;
+      }
+      refreshInitialDraftFromDisk();
+      if (currentResult.submitted) {
+        sendJson(res, 409, {
+          ok: false,
+          error: 'already_submitted',
+          output,
+          submittedAt: currentResult.submittedAt,
+          result: currentSnapshot(),
+        });
+        return;
+      }
+      if (!Number.isInteger(parsed.baseVersion)) {
+        sendJson(res, 400, { error: 'bad_input', message: 'baseVersion must be an integer.' });
+        return;
+      }
+      if (parsed.baseVersion !== version) {
+        sendJson(res, 409, { error: 'stale_draft', version, result: currentSnapshot() });
+        return;
+      }
+      const parsedComments = parseFeedbackComments(parsed.comments);
+      if (!parsedComments.ok) {
+        sendJson(res, 400, { error: 'bad_input', message: parsedComments.message });
+        return;
+      }
+      const submittedAt = new Date().toISOString();
+      const nextResult = buildFinalFeedbackResult(file, parsedComments.comments, submittedAt);
+      try {
+        writeFeedbackResult(output, nextResult);
+        currentResult = nextResult;
+        if (submitFlagPath !== undefined && submitFlagPath.length > 0) {
+          writeSubmitFlag(submitFlagPath);
+        }
+      } catch (err) {
+        sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      scaffold.broadcast({ type: 'converged' });
+      res.once('finish', () => {
+        opts.onSubmit?.(currentSnapshot(), submittedAt, output);
+      });
+      sendJson(res, 200, { ok: true, output, submittedAt, result: currentSnapshot() });
+      return;
+    }
+    if (url.startsWith('/api/interaction') || url === '/api/submit') {
+      sendJson(res, 404, wrongSurface('review'));
+      return;
+    }
+    await serveStatic(url, res);
+  });
+
+  const port = await listen(scaffold.httpServer);
+  const url = `http://127.0.0.1:${port}/`;
+  return {
+    url,
+    port,
+    notifyTakenBack(): void {
+      scaffold.broadcast({ type: 'taken-back' });
+    },
+    stop(): Promise<void> {
+      return scaffold.stop();
+    },
+  };
+}
+
+/**
+ * Start an on-demand local HTTP+WS server over one interaction dir. Binds to
+ * an ephemeral port on 127.0.0.1 only (never 0.0.0.0 — this is a same-machine
+ * handoff, not a shareable link). The caller owns the lifecycle: start it
+ * when the human hands off to the browser, `stop()` it on take-back or once
+ * `onSubmit` fires.
+ */
+export async function startWebServer(opts: WebServerOpts): Promise<WebServerHandle> {
+  return startDeckServer(opts);
+}
+
+/** Start a review-mode browser server over one markdown review job. */
+export async function startReviewWebServer(opts: ReviewWebServerOpts): Promise<WebServerHandle> {
+  return startReviewServer(opts);
 }

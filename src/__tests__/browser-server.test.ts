@@ -1,9 +1,10 @@
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { startWebServer } from '../browser/server.js';
-import type { Deck } from '../index.js';
+import WebSocket from 'ws';
+import { startReviewWebServer, startWebServer } from '../browser/server.js';
+import type { Deck, FeedbackResult } from '../index.js';
 
 // Regression tests for the phase 1 review's two Major findings at the
 // /api/submit seam:
@@ -126,16 +127,226 @@ function makeDir(): string {
   const dir = makeDir();
   const handle = await startWebServer({ dir, deck });
 
+  const surface = await fetch(`${handle.url}api/surface`);
+  assert.equal(surface.status, 200);
+  assert.deepEqual(await surface.json(), { kind: 'deck' });
+
   const got = await fetch(`${handle.url}api/interaction`);
   assert.equal(got.status, 200);
   const gotBody = await got.json() as { dir: string; deck: Deck };
   assert.equal(gotBody.dir, dir);
   assert.deepEqual(gotBody.deck, deck);
 
+  const wrongReview = await fetch(`${handle.url}api/review`);
+  assert.equal(wrongReview.status, 404);
+  assert.deepEqual(await wrongReview.json(), { error: 'wrong_surface', expected: 'deck' });
+
   await handle.stop();
-  assert.ok(!existsSync(join(dir, 'progress.json')) || true); // no progress file was ever written here
+  assert.equal(existsSync(join(dir, 'response.json')), false, 'read-only deck GET/stop path must not write response.json');
+  assert.equal(existsSync(join(dir, 'progress.json')), false, 'browser deck server must not write progress.json during GET/stop');
   rmSync(dir, { recursive: true, force: true });
   console.log('OK: baseline GET/stop contract unchanged');
+}
+
+function wsEndpoint(url: string): string {
+  return url.replace(/^http:/, 'ws:') + 'ws';
+}
+
+function openWs(url: string): Promise<WebSocket> {
+  return new Promise((resolveOpen, rejectOpen) => {
+    const ws = new WebSocket(wsEndpoint(url));
+    ws.once('open', () => resolveOpen(ws));
+    ws.once('error', rejectOpen);
+  });
+}
+
+function nextWsJson(ws: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolveMessage, rejectMessage) => {
+    ws.once('message', (data) => {
+      try {
+        resolveMessage(JSON.parse(data.toString()) as Record<string, unknown>);
+      } catch (err) {
+        rejectMessage(err);
+      }
+    });
+    ws.once('error', rejectMessage);
+  });
+}
+
+// ── Test 4: review endpoints own draft/version/submit semantics ─────────────
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'hl-review-server-test-'));
+  const file = resolve(join(dir, 'source.md'));
+  const output = join(dir, 'feedback.json');
+  const submitFlag = join(dir, 'submitted.flag');
+  writeFileSync(file, '# Source\n\nbody\n');
+  let onSubmitFired = 0;
+  let submittedResult: FeedbackResult | null = null;
+
+  const handle = await startReviewWebServer({
+    jobDir: dir,
+    file,
+    output,
+    submitFlagPath: submitFlag,
+    onSubmit: (result) => {
+      onSubmitFired++;
+      submittedResult = result;
+      void handle.stop();
+    },
+  });
+  writeFileSync(output, JSON.stringify({
+    file,
+    submitted: false,
+    approved: false,
+    comments: [{ id: 'nvim-draft', line: 1, endLine: 1, lineText: '# Source', comment: 'from nvim', createdAt: '2026-07-07T20:00:00.000Z' }],
+    savedAt: '2026-07-07T20:00:01.000Z',
+  }, null, 2) + '\n');
+  const ws = await openWs(handle.url);
+
+  const surface = await fetch(`${handle.url}api/surface`);
+  assert.equal(surface.status, 200);
+  assert.deepEqual(await surface.json(), { kind: 'review' });
+
+  const wrongDeck = await fetch(`${handle.url}api/interaction`);
+  assert.equal(wrongDeck.status, 404);
+  assert.deepEqual(await wrongDeck.json(), { error: 'wrong_surface', expected: 'review' });
+
+  const initial = await fetch(`${handle.url}api/review`);
+  assert.equal(initial.status, 200);
+  const initialBody = await initial.json() as { content: string; file: string; output: string; version: number; result: FeedbackResult };
+  assert.equal(initialBody.file, file);
+  assert.equal(initialBody.output, output);
+  assert.equal(initialBody.content, '# Source\n\nbody\n');
+  assert.equal(initialBody.version, 1, 'importing a draft written after server start must advance the version token');
+  assert.equal(initialBody.result.submitted, false);
+  assert.equal(initialBody.result.comments.length, 1, 'GET /api/review must pick up the draft nvim saved after server start');
+  assert.equal(initialBody.result.comments[0]!.id, 'nvim-draft');
+
+  const badJson = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{',
+  });
+  assert.equal(badJson.status, 400);
+  assert.equal(((await badJson.json()) as { error: string }).error, 'bad_json');
+
+  const badInput = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments: 'nope', baseVersion: 1 }),
+  });
+  assert.equal(badInput.status, 400);
+  assert.equal(((await badInput.json()) as { error: string }).error, 'bad_input');
+
+  const draftSignal = nextWsJson(ws);
+  const draft = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      baseVersion: 1,
+      comments: [
+        { id: 'c1', line: 3, endLine: 3, lineText: 'body', comment: '  needs work  ', createdAt: '2026-07-07T20:00:00.000Z' },
+        { id: 'empty', line: 1, comment: '   ' },
+      ],
+    }),
+  });
+  assert.equal(draft.status, 200);
+  const draftBody = await draft.json() as { ok: boolean; version: number; result: FeedbackResult };
+  assert.equal(draftBody.ok, true);
+  assert.equal(draftBody.version, 2);
+  assert.equal(draftBody.result.submitted, false);
+  assert.equal(draftBody.result.approved, false);
+  assert.equal(draftBody.result.comments.length, 1);
+  assert.equal(draftBody.result.comments[0]!.comment, 'needs work');
+  assert.equal(readFileSync(output, 'utf8').endsWith('\n'), true, 'draft output must include trailing newline');
+  const draftMessage = await draftSignal;
+  assert.equal(draftMessage.type, 'review-draft-updated');
+  assert.equal(draftMessage.version, 2);
+
+  const staleDraft = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments: [], baseVersion: 1 }),
+  });
+  assert.equal(staleDraft.status, 409);
+  assert.equal(((await staleDraft.json()) as { error: string }).error, 'stale_draft');
+
+  const convergedSignal = nextWsJson(ws);
+  const submit = await fetch(`${handle.url}api/review/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments: [], baseVersion: 2 }),
+  });
+  assert.equal(submit.status, 200, 'review submit ack must survive onSubmit-triggered teardown');
+  const submitBody = await submit.json() as { ok: boolean; output: string; submittedAt: string; result: FeedbackResult };
+  assert.equal(submitBody.ok, true);
+  assert.equal(submitBody.output, output);
+  assert.equal(submitBody.result.submitted, true);
+  assert.equal(submitBody.result.approved, true);
+  assert.equal(submitBody.result.submittedAt, submitBody.submittedAt);
+  assert.equal(submitBody.result.savedAt, submitBody.submittedAt);
+  assert.equal(existsSync(submitFlag), true, 'review browser submit must write the submit sentinel');
+  assert.equal(readFileSync(output, 'utf8'), JSON.stringify(submitBody.result, null, 2) + '\n');
+  const convergedMessage = await convergedSignal;
+  assert.equal(convergedMessage.type, 'converged');
+  assert.equal(onSubmitFired, 1);
+  assert.deepEqual(submittedResult, submitBody.result);
+
+  ws.close();
+  rmSync(dir, { recursive: true, force: true });
+  console.log('OK: review endpoints write drafts, reject stale edits, submit with ack ordering, and broadcast signals');
+}
+
+// ── Test 5: review submit is single-assignment and source 404s ───────────────
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'hl-review-server-test-'));
+  const file = resolve(join(dir, 'source.md'));
+  const output = join(dir, 'feedback.json');
+  writeFileSync(file, 'body\n');
+  let onSubmitFired = 0;
+
+  const handle = await startReviewWebServer({
+    jobDir: dir,
+    file,
+    output,
+    onSubmit: () => {
+      onSubmitFired++;
+    },
+  });
+
+  const first = await fetch(`${handle.url}api/review/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments: [{ id: 'c1', line: 1, endLine: 1, lineText: 'body', comment: 'first', createdAt: '2026-07-07T20:00:00.000Z' }], baseVersion: 0 }),
+  });
+  assert.equal(first.status, 200);
+  const firstBody = await first.json() as { output: string; submittedAt: string; result: FeedbackResult };
+
+  const second = await fetch(`${handle.url}api/review/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments: [], baseVersion: 0 }),
+  });
+  assert.equal(second.status, 409);
+  const secondBody = await second.json() as { ok: boolean; error: string; output: string; submittedAt: string; result: FeedbackResult };
+  assert.equal(secondBody.ok, false);
+  assert.equal(secondBody.error, 'already_submitted');
+  assert.equal(secondBody.output, firstBody.output);
+  assert.equal(secondBody.submittedAt, firstBody.submittedAt);
+  assert.deepEqual(secondBody.result, firstBody.result);
+  assert.equal(onSubmitFired, 1, 'review onSubmit must fire once for the first accepted submit');
+
+  await handle.stop();
+  rmSync(file, { force: true });
+  const missingHandle = await startReviewWebServer({ jobDir: dir, file, output });
+  const missing = await fetch(`${missingHandle.url}api/review`);
+  assert.equal(missing.status, 404);
+  assert.equal(((await missing.json()) as { error: string }).error, 'source_not_found');
+  await missingHandle.stop();
+  rmSync(dir, { recursive: true, force: true });
+  console.log('OK: review submit is single-assignment and missing source returns source_not_found');
 }
 
 console.log('OK');

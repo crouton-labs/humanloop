@@ -1,8 +1,15 @@
 import { spawn, spawnSync, execFileSync } from 'child_process';
-import { readFileSync, existsSync, writeFileSync, renameSync, mkdtempSync } from 'fs';
+import { existsSync, writeFileSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { resolve, join } from 'path';
 import type { FeedbackComment, FeedbackResult } from '../types.js';
+import { openBrowser } from '../browser/open.js';
+import { startReviewWebServer, type WebServerHandle } from '../browser/server.js';
+import {
+  readStoredFeedbackResult,
+  writeDraftFeedbackResult,
+  writeFinalFeedbackResult,
+} from './feedback.js';
 
 export interface ReviewOptions {
   /** Where the answers JSON is written (live autosave + finalized on exit). */
@@ -69,6 +76,8 @@ export function reviewVimscript(): string {
     `" The rest is the read-only guard, comment commands, and autosave.`,
     `let g:hl_out = $HL_OUTPUT`,
     `let g:hl_src = $HL_SOURCE`,
+    `let g:hl_review_url = $HL_REVIEW_URL`,
+    `let g:hl_handoff_flag = $HL_HANDOFF_FLAG`,
     `let s:comments = []`,
     `let s:idseq = 0`,
     `let s:ns = exists('*nvim_create_namespace') ? nvim_create_namespace('hl_review') : -1`,
@@ -340,11 +349,22 @@ export function reviewVimscript(): string {
     `  qa!`,
     `endfunction`,
     ``,
+    `function! s:HandOff() abort`,
+    `  call s:Save()`,
+    `  if g:hl_handoff_flag ==# ''`,
+    `    echohl ErrorMsg | echo 'Browser handoff unavailable' | echohl NONE`,
+    `    return`,
+    `  endif`,
+    `  call writefile([''], g:hl_handoff_flag)`,
+    `  qa!`,
+    `endfunction`,
+    ``,
     `command! HLComment call <SID>Comment('n')`,
     `command! HLList call <SID>List()`,
     `command! HLUndo call <SID>Undo()`,
     `command! HLSubmit call <SID>Submit()`,
-    `command! HLHelp echo 'REVIEW  <Space>c comment   <Space>l list   <Space>u undo-last   <Space>s submit & quit   |  in list: e/<CR> edit · dd delete · q close   (any quit submits)'`,
+    `command! HLBrowser call <SID>HandOff()`,
+    `command! HLHelp echo 'REVIEW  <Space>c comment   <Space>l list   <Space>u undo-last   <Space>s submit & quit   <Space>w browser handoff   |  in list: e/<CR> edit · dd delete · q close'`,
     ``,
     `" Highlights are (re)applied after any colorscheme so the user's theme`,
     `" (e.g. gloam) loads first, then our anchor highlight sits on top.`,
@@ -431,6 +451,7 @@ export function reviewVimscript(): string {
     `  nnoremap <buffer> <silent> <Space>l :call <SID>List()<CR>`,
     `  nnoremap <buffer> <silent> <Space>u :call <SID>Undo()<CR>`,
     `  nnoremap <buffer> <silent> <Space>s :call <SID>Submit()<CR>`,
+    `  nnoremap <buffer> <silent> <Space>w :call <SID>HandOff()<CR>`,
     `  call s:Hi()`,
     `  call s:Load()`,
     `  call s:Marks()`,
@@ -438,7 +459,7 @@ export function reviewVimscript(): string {
     `  " Keep this hint short: a line that wraps past the cmdline triggers the`,
     `  " hit-enter prompt, whose mode blocks the deferred render-markdown paint.`,
     `  " The full key list lives in :HLHelp (and is printed to stderr on launch).`,
-    `  echohl Question | echo 'hl review — <Space>c comment · l list · u undo · s submit  (:HLHelp)' | echohl NONE`,
+    `  echohl Question | echo 'hl review — c comment · l list · u undo · s submit · w browser  (:HLHelp)' | echohl NONE`,
     `endfunction`,
     `autocmd VimEnter * call s:Setup()`,
     `autocmd VimLeavePre * call s:Save()`,
@@ -459,39 +480,6 @@ export function reviewVimscript(): string {
     `endif`,
     ``,
   ].join('\n');
-}
-
-function atomicWrite(path: string, data: string): void {
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, data);
-  renameSync(tmp, path);
-}
-
-function sanitizeComments(raw: unknown): FeedbackComment[] {
-  if (!Array.isArray(raw)) return [];
-  const out: FeedbackComment[] = [];
-  for (const r of raw) {
-    if (typeof r !== 'object' || r === null) continue;
-    const c = r as Record<string, unknown>;
-    const comment = typeof c.comment === 'string' ? c.comment.trim() : '';
-    if (!comment) continue;
-    const line = Number(c.line) || 1;
-    const endLine = Number(c.endLine) || line;
-    const colStart = Number.isInteger(c.colStart) ? (c.colStart as number) : undefined;
-    const colEnd = Number.isInteger(c.colEnd) ? (c.colEnd as number) : undefined;
-    out.push({
-      id: typeof c.id === 'string' && c.id ? c.id : `c${out.length}`,
-      line,
-      endLine,
-      colStart: colStart !== undefined && colEnd !== undefined && colEnd > colStart ? colStart : undefined,
-      colEnd: colStart !== undefined && colEnd !== undefined && colEnd > colStart ? colEnd : undefined,
-      quote: typeof c.quote === 'string' && c.quote ? c.quote : undefined,
-      lineText: typeof c.lineText === 'string' ? c.lineText : '',
-      comment,
-      createdAt: typeof c.createdAt === 'string' ? c.createdAt : new Date().toISOString(),
-    });
-  }
-  return out;
 }
 
 const FEEDBACK_SCHEMA =
@@ -596,6 +584,73 @@ function runInCurrentTerminal(bin: string, args: string[], env: NodeJS.ProcessEn
   });
 }
 
+type ParkedReviewAction =
+  | { type: 'submitted'; result: FeedbackResult }
+  | { type: 'take-back' }
+  | { type: 'cancel' };
+
+function clearFlag(path: string): void {
+  rmSync(path, { force: true });
+}
+
+function readDraftComments(path: string, absFile: string): FeedbackComment[] {
+  const stored = readStoredFeedbackResult(path, absFile);
+  return stored?.comments ?? [];
+}
+
+function finalizeReviewOutput(outPath: string, absFile: string, didSubmit: boolean): FeedbackResult {
+  const comments = readDraftComments(outPath, absFile);
+  return didSubmit
+    ? writeFinalFeedbackResult(outPath, absFile, comments)
+    : writeDraftFeedbackResult(outPath, absFile, comments);
+}
+
+async function waitForParkedReviewSubmit(submitted: Promise<FeedbackResult>): Promise<ParkedReviewAction> {
+  process.stderr.write(
+    '\nhumanloop: browser review handoff is active.\n' +
+    '  The terminal editor is parked; the browser is the editing authority.\n' +
+    '  Press w to take back into nvim, or Ctrl+C to exit with an unsubmitted draft.\n\n',
+  );
+
+  if (!process.stdin.isTTY) {
+    const result = await submitted;
+    return { type: 'submitted', result };
+  }
+
+  return new Promise<ParkedReviewAction>((resolveAction) => {
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    let settled = false;
+    const cleanup = () => {
+      stdin.off('data', onData);
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw);
+      stdin.pause();
+    };
+    const finish = (action: ParkedReviewAction) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveAction(action);
+    };
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      if (text === 'w' || text === 'W') finish({ type: 'take-back' });
+      if (text === '\u0003') finish({ type: 'cancel' });
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('data', onData);
+    submitted.then(
+      (result) => finish({ type: 'submitted', result }),
+      () => finish({ type: 'cancel' }),
+    );
+  });
+}
+
+async function stopReviewServer(handle: WebServerHandle | null): Promise<void> {
+  if (handle !== null) await handle.stop();
+}
+
 /**
  * Open a markdown file in a clean, read-only Neovim/Vim review session. The
  * human anchors comments to source lines/selections with native vim motions
@@ -617,78 +672,110 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   const initPath = join(dir, 'review.vim');
   if (!existsSync(initPath)) writeFileSync(initPath, reviewVimscript());
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HL_OUTPUT: outPath,
-    HL_SOURCE: absFile,
-    ...(opts.submitFlagPath ? { HL_SUBMIT_FLAG: opts.submitFlagPath } : {}),
-  };
+  const handoffFlagPath = join(dir, 'browser-handoff.flag');
   // `-u NONE`: do NOT load the user's init.lua / LazyVim / plugins / keymaps.
   // Default runtimepath still includes the config dir (for the gloam
   // colorscheme) and the site dir (for the treesitter markdown parser), so the
   // review layer pulls in ONLY the colorscheme + treesitter styling itself.
   const editorArgs = ['-u', 'NONE', '-n', '-i', 'NONE', absFile, '-c', `source ${initPath}`];
-
   const inTmux = !!process.env.TMUX && !opts.noTmux;
-  process.stderr.write(
-    `\nhumanloop: opening "${absFile}" for review in ${bin}` +
-    (inTmux ? ' (tmux pane).\n' : '.\n') +
-    `  Answers : ${outPath}\n` +
-    `  Keys    : <Space>c comment · <Space>l list · <Space>u undo · <Space>s submit & quit  (or :HLComment/:HLSubmit)\n` +
-    `  Status  : BLOCKING — waiting for you to finish the review and quit the editor.\n\n`,
-  );
 
-  if (inTmux) {
-    // `exec env …` so the editor replaces the shell and becomes the pane's
-    // process (so tmux `#{pane_current_command}` is `nvim`, not the shell).
-    const envPairs = [
-      `HL_OUTPUT=${shellQuote(outPath)}`,
-      `HL_SOURCE=${shellQuote(absFile)}`,
-      ...(opts.submitFlagPath ? [`HL_SUBMIT_FLAG=${shellQuote(opts.submitFlagPath)}`] : []),
-    ];
-    const paneCmd = [
-      'exec',
-      'env',
-      ...envPairs,
-      shellQuote(bin),
-      ...editorArgs.map(shellQuote),
-    ].join(' ');
-    try {
-      if (opts.tmuxPopup) {
-        const w = opts.popupSize ? opts.popupSize.w : '90%';
-        const h = opts.popupSize ? opts.popupSize.h : '90%';
-        execFileSync('tmux', ['display-popup', '-E', '-w', w, '-h', h, paneCmd], { stdio: 'inherit' });
-      } else {
-        await runInTmuxPane(paneCmd);
+  async function runEditor(reviewUrl: string): Promise<void> {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HL_OUTPUT: outPath,
+      HL_SOURCE: absFile,
+      HL_REVIEW_URL: reviewUrl,
+      HL_HANDOFF_FLAG: handoffFlagPath,
+      ...(opts.submitFlagPath ? { HL_SUBMIT_FLAG: opts.submitFlagPath } : {}),
+    };
+
+    process.stderr.write(
+      `\nhumanloop: opening "${absFile}" for review in ${bin}` +
+      (inTmux ? ' (tmux pane).\n' : '.\n') +
+      `  Answers : ${outPath}\n` +
+      `  Browser : ${reviewUrl}  (<Space>w hands off)\n` +
+      `  Keys    : <Space>c comment · <Space>l list · <Space>u undo · <Space>s submit & quit · <Space>w browser  (or :HLComment/:HLSubmit/:HLBrowser)\n` +
+      `  Status  : BLOCKING — waiting for you to finish the review.\n\n`,
+    );
+
+    if (inTmux) {
+      // `exec env …` so the editor replaces the shell and becomes the pane's
+      // process (so tmux `#{pane_current_command}` is `nvim`, not the shell).
+      const envPairs = [
+        `HL_OUTPUT=${shellQuote(outPath)}`,
+        `HL_SOURCE=${shellQuote(absFile)}`,
+        `HL_REVIEW_URL=${shellQuote(reviewUrl)}`,
+        `HL_HANDOFF_FLAG=${shellQuote(handoffFlagPath)}`,
+        ...(opts.submitFlagPath ? [`HL_SUBMIT_FLAG=${shellQuote(opts.submitFlagPath)}`] : []),
+      ];
+      const paneCmd = [
+        'exec',
+        'env',
+        ...envPairs,
+        shellQuote(bin),
+        ...editorArgs.map(shellQuote),
+      ].join(' ');
+      try {
+        if (opts.tmuxPopup) {
+          const w = opts.popupSize ? opts.popupSize.w : '90%';
+          const h = opts.popupSize ? opts.popupSize.h : '90%';
+          execFileSync('tmux', ['display-popup', '-E', '-w', w, '-h', h, paneCmd], { stdio: 'inherit' });
+        } else {
+          await runInTmuxPane(paneCmd);
+        }
+      } catch (err) {
+        process.stderr.write(`tmux dispatch failed, running in current terminal: ${err instanceof Error ? err.message : String(err)}\n`);
+        await runInCurrentTerminal(bin, editorArgs, env);
       }
-    } catch (err) {
-      process.stderr.write(`tmux dispatch failed, running in current terminal: ${err instanceof Error ? err.message : String(err)}\n`);
+    } else {
       await runInCurrentTerminal(bin, editorArgs, env);
     }
-  } else {
-    await runInCurrentTerminal(bin, editorArgs, env);
   }
 
-  let comments: FeedbackComment[] = [];
-  if (existsSync(outPath)) {
+  while (true) {
+    clearFlag(handoffFlagPath);
+    let resolveSubmitted!: (result: FeedbackResult) => void;
+    const submitted = new Promise<FeedbackResult>((resolveSubmittedPromise) => {
+      resolveSubmitted = resolveSubmittedPromise;
+    });
+    const server = await startReviewWebServer({
+      jobDir: dir,
+      file: absFile,
+      output: outPath,
+      submitFlagPath: opts.submitFlagPath,
+      onSubmit: (result) => resolveSubmitted(result),
+    });
+
     try {
-      const prior = JSON.parse(readFileSync(outPath, 'utf8')) as { comments?: unknown };
-      comments = sanitizeComments(prior.comments);
-    } catch {
-      // unreadable autosave — treat as no comments rather than failing the run
+      await runEditor(server.url);
+
+      if (existsSync(handoffFlagPath)) {
+        openBrowser(server.url);
+        const action = await waitForParkedReviewSubmit(submitted);
+        if (action.type === 'submitted') {
+          await stopReviewServer(server);
+          clearFlag(handoffFlagPath);
+          return action.result;
+        }
+        if (action.type === 'take-back') {
+          server.notifyTakenBack();
+          await stopReviewServer(server);
+          clearFlag(handoffFlagPath);
+          process.stderr.write('humanloop: taking review back into the terminal editor.\n');
+          continue;
+        }
+        await stopReviewServer(server);
+        clearFlag(handoffFlagPath);
+        return finalizeReviewOutput(outPath, absFile, false);
+      }
+
+      await stopReviewServer(server);
+      const didSubmit = opts.submitFlagPath ? existsSync(opts.submitFlagPath) : true;
+      return finalizeReviewOutput(outPath, absFile, didSubmit);
+    } catch (err) {
+      await stopReviewServer(server);
+      throw err;
     }
   }
-
-  const now = new Date().toISOString();
-  const didSubmit = opts.submitFlagPath ? existsSync(opts.submitFlagPath) : true;
-  const result: FeedbackResult = {
-    file: absFile,
-    submitted: didSubmit,
-    approved: didSubmit && comments.length === 0,
-    comments,
-    ...(didSubmit ? { submittedAt: now } : {}),
-    savedAt: now,
-  };
-  atomicWrite(outPath, JSON.stringify(result, null, 2) + '\n');
-  return result;
 }

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { launchReview, reviewVimscript } from './editor/review.js';
+import { writeFeedbackResult } from './editor/feedback.js';
 import { validateDeck, resolveDeckBodyPaths } from './inbox/deck-schema.js';
 import { ask, inbox } from './api.js';
 import { display } from './surfaces/display.js';
@@ -692,7 +693,9 @@ reviewCmd
   .helpOption('-h, --help', 'Show help')
   .action(async () => {
     type ReviewInput = { file: string; output?: string | null; editor?: string | null; tmux?: boolean; dir?: string | null };
-    const input = parseStdinJson<ReviewInput>();
+    const input = process.env.HL_REVIEW_OPEN_INPUT
+      ? JSON.parse(process.env.HL_REVIEW_OPEN_INPUT) as ReviewInput
+      : parseStdinJson<ReviewInput>();
 
     if (!input.file || typeof input.file !== 'string') {
       emitError({ error: 'bad_input', message: 'file is required', field: 'file', next: 'Provide: {"file": "/path/to/doc.md"}' });
@@ -728,7 +731,7 @@ reviewCmd
       const sq = (s: string) =>
         /^[a-zA-Z0-9_\-./:@%+=]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
       const childInput = JSON.stringify({ file: absFile, output, editor: input.editor ?? null, tmux: false, dir: jobDir });
-      const cmd = `echo ${sq(childInput)} | ${sq(process.execPath)} ${sq(scriptPath)} review open`;
+      const cmd = `HL_REVIEW_OPEN_INPUT=${sq(childInput)} ${sq(process.execPath)} ${sq(scriptPath)} review open`;
       try {
         execFileSync('tmux', ['split-window', '-d', '-h', cmd], { stdio: 'ignore' });
       } catch (spawnErr) {
@@ -744,15 +747,18 @@ reviewCmd
       await new Promise<void>((resolvePromise) => {
         const poll = setInterval(() => {
           const fp = join(jobDir, 'feedback.json');
-          if (existsSync(fp)) {
-            const result = tryParseJson<FeedbackResult>(readFileSync(fp, 'utf8'));
-            if (result !== null) {
-              clearInterval(poll);
-              process.stdout.write(JSON.stringify({ job_id: jobId, output, status: 'done', result }) + '\n');
-              process.exit(0);
-            }
+          const result = existsSync(fp) ? tryParseJson<FeedbackResult>(readFileSync(fp, 'utf8')) : null;
+          if (result !== null && result.submitted === true) {
+            clearInterval(poll);
+            process.stdout.write(JSON.stringify({ job_id: jobId, output, status: 'done', result }) + '\n');
+            process.exit(0);
           }
           const state = detectJobState(jobDir);
+          if (state === 'done' && result !== null) {
+            clearInterval(poll);
+            process.stdout.write(JSON.stringify({ job_id: jobId, output, status: 'done', result }) + '\n');
+            process.exit(0);
+          }
           if (state === 'failed' || state === 'canceled') {
             clearInterval(poll);
             process.stdout.write(JSON.stringify({ job_id: jobId, output, status: state }) + '\n');
@@ -774,7 +780,7 @@ reviewCmd
         jobDir,
       });
       appendJobLog(jobDir, { level: 'info', event: 'job_finished', message: 'review finished', data: { comments: result.comments.length } });
-      writeFileSync(join(jobDir, 'feedback.json'), JSON.stringify(result, null, 2));
+      writeFeedbackResult(join(jobDir, 'feedback.json'), result);
       process.stdout.write(JSON.stringify({
         job_id: jobId,
         output,
