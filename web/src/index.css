@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@plugin '@tailwindcss/typography';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -79,3 +80,73 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ── Markdown body (react-markdown + remark-gfm + rehype-highlight) ──────────
+ * The "friendlier than nvim" rendering requirement — GitHub-style typographic
+ * CSS built on @tailwindcss/typography, retuned onto our own design tokens
+ * (not the plugin's own gray scale) so it matches the rest of the app in both
+ * light and dark. Applied via `className="markdown-body prose ..."` — see
+ * `components/Markdown.tsx`. */
+.markdown-body {
+  --tw-prose-body: var(--foreground);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-lead: var(--muted-foreground);
+  --tw-prose-links: var(--primary);
+  --tw-prose-bold: var(--foreground);
+  --tw-prose-counters: var(--muted-foreground);
+  --tw-prose-bullets: var(--muted-foreground);
+  --tw-prose-hr: var(--border);
+  --tw-prose-quotes: var(--foreground);
+  --tw-prose-quote-borders: var(--border);
+  --tw-prose-captions: var(--muted-foreground);
+  --tw-prose-code: var(--foreground);
+  --tw-prose-pre-code: var(--foreground);
+  --tw-prose-pre-bg: var(--muted);
+  --tw-prose-th-borders: var(--border);
+  --tw-prose-td-borders: var(--border);
+}
+
+.markdown-body code:not(pre code) {
+  @apply rounded-sm bg-muted px-1 py-0.5 text-[0.875em] font-mono before:content-none after:content-none;
+}
+
+.markdown-body pre {
+  @apply rounded-md border border-border;
+}
+
+.markdown-body pre code.hljs {
+  @apply bg-transparent p-0;
+}
+
+.markdown-body table {
+  @apply block w-full overflow-x-auto;
+}
+
+/* Syntax highlighting (rehype-highlight → hljs.* classes), tuned to sit on
+ * top of --muted instead of shipping a clashing prebuilt hljs theme. */
+.hljs { color: var(--foreground); }
+.hljs-comment,
+.hljs-quote { color: var(--muted-foreground); font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link { color: oklch(0.6 0.19 292); }
+.hljs-string,
+.hljs-attr,
+.hljs-addition,
+.hljs-meta-string { color: oklch(0.64 0.15 155); }
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet { color: oklch(0.7 0.17 60); }
+.hljs-title,
+.hljs-name,
+.hljs-title.function_,
+.hljs-title.class_ { color: oklch(0.62 0.19 250); }
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attribute { color: oklch(0.65 0.18 20); }
+.hljs-built_in,
+.hljs-type { color: oklch(0.62 0.15 200); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
