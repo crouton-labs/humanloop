@@ -34,8 +34,14 @@ export interface InteractionPreAnswer {
 
 export interface Interaction {
   id: string;
+  /** Short topic — the thing being decided, not the decision. */
   title: string;
+  /** ONE-sentence TL;DR of the choice/stakes. Renders as markdown in the
+   *  scrollable region; keep it a single line — long prose belongs in `body`. */
   subtitle?: string;
+  /** The full explanation: directive-flavored markdown rendered by termrender.
+   *  This is where long or rich content goes (never the wall of detail in
+   *  `subtitle`). `bodyPath` is the same content sourced from a file. */
   body?: string;
   bodyPath?: string;
   options: InteractionOption[];
