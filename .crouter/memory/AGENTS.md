@@ -1,5 +1,6 @@
 ---
 kind: knowledge
+name: humanloop
 when-and-why-to-read: When working in humanloop, this knowledge should be read
   because it is the project's operating guide.
 short-form: Constraints
