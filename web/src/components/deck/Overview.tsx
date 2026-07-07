@@ -2,6 +2,7 @@ import { cn } from '@/lib/utils';
 import type { DeckState } from '@/lib/deckState';
 import { responseSummary } from '@/lib/deckState';
 import type { DeckAction } from '@/lib/deckReducer';
+import { Button } from '@/components/ui/button';
 import { StatusIcon } from './StatusIcon';
 
 export interface OverviewProps {
@@ -53,10 +54,15 @@ export function Overview({ state, dispatch }: OverviewProps) {
           );
         })}
       </ul>
-      <div className="mt-3 flex items-center gap-4 border-t border-border pt-3 text-xs text-muted-foreground">
-        <span><kbd className="rounded border border-border bg-muted px-1">enter</kbd> review</span>
-        <span><kbd className="rounded border border-border bg-muted px-1">j</kbd>/<kbd className="rounded border border-border bg-muted px-1">k</kbd> navigate</span>
-        <span><kbd className="rounded border border-border bg-muted px-1">q</kbd> finish</span>
+      <div className="mt-3 flex items-center justify-between gap-4 border-t border-border pt-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-4">
+          <span><kbd className="rounded border border-border bg-muted px-1">enter</kbd> review</span>
+          <span><kbd className="rounded border border-border bg-muted px-1">j</kbd>/<kbd className="rounded border border-border bg-muted px-1">k</kbd> navigate</span>
+          <span><kbd className="rounded border border-border bg-muted px-1">q</kbd> finish</span>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => dispatch({ type: 'overview/finish' })}>
+          Finish
+        </Button>
       </div>
     </div>
   );

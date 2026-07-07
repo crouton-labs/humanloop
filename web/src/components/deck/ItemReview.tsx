@@ -123,6 +123,16 @@ export function ItemReview({ state, dispatch, scrollRef, multiInteraction }: Ite
             </Button>
           )}
 
+          {interaction.allowFreetext !== true && opts.length === 0 && (
+            <Button
+              variant="outline"
+              className="w-fit"
+              onClick={() => dispatch({ type: 'item-review/step', delta: 1 })}
+            >
+              Continue
+            </Button>
+          )}
+
           {multi && (
             <Button
               className="mt-2 w-fit"
