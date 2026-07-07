@@ -8,6 +8,8 @@ export interface Key {
   wordRight: boolean;
   home: boolean;
   end: boolean;
+  pageUp: boolean;
+  pageDown: boolean;
   /** Forward delete (the Del key / \x1b[3~). */
   del: boolean;
   return: boolean;
@@ -32,6 +34,8 @@ function emptyKey(): Key {
     wordRight: false,
     home: false,
     end: false,
+    pageUp: false,
+    pageDown: false,
     del: false,
     return: false,
     newline: false,
@@ -57,6 +61,8 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
   if (str === '\x1b[1;5D' || str === '\x1b[1;3D' || str === '\x1bb') { key.wordLeft = true; return { input: '', key }; }
   if (str === '\x1b[H' || str === '\x1b[1~') { key.home = true; return { input: '', key }; }
   if (str === '\x1b[F' || str === '\x1b[4~') { key.end = true; return { input: '', key }; }
+  if (str === '\x1b[5~') { key.pageUp = true; return { input: '', key }; }
+  if (str === '\x1b[6~') { key.pageDown = true; return { input: '', key }; }
   if (str === '\x1b[3~') { key.del = true; return { input: '', key }; }
   // Alt+Enter inserts a newline in freetext (distinct from Enter=submit). Must
   // precede the bare-ESC and meta-backspace checks so the two-byte sequence

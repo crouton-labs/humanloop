@@ -158,16 +158,16 @@ function handleItemReview(
   }
   if (input === ' ') { state.detailExpanded = !state.detailExpanded; render(); return; }
 
-  // Body scroll: u/d or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
+  // Body scroll: u/d, PageUp/PageDown, or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
   // Plain u/d exists because tmux configs commonly bind C-d/C-u for pane scroll
   // and intercept them before they reach the app. Render clamps state.scrollOffset,
   // so over-scroll past the bottom is harmless.
-  if (input === 'd' || (key.ctrl && (input === 'd' || input === 'e'))) {
+  if (input === 'd' || key.pageDown || (key.ctrl && (input === 'd' || input === 'e'))) {
     state.scrollOffset = (state.scrollOffset ?? 0) + (input === 'e' ? 1 : 10);
     render();
     return;
   }
-  if (input === 'u' || (key.ctrl && (input === 'u' || input === 'y'))) {
+  if (input === 'u' || key.pageUp || (key.ctrl && (input === 'u' || input === 'y'))) {
     state.scrollOffset = Math.max(0, (state.scrollOffset ?? 0) - (input === 'y' ? 1 : 10));
     render();
     return;
@@ -320,6 +320,29 @@ function handleInputMode(
       }
       render();
     }
+    return;
+  }
+
+  if (key.pageDown) {
+    state.scrollOffset = (state.scrollOffset ?? 0) + 10;
+    render();
+    return;
+  }
+  if (key.pageUp) {
+    state.scrollOffset = Math.max(0, (state.scrollOffset ?? 0) - 10);
+    render();
+    return;
+  }
+  if (key.downArrow) {
+    const next = lineBelowIndex(mode.buffer, mode.cursor);
+    if (next !== undefined) mode.cursor = next;
+    render();
+    return;
+  }
+  if (key.upArrow) {
+    const next = lineAboveIndex(mode.buffer, mode.cursor);
+    if (next !== undefined) mode.cursor = next;
+    render();
     return;
   }
 
@@ -514,6 +537,30 @@ function lineEnd(buffer: string, cursor: number): number {
   let i = Math.min(cursor, chars.length);
   while (i < chars.length && chars[i] !== '\n') i++;
   return i;
+}
+
+function lineAboveIndex(buffer: string, cursor: number): number | undefined {
+  const chars = [...buffer];
+  const at = Math.min(cursor, chars.length);
+  const start = lineStart(buffer, at);
+  if (start === 0) return undefined;
+  const column = at - start;
+  const previousEnd = start - 1;
+  const previousStart = lineStart(buffer, previousEnd);
+  return Math.min(previousStart + column, previousEnd);
+}
+
+function lineBelowIndex(buffer: string, cursor: number): number | undefined {
+  const chars = [...buffer];
+  const at = Math.min(cursor, chars.length);
+  const start = lineStart(buffer, at);
+  const column = at - start;
+  const end = lineEnd(buffer, at);
+  if (end >= chars.length) return undefined;
+  const nextStart = end + 1;
+  let nextEnd = nextStart;
+  while (nextEnd < chars.length && chars[nextEnd] !== '\n') nextEnd++;
+  return Math.min(nextStart + column, nextEnd);
 }
 
 // ── Final ────────────────────────────────────────────────────────────────────

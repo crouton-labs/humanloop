@@ -306,7 +306,9 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
         `${DIM}space${RESET} expand`,
         `${DIM}q${RESET} overview`,
       ];
-  if (overflows) footerParts.unshift(`${DIM}u/d${RESET} scroll`);
+  if (overflows) {
+    footerParts.unshift(state.inputMode ? `${DIM}pgup/pgdn${RESET} scroll` : `${DIM}u/d${RESET} scroll`);
+  }
   const footer = `  ${footerParts.join('  ')}`;
 
   // Assemble — pad to fill rows so post-body sits at the bottom

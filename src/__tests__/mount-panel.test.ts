@@ -12,7 +12,17 @@ function mkKey(partial: Partial<Key>): Key {
     meta: false,
     upArrow: false,
     downArrow: false,
+    leftArrow: false,
+    rightArrow: false,
+    wordLeft: false,
+    wordRight: false,
+    home: false,
+    end: false,
+    pageUp: false,
+    pageDown: false,
+    del: false,
     return: false,
+    newline: false,
     escape: false,
     tab: false,
     backspace: false,
@@ -909,5 +919,52 @@ assert.equal(
   '',
   '0x15 on an already-empty buffer is a no-op',
 );
+
+// ── Test 23: comment arrows navigate text; PageUp/PageDown scroll body ────────
+// While an attached option comment is open, arrows move through the multiline
+// comment buffer. PageUp/PageDown are the dedicated question-body scroll keys.
+
+const longBodyDeck: Deck = {
+  interactions: [{
+    id: 'scroll-comment',
+    title: 'Scrollable question',
+    body: Array.from({ length: 40 }, (_, i) => `body line ${i + 1}`).join('\n'),
+    options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }],
+    allowFreetext: true,
+  }],
+};
+
+let scrollCommentResponses: InteractionResponse[] = [];
+const scrollCommentPanel = mountPanel({
+  deck: longBodyDeck,
+  cols: 80,
+  rows: 20,
+  onComplete: (r) => { scrollCommentResponses = r; },
+});
+scrollCommentPanel.handleKey('c', mkKey({})); // attached to the focused 'yes' option
+for (const ch of 'one') scrollCommentPanel.handleKey(ch, mkKey({}));
+scrollCommentPanel.handleKey('', mkKey({ newline: true }));
+for (const ch of 'two') scrollCommentPanel.handleKey(ch, mkKey({}));
+scrollCommentPanel.handleKey('', mkKey({ newline: true }));
+for (const ch of 'three') scrollCommentPanel.handleKey(ch, mkKey({}));
+assert.ok(
+  scrollCommentPanel.render().join('\n').includes('↓'),
+  'long body shows below-scroll affordance while editing a comment',
+);
+scrollCommentPanel.handleKey('', mkKey({ upArrow: true }));
+scrollCommentPanel.handleKey('!', mkKey({}));
+scrollCommentPanel.handleKey('', mkKey({ pageDown: true }));
+const scrolledComment = scrollCommentPanel.render().join('\n');
+assert.ok(
+  scrolledComment.includes('↑') || scrolledComment.includes('more above'),
+  'PageDown scrolls the body without moving to the bottom of the comment buffer',
+);
+scrollCommentPanel.handleKey('', RETURN);
+assert.deepEqual(
+  scrollCommentResponses,
+  [{ id: 'scroll-comment', selectedOptionId: 'yes', freetext: 'one\ntwo!\nthree' }],
+  'arrow navigation edits the multiline comment and PageDown does not alter it',
+);
+scrollCommentPanel.unmount();
 
 console.log('OK');
