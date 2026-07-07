@@ -149,11 +149,6 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   for (const line of wrap(sanitize(interaction.title), maxW)) {
     preLines.push(`  ${BOLD}${line}${RESET}`);
   }
-  if (interaction.subtitle) {
-    for (const line of wrap(sanitize(interaction.subtitle), maxW)) {
-      preLines.push(`  ${DIM}${line}${RESET}`);
-    }
-  }
   // "Previously answered" marker — shown only while the seed is intact (no user
   // override yet). The label comes from preAnswered.label so callers can be
   // domain-specific ("Previously approved", "Carried over from prior pass").
@@ -165,8 +160,17 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     preLines.push(`  ${DIM}${ITALIC}◆ ${sanitize(label)} — press n/p to review, or any option to override${RESET}`);
   }
 
-  // Body: rendered question body + expanded visual block (scrollable)
+  // Body: rendered subtitle + question body + expanded visual block (scrollable).
+  // subtitle and body are both directive-flavored markdown rendered by termrender
+  // and live in the scrollable region so long content never overflows the fixed
+  // header — agents put rich prose in either field, so both must render markdown.
   const bodyLines: string[] = [];
+  if (interaction.subtitle) {
+    bodyLines.push('');
+    for (const line of renderMarkdown(interaction.subtitle, maxW)) {
+      bodyLines.push(`  ${line}`);
+    }
+  }
   if (interaction.body) {
     bodyLines.push('');
     for (const line of renderMarkdown(interaction.body, maxW)) {
