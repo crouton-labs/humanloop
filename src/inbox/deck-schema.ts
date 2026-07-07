@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { INTERACTION_KINDS } from '../types.js';
 import type { Deck } from '../types.js';
 import { checkMarkdown } from '../render/termrender.js';
 
@@ -34,7 +35,7 @@ const interactionSchema = z.object({
   multiSelect: z.boolean().optional(),
   allowFreetext: z.boolean().optional(),
   freetextLabel: z.string().optional(),
-  kind: z.enum(['notify', 'decision', 'context', 'error']).optional(),
+  kind: z.enum(INTERACTION_KINDS).optional(),
   preAnswered: preAnswerSchema.optional(),
 });
 
@@ -73,14 +74,19 @@ export const deckSchema = z.object({
 });
 
 // ── C2 bodyPath defense + inlining ────────────────────────────────────────────
-export function inlineBodyPath(deckPath: string, bodyPath: string): string {
-  const deckDir = dirname(deckPath);
-  const joined = resolve(deckDir, bodyPath);
+
+/**
+ * Read `bodyPath` (relative to `dir`, the interaction directory a deck.json
+ * lives/will live in) with the traversal/symlink defenses a file read off an
+ * agent-supplied relative path needs.
+ */
+function readBodyPathFile(dir: string, bodyPath: string): string {
+  const joined = resolve(dir, bodyPath);
 
   // STEP 1: existence + lstat BEFORE realpath to catch symlinks and directories.
   if (!existsSync(joined)) {
     throw new Error(
-      `bodyPath does not exist: '${bodyPath}' (resolved against deck dir '${deckDir}'). bodyPath is interpreted relative to the deck JSON's directory; place the body file there and use a relative path (e.g. "completion-summary.md").`,
+      `bodyPath does not exist: '${bodyPath}' (resolved against deck dir '${dir}'). bodyPath is interpreted relative to the deck JSON's directory; place the body file there and use a relative path (e.g. "completion-summary.md").`,
     );
   }
   const stat = lstatSync(joined);
@@ -92,7 +98,7 @@ export function inlineBodyPath(deckPath: string, bodyPath: string): string {
   // STEP 2: realpath both sides, prefix-check (defense-in-depth for .. traversal).
   // realpathSync is safe here: lstat already confirmed the path exists.
   const realResolved = realpathSync(joined);
-  const realDeckDir = realpathSync(deckDir);
+  const realDeckDir = realpathSync(dir);
   const prefix = realDeckDir + sep;
   if (realResolved !== realDeckDir && !realResolved.startsWith(prefix)) {
     throw new Error(
@@ -102,6 +108,29 @@ export function inlineBodyPath(deckPath: string, bodyPath: string): string {
 
   // STEP 3: read. lstat confirmed regular file; realpath confirmed in-tree.
   return readFileSync(joined, 'utf-8');
+}
+
+/**
+ * The ONE canonical `bodyPath` → `body` normalization boundary. Resolves every
+ * interaction's `bodyPath` (relative to `dir`, the interaction directory) into
+ * `body` and strips `bodyPath` from the result.
+ *
+ * Call this once, right before a deck is (re)written to `<dir>/deck.json` —
+ * `hl deck ask`, `hl deck update`, and the public `ask()` API all do — so
+ * every reader downstream (the terminal TUI's render + its live-reload
+ * poller, the browser server's `/api/interaction`) only ever sees a plain
+ * `body` and never has to special-case `bodyPath` itself. `parseDeck` (below)
+ * reuses this same function when reading a deck straight off disk.
+ */
+export function resolveDeckBodyPaths(deck: Deck, dir: string): Deck {
+  const interactions = deck.interactions.map((interaction) => {
+    if (interaction.bodyPath === undefined) return interaction;
+    const body = readBodyPathFile(dir, interaction.bodyPath);
+    // Drop bodyPath from persisted deck.json/decisions.json (recipe §1.8).
+    const { bodyPath: _drop, ...rest } = interaction;
+    return { ...rest, body };
+  });
+  return { ...deck, interactions };
 }
 
 // ── public entry points ───────────────────────────────────────────────────────
@@ -115,24 +144,18 @@ export function parseDeck(deckPath: string): Deck {
   }
 
   const parsed = deckSchema.parse(json);
+  const resolved = resolveDeckBodyPaths(parsed, dirname(deckPath));
 
-  const inlinedInteractions = parsed.interactions.map(interaction => {
-    let body = interaction.body;
-    if (interaction.bodyPath !== undefined) {
-      body = inlineBodyPath(deckPath, interaction.bodyPath);
-    }
-    if (body !== undefined) {
-      const check = checkMarkdown(body);
+  for (const interaction of resolved.interactions) {
+    if (interaction.body !== undefined) {
+      const check = checkMarkdown(interaction.body);
       if (!check.ok) {
         throw new Error(check.error);
       }
     }
-    // Drop bodyPath from persisted decisions.json (recipe §1.8).
-    const { bodyPath: _drop, ...rest } = interaction;
-    return body !== undefined ? { ...rest, body } : { ...rest };
-  });
+  }
 
-  return { ...parsed, interactions: inlinedInteractions };
+  return resolved;
 }
 
 export function validateDeck(parsed: unknown): Deck {

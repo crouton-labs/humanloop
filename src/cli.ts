@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { launchReview, reviewVimscript } from './editor/review.js';
-import { validateDeck } from './inbox/deck-schema.js';
+import { validateDeck, resolveDeckBodyPaths } from './inbox/deck-schema.js';
 import { ask, inbox } from './api.js';
 import { display } from './surfaces/display.js';
 import { renderMarkdown, checkMarkdown } from './render/termrender.js';
@@ -19,6 +19,7 @@ import {
   deckPath, atomicWriteJson, readJson, responsePath, stampCanvasNode,
 } from './inbox/convention.js';
 import { buildSummary } from './summary.js';
+import { INTERACTION_KINDS } from './types.js';
 import type { Deck, FeedbackResult, InteractionResponse } from './types.js';
 
 // ── Version ───────────────────────────────────────────────────────────────────
@@ -273,7 +274,7 @@ const REQUEST_SCHEMA = {
           },
           allowFreetext: { type: 'boolean' },
           freetextLabel: { type: 'string' },
-          kind: { type: 'string', enum: ['notify', 'decision', 'context', 'error'] },
+          kind: { type: 'string', enum: [...INTERACTION_KINDS] },
         },
       },
     },
@@ -449,6 +450,18 @@ deckCmd
 
     const dir = input.dir ? resolve(input.dir) : mkdtempSync(join(tmpdir(), 'hl-ix-'));
     mkdirSync(dir, { recursive: true });
+    // Canonical bodyPath → body normalization boundary (deck-schema.ts) —
+    // resolved before deck.json is ever written, so terminal render, the
+    // live-reload poller, and the browser server all just see `body`.
+    try {
+      deck = resolveDeckBodyPaths(deck, dir);
+    } catch (bodyErr) {
+      emitError({
+        error: 'deck_invalid',
+        message: bodyErr instanceof Error ? bodyErr.message : String(bodyErr),
+        next: 'Fix bodyPath (must point at a real file inside the interaction dir) and retry.',
+      });
+    }
     stampCanvasNode(deck);
     atomicWriteJson(deckPath(dir), deck);
 
@@ -593,6 +606,16 @@ deckCmd
         message: `deck validation failed: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}`,
         received: input.deck,
         next: "The live deck is unchanged. Fix the deck, then: echo '{\"deck\":{...}}' | hl deck validate",
+      });
+    }
+    // Same canonical bodyPath → body normalization boundary as `deck ask`.
+    try {
+      deck = resolveDeckBodyPaths(deck, dir);
+    } catch (bodyErr) {
+      emitError({
+        error: 'deck_invalid',
+        message: bodyErr instanceof Error ? bodyErr.message : String(bodyErr),
+        next: 'The live deck is unchanged. Fix bodyPath (must point at a real file inside the interaction dir) and retry.',
       });
     }
     atomicWriteJson(deckPath(dir), deck);

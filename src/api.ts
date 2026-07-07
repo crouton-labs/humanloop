@@ -8,6 +8,7 @@ import { resolveInteractionDir } from './tui/app.js';
 import { scanInbox } from './inbox/scan.js';
 import { pickFromInbox } from './inbox/tui.js';
 import { deckPath, atomicWriteJson, readJson, stampCanvasNode } from './inbox/convention.js';
+import { resolveDeckBodyPaths } from './inbox/deck-schema.js';
 import { getTerminalSize } from './tui/terminal.js';
 import { notifyDeck } from './inbox/deck-factories.js';
 import { buildSummary } from './summary.js';
@@ -34,6 +35,11 @@ export interface AskOpts {
 export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnvelope> {
   const dir = opts.dir ?? managedDir();
   mkdirSync(dir, { recursive: true });
+  // Canonical bodyPath → body normalization boundary (see deck-schema.ts) —
+  // resolved BEFORE the deck is ever written to disk, so every reader
+  // downstream (terminal render, the live-reload poller, the browser server)
+  // only ever sees a plain `body`.
+  deck = resolveDeckBodyPaths(deck, dir);
   stampCanvasNode(deck);
   atomicWriteJson(deckPath(dir), deck);
 

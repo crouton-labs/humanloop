@@ -2,7 +2,12 @@
 
 import type { Key } from './tui/terminal.js';
 
-export type InteractionKind = 'notify' | 'decision' | 'context' | 'error' | 'review';
+// Single source of truth for the interaction-kind enum: the Zod deck schema
+// (`src/inbox/deck-schema.ts`) and the CLI's JSON schema (`src/cli.ts`) both
+// derive their enum values from this array so a new kind can't drift between
+// the type and the two validation surfaces the way `'review'` once did.
+export const INTERACTION_KINDS = ['notify', 'decision', 'context', 'error', 'review'] as const;
+export type InteractionKind = (typeof INTERACTION_KINDS)[number];
 
 export interface InteractionOption {
   id: string;

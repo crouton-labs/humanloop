@@ -16,7 +16,7 @@ export {
 } from './render/termrender.js';
 
 // Canonical deck schema + parsing/validation (consumers stop forking it).
-export { parseDeck, validateDeck, deckSchema } from './inbox/deck-schema.js';
+export { parseDeck, validateDeck, deckSchema, resolveDeckBodyPaths } from './inbox/deck-schema.js';
 
 // Deck factories — pure builders for common deck shapes (sugar for SDK consumers
 // who want validated Yes/No or notify decks without inline construction).
