@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import type { RefObject } from 'react';
 import type { DeckState } from '@/lib/deckState';
 import type { DeckAction } from '@/lib/deckReducer';
-import { useGlobalKeydown, isEditableTarget, isPlainKey } from './useGlobalKeydown';
+import { useGlobalKeydown, isEditableTarget, hasNoCtrlMetaAlt, isComposingKey } from './useGlobalKeydown';
 
 // ── Deck keymap ──────────────────────────────────────────────────────────────
 // A DECK-SPECIFIC consumer of `useGlobalKeydown` (the reusable primitive).
@@ -65,12 +65,17 @@ export function useDeckKeymap(
   const handler = useCallback((e: KeyboardEvent) => {
     const { scrollRef, modalOpen, onToggleHelp, onCloseModal } = opts;
 
+    // While the help overlay owns the keyboard, Escape/`?` are processed and
+    // every OTHER key is fully swallowed (preventDefault) so it can't fall
+    // through to a browser default (Space/PageUp/PageDown scrolling the page
+    // behind the modal).
     if (modalOpen) {
-      if (e.key === 'Escape') { e.preventDefault(); onCloseModal(); }
-      else if (e.key === '?') { e.preventDefault(); onToggleHelp(); }
+      if (e.key === 'Escape') { e.preventDefault(); onCloseModal(); return; }
+      if (e.key === '?') { e.preventDefault(); onToggleHelp(); return; }
+      e.preventDefault();
       return;
     }
-    if (e.key === '?' && isPlainKey(e) && !isEditableTarget(e.target)) {
+    if (e.key === '?' && hasNoCtrlMetaAlt(e) && !isEditableTarget(e.target)) {
       e.preventDefault();
       onToggleHelp();
       return;
@@ -80,8 +85,11 @@ export function useDeckKeymap(
     // Only intercept the three keys the textarea itself shouldn't own;
     // everything else (typing, arrows, backspace, native word-jump...) falls
     // through to the browser's default textarea behavior + the controlled
-    // component's onChange.
+    // component's onChange. While an IME composition is in progress, Enter/
+    // Escape/Tab belong to the IME (confirm/cancel a candidate) — never
+    // consumed here.
     if (state.inputMode !== null) {
+      if (isComposingKey(e)) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         dispatch({ type: 'input/cancel' });
@@ -107,28 +115,28 @@ export function useDeckKeymap(
     if (isEditableTarget(e.target)) return;
 
     if (state.phase === 'overview') {
-      if ((e.key === 'j' || e.key === 'ArrowDown') && isPlainKey(e)) {
+      if ((e.key === 'j' || e.key === 'ArrowDown') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'overview/move', delta: 1 });
         return;
       }
-      if ((e.key === 'k' || e.key === 'ArrowUp') && isPlainKey(e)) {
+      if ((e.key === 'k' || e.key === 'ArrowUp') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'overview/move', delta: -1 });
         return;
       }
-      if ((e.key === 'Enter' || e.key === ' ') && isPlainKey(e)) {
+      if ((e.key === 'Enter' || e.key === ' ') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'overview/enter' });
         return;
       }
-      if (e.key === 'q' && isPlainKey(e)) {
+      if (e.key === 'q' && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'overview/finish' });
         return;
       }
       const interaction = state.interactions[state.currentIndex];
-      if (interaction !== undefined && isPlainKey(e)) {
+      if (interaction !== undefined && hasNoCtrlMetaAlt(e)) {
         const matched = interaction.options.find((o) => o.shortcut === e.key.toLowerCase());
         if (matched !== undefined) {
           e.preventDefault();
@@ -142,14 +150,14 @@ export function useDeckKeymap(
       const interaction = state.interactions[state.currentIndex]!;
       const opts = interaction.options;
 
-      if (e.key === 'n' && isPlainKey(e)) { e.preventDefault(); dispatch({ type: 'item-review/step', delta: 1 }); return; }
-      if (e.key === 'p' && isPlainKey(e)) { e.preventDefault(); dispatch({ type: 'item-review/step', delta: -1 }); return; }
-      if ((e.key === 'q' || e.key === 'Escape') && isPlainKey(e)) {
+      if (e.key === 'n' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); dispatch({ type: 'item-review/step', delta: 1 }); return; }
+      if (e.key === 'p' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); dispatch({ type: 'item-review/step', delta: -1 }); return; }
+      if ((e.key === 'q' || e.key === 'Escape') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'item-review/back' });
         return;
       }
-      if (e.key === ' ' && isPlainKey(e)) {
+      if (e.key === ' ' && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         if (interaction.multiSelect && state.selectedAction < opts.length) {
           dispatch({ type: 'item-review/toggle-option', optionId: opts[state.selectedAction]!.id });
@@ -157,17 +165,17 @@ export function useDeckKeymap(
         // else: no-op (no visual-context channel to expand — see file header)
         return;
       }
-      if (e.key === 'd' && isPlainKey(e)) { e.preventDefault(); scrollRef.current?.scrollBy({ top: SCROLL_STEP_PX, behavior: 'smooth' }); return; }
+      if (e.key === 'd' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); scrollRef.current?.scrollBy({ top: SCROLL_STEP_PX, behavior: 'smooth' }); return; }
       if (e.key === 'PageDown') { e.preventDefault(); scrollRef.current?.scrollBy({ top: SCROLL_STEP_PX, behavior: 'smooth' }); return; }
-      if (e.key === 'u' && isPlainKey(e)) { e.preventDefault(); scrollRef.current?.scrollBy({ top: -SCROLL_STEP_PX, behavior: 'smooth' }); return; }
+      if (e.key === 'u' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); scrollRef.current?.scrollBy({ top: -SCROLL_STEP_PX, behavior: 'smooth' }); return; }
       if (e.key === 'PageUp') { e.preventDefault(); scrollRef.current?.scrollBy({ top: -SCROLL_STEP_PX, behavior: 'smooth' }); return; }
 
-      if ((e.key === 'j' || e.key === 'ArrowDown') && isPlainKey(e)) {
+      if ((e.key === 'j' || e.key === 'ArrowDown') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'item-review/move-focus', delta: 1 });
         return;
       }
-      if ((e.key === 'k' || e.key === 'ArrowUp') && isPlainKey(e)) {
+      if ((e.key === 'k' || e.key === 'ArrowUp') && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'item-review/move-focus', delta: -1 });
         return;
@@ -176,7 +184,7 @@ export function useDeckKeymap(
       // handleInteractionAction, in the terminal's own order: shortcut match,
       // then 'c' comment-attach, then freetext-only 'r'/Enter, then
       // generic Enter-on-row.
-      if (isPlainKey(e)) {
+      if (hasNoCtrlMetaAlt(e)) {
         const matched = opts.find((o) => o.shortcut === e.key.toLowerCase());
         if (matched !== undefined) {
           e.preventDefault();
@@ -185,7 +193,7 @@ export function useDeckKeymap(
           return;
         }
       }
-      if (e.key === 'c' && isPlainKey(e) && interaction.allowFreetext && opts.length > 0) {
+      if (e.key === 'c' && hasNoCtrlMetaAlt(e) && interaction.allowFreetext && opts.length > 0) {
         e.preventDefault();
         const onOption = state.selectedAction < opts.length;
         dispatch({
@@ -195,13 +203,13 @@ export function useDeckKeymap(
         return;
       }
       if (interaction.allowFreetext && opts.length === 0) {
-        if ((e.key === 'r' || e.key === 'Enter') && isPlainKey(e)) {
+        if ((e.key === 'r' || e.key === 'Enter') && hasNoCtrlMetaAlt(e)) {
           e.preventDefault();
           dispatch({ type: 'item-review/open-freetext' });
           return;
         }
       }
-      if (e.key === 'Enter' && isPlainKey(e)) {
+      if (e.key === 'Enter' && hasNoCtrlMetaAlt(e)) {
         e.preventDefault();
         dispatch({ type: 'item-review/enter-row' });
         return;
@@ -210,9 +218,9 @@ export function useDeckKeymap(
     }
 
     if (state.phase === 'final') {
-      if (e.key === 'Enter' && isPlainKey(e)) { e.preventDefault(); dispatch({ type: 'final/confirm' }); return; }
-      if (e.key === 'Escape' && isPlainKey(e)) { e.preventDefault(); dispatch({ type: 'final/back' }); return; }
-      if (e.key === 'p' && isPlainKey(e)) { e.preventDefault(); dispatch({ type: 'final/prev' }); return; }
+      if (e.key === 'Enter' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); dispatch({ type: 'final/confirm' }); return; }
+      if (e.key === 'Escape' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); dispatch({ type: 'final/back' }); return; }
+      if (e.key === 'p' && hasNoCtrlMetaAlt(e)) { e.preventDefault(); dispatch({ type: 'final/prev' }); return; }
     }
   }, [state, dispatch, opts]);
 

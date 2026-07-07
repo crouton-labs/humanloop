@@ -26,7 +26,12 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
-          <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close keyboard shortcuts"
+            className="text-muted-foreground hover:text-foreground"
+          >
             <X className="size-4" />
           </button>
         </div>

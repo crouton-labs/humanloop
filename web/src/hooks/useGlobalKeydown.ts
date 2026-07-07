@@ -30,11 +30,34 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return false;
 }
 
-/** No modifier keys held — the shape every plain single-letter vim shortcut
+/** No Ctrl/Cmd/Alt held — the shape every plain single-letter vim shortcut
  *  (`j`, `n`, `c`, ...) should require, so it never shadows a real browser/OS
- *  shortcut built on Ctrl/Cmd/Alt (Cmd+F, Ctrl+W, ...). */
-export function isPlainKey(e: KeyboardEvent): boolean {
+ *  shortcut built on Ctrl/Cmd/Alt (Cmd+F, Ctrl+W, ...).
+ *
+ *  Deliberately Shift-agnostic — `Shift+j` still counts as "plain" here. Decks
+ *  match shortcut letters case-insensitively and have no Shift-modified
+ *  bindings today, so that's fine for them, but a keymap where Shift means
+ *  something (e.g. Phase 3's range/selection extension) must NOT reuse this
+ *  helper for that decision — use `hasNoModifiers` instead, which also
+ *  requires Shift to be up. */
+export function hasNoCtrlMetaAlt(e: KeyboardEvent): boolean {
   return !e.ctrlKey && !e.metaKey && !e.altKey;
+}
+
+/** No modifier keys held at all, Shift included — the shape a keymap should
+ *  require when Shift is meaningful (e.g. Shift+click-style range extension)
+ *  so a Shift-chord never gets misread as the bare shortcut. */
+export function hasNoModifiers(e: KeyboardEvent): boolean {
+  return !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+}
+
+/** True while an IME composition is in progress (`e.isComposing`, plus the
+ *  legacy `keyCode === 229` some browsers still fire for the commit
+ *  keystroke). Callers with a text-entry surface must check this BEFORE
+ *  treating Enter/Escape/Tab as a shortcut — during composition those keys
+ *  belong to the IME (confirm/cancel a candidate), not the app. */
+export function isComposingKey(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229;
 }
 
 /**

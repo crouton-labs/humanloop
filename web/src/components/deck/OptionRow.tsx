@@ -58,8 +58,9 @@ export function OptionRow({
         <Button
           variant="ghost"
           size="icon"
-          className="size-7 shrink-0 opacity-0 group-hover:opacity-100"
+          className="size-7 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
           title="Comment on this option (c)"
+          aria-label={`Comment on ${option.label}`}
           onClick={(e) => {
             e.stopPropagation();
             onOpenComment();
