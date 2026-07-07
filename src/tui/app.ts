@@ -8,12 +8,15 @@ import type {
   MountedPanel, MountedPanelOpts, GenerateVisual,
 } from '../types.js';
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
-import { diffFrame, renderOverview, renderItemReview, renderFinal, clampItemReviewScroll } from './render.js';
+import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
 import { readConversation } from '../conversation/reader.js';
 import { defaultGenerateVisual } from '../visuals/generate.js';
 import { validateDeck } from '../inbox/deck-schema.js';
 import { progressPath as progressPathFor, deckPath as deckPathFor, writeResponse, clearProgress } from '../inbox/convention.js';
+import { startWebServer } from '../browser/server.js';
+import type { WebServerHandle } from '../browser/server.js';
+import { openBrowser } from '../browser/open.js';
 
 /** Validate an arbitrary parsed value as a Deck. Delegates to the canonical
  * Zod validator in `inbox/deck-schema.ts` (the single source of truth shared
@@ -315,6 +318,18 @@ export async function resolveInteractionDir(
     // returned envelope/summary describes what was answered, not the kickoff.
     let currentDeck: Deck = deck;
     let deckWatch: ReturnType<typeof setInterval> | null = null;
+    // Guards finalize() against running twice. The server already makes
+    // /api/submit single-assignment (only the first accepted submit fires
+    // onSubmit), but finalize() is also reachable via onComplete/onExit/a
+    // hard Ctrl+C during handoff — this is defense-in-depth so a second call
+    // from any path is a no-op instead of double-tearing-down (stop() twice,
+    // removeListener on an already-removed listener) and resolving the outer
+    // promise a second time.
+    let finalized = false;
+    // Set while the panel has handed control to the browser (the `w` keybind
+    // below). Non-null means: the panel renders nothing, the host renders the
+    // handoff screen instead, and only the take-back key reaches this loop.
+    let handoff: WebServerHandle | null = null;
 
     const flushHost = (lines: string[]) => {
       const { cols: currentCols, rows: currentRows } = getTerminalSize();
@@ -329,20 +344,40 @@ export async function resolveInteractionDir(
     // model no longer matches the screen: re-layout at the new size, clear
     // everything, and redraw from scratch.
     const onResize = () => {
-      if (panel === null) return;
       const { cols: c, rows: r } = getTerminalSize();
+      if (handoff !== null) {
+        prevFrameLocal = [];
+        process.stdout.write('\x1b[2J\x1b[H');
+        flushHost(renderHandoff(handoff.url, c, r));
+        return;
+      }
+      if (panel === null) return;
       const lines = panel.handleResize(c, r);
       prevFrameLocal = [];
       process.stdout.write('\x1b[2J\x1b[H');
       flushHost(lines);
     };
 
-    const finalize = (responses: InteractionResponse[]) => {
+    // `written` is set when the browser (not this function) already wrote
+    // response.json via the web server's /api/submit — the canonical write
+    // happens exactly once, whichever surface produced it; this just converges
+    // the terminal side and resolves the promise with what's already on disk.
+    const finalize = (
+      responses: InteractionResponse[],
+      written?: { responsePath: string; completedAt: string },
+    ) => {
+      if (finalized) return;
+      finalized = true;
       if (deckWatch !== null) { clearInterval(deckWatch); deckWatch = null; }
+      if (handoff !== null) { const h = handoff; handoff = null; void h.stop(); }
       restoreTerminal();
       process.stdin.removeListener('data', onData);
       process.stdout.removeListener('resize', onResize);
       panel?.unmount();
+      if (written !== undefined) {
+        resolve({ responses, completedAt: written.completedAt, responsePath: written.responsePath, deck: currentDeck });
+        return;
+      }
       const completedAt = new Date().toISOString();
       // Resolved supersedes in-progress: write response.json, drop progress.json.
       const rp = writeResponse(dir, responses, completedAt, currentDeck);
@@ -387,6 +422,11 @@ export async function resolveInteractionDir(
     let lastDeckJson = JSON.stringify(currentDeck);
     deckWatch = setInterval(() => {
       if (panel === null) return;
+      // Deck reload is deferred while handed off — the browser already fetched
+      // a snapshot and applying loadDeck() here would repaint the (currently
+      // hidden) panel over the handoff screen. Re-checked on the next tick
+      // after take-back, so a `hl deck update` mid-handoff is not lost.
+      if (handoff !== null) return;
       const m = deckMtime();
       if (m === 0 || m === lastDeckMtime) return;
       lastDeckMtime = m;
@@ -478,14 +518,77 @@ export async function resolveInteractionDir(
       }
     };
 
+    // Start the local web server over this interaction dir, open a browser
+    // tab on it, and park the panel: from here the browser is the sole editor
+    // (browser-authoritative handoff — no two-way sync). `onSubmit` fires once
+    // the browser's POST has already written response.json; finalize() is
+    // told so via `written` and does not write it again.
+    const enterHandoff = async () => {
+      if (handoff !== null) return;
+      let server: WebServerHandle;
+      try {
+        server = await startWebServer({
+          dir,
+          deck: currentDeck,
+          onSubmit: (responses, completedAt, responsePath) => {
+            finalize(responses, { responsePath, completedAt });
+          },
+        });
+      } catch (err) {
+        // Failed to bind (e.g. no loopback available) — stay in the normal TUI;
+        // nothing was torn down, so surface the error as a one-line footer.
+        const { cols: c, rows: r } = getTerminalSize();
+        const lines = panel!.render();
+        while (lines.length < r) lines.push('');
+        lines[r - 1] = `  Could not start the browser surface: ${err instanceof Error ? err.message : String(err)}`.slice(0, c);
+        flushHost(lines);
+        return;
+      }
+      handoff = server;
+      const { cols: c, rows: r } = getTerminalSize();
+      prevFrameLocal = [];
+      process.stdout.write('\x1b[2J\x1b[H');
+      flushHost(renderHandoff(server.url, c, r));
+      openBrowser(server.url);
+    };
+
+    // Reclaim control: tell any open browser tab it's now read-only, stop the
+    // server, and restore the live panel exactly as the human left it.
+    const takeBack = () => {
+      if (handoff === null) return;
+      const h = handoff;
+      handoff = null;
+      h.notifyTakenBack();
+      void h.stop();
+      prevFrameLocal = [];
+      process.stdout.write('\x1b[2J\x1b[H');
+      flushHost(panel!.render());
+    };
+
     onData = (data: Buffer) => {
       const { input: inp, key } = parseKeypress(data);
+      if (handoff !== null) {
+        // Handed off: the panel gets no keys at all. Only take-back (and a
+        // hard Ctrl+C exit, mirroring the panel's own exit-on-partial) reach
+        // the host while the browser is the sole editor.
+        if (inp === 'w') { takeBack(); return; }
+        if (key.ctrl && inp === 'c') { finalize(lastResponses); return; }
+        return;
+      }
       if (key.ctrl && inp === 'o') {
         const buf = panel!.getInputBuffer();
         if (buf !== undefined) {
           runEditorEscapeHatch(buf);
           return;
         }
+      }
+      // 'w' hands the current interaction off to the browser. Gated on
+      // canAcceptHostKeys() (not mid comment/freetext) so it never shadows a
+      // literal 'w' typed into a buffer; 'w' is also reserved from option
+      // auto-shortcuts (see assignShortcuts) so it never collides with a pick.
+      if (inp === 'w' && panel!.canAcceptHostKeys()) {
+        void enterHandoff();
+        return;
       }
       panel!.handleKey(inp, key);
       flushHost(panel!.render());

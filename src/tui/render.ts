@@ -453,6 +453,31 @@ export function renderFinal(state: TuiState, cols: number, rows: number): string
   return centerHorizontal(lines.slice(0, rows), cols, maxW + 2);
 }
 
+/**
+ * Rendered while the deck panel has handed control to the browser (see the
+ * `w` handoff in `resolveInteractionDir`). Purely informational — no keys are
+ * routed to the panel while this is on screen; the host intercepts the
+ * take-back key itself.
+ */
+export function renderHandoff(url: string, cols: number, rows: number): string[] {
+  const maxW = Math.min(cols - 4, 68);
+  const lines: string[] = [];
+  lines.push('');
+  lines.push(`  ${BOLD}${CYAN} Handed off to the browser ${RESET}`);
+  lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  lines.push('');
+  lines.push(`  ${DIM}Open (or already opened):${RESET}`);
+  lines.push(`  ${CYAN}${truncate(url, maxW)}${RESET}`);
+  lines.push('');
+  lines.push(`  ${ITALIC}${DIM}The browser is the sole editor now — submit there.${RESET}`);
+  lines.push(`  ${ITALIC}${DIM}This pane will converge automatically once it submits.${RESET}`);
+  lines.push('');
+  lines.push(`  ${DIM}${hline(maxW)}${RESET}`);
+  lines.push(`  ${YELLOW}w${RESET} take back control`);
+  while (lines.length < rows) lines.push('');
+  return centerHorizontal(lines.slice(0, rows), cols, maxW + 2);
+}
+
 export function responseSummary(r: InteractionResponse, interaction: Interaction): string {
   if (r.selectedOptionIds !== undefined) {
     const oc = r.optionComments;

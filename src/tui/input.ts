@@ -4,7 +4,10 @@ import type { Key } from './terminal.js';
 export type RenderFn = () => void;
 export type ExitFn = () => void;
 
-const RESERVED = new Set(['c', 'r', 'n', 'p', 'q', 'j', 'k', 'u', 'd', ' ']);
+// 'w' is reserved for the host-level "open in browser" handoff (see
+// tui/app.ts resolveInteractionDir) — never auto-assignable as an option
+// shortcut, or pressing it would race the handoff against picking that option.
+const RESERVED = new Set(['c', 'r', 'n', 'p', 'q', 'j', 'k', 'u', 'd', 'w', ' ']);
 
 export function assignShortcuts(interactions: Interaction[]): void {
   for (const it of interactions) {

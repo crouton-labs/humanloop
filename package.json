@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "workspaces": [
+    "web"
+  ],
   "bin": {
     "hl": "dist/cli.js"
   },
@@ -22,20 +25,22 @@
     "commands"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build --workspace=web",
     "dev": "tsx src/cli.ts",
     "link": "npm link",
     "postinstall": "node dist/scripts/install-renderer.js || true",
-    "test": "tsx src/__tests__/mount-panel.test.ts"
+    "test": "tsx src/__tests__/mount-panel.test.ts && tsx src/__tests__/browser-server.test.ts"
   },
   "dependencies": {
     "@r-cli/sdk": "^1.3.0",
     "commander": "^13.0.0",
     "string-width": "^7.0.0",
+    "ws": "^8.21.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0"
   }
