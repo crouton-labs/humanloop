@@ -694,7 +694,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
       `\nhumanloop: opening "${absFile}" for review in ${bin}` +
       (inTmux ? ' (tmux pane).\n' : '.\n') +
       `  Answers : ${outPath}\n` +
-      `  Browser : ${reviewUrl}  (<Space>w hands off)\n` +
+      `  Browser : available after <Space>w hands off (or :HLBrowser)\n` +
       `  Keys    : <Space>c comment · <Space>l list · <Space>u undo · <Space>s submit & quit · <Space>w browser  (or :HLComment/:HLSubmit/:HLBrowser)\n` +
       `  Status  : BLOCKING — waiting for you to finish the review.\n\n`,
     );
@@ -751,6 +751,8 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
       await runEditor(server.url);
 
       if (existsSync(handoffFlagPath)) {
+        server.activate();
+        process.stderr.write(`humanloop: browser review handoff active — ${server.url}\n`);
         openBrowser(server.url);
         const action = await waitForParkedReviewSubmit(submitted);
         if (action.type === 'submitted') {
@@ -759,7 +761,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
           return action.result;
         }
         if (action.type === 'take-back') {
-          server.notifyTakenBack();
+          await server.requestTakeBack();
           await stopReviewServer(server);
           clearFlag(handoffFlagPath);
           process.stderr.write('humanloop: taking review back into the terminal editor.\n');

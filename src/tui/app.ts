@@ -558,8 +558,14 @@ export async function resolveInteractionDir(
       if (handoff === null) return;
       const h = handoff;
       handoff = null;
-      h.notifyTakenBack();
-      void h.stop();
+      // Deck's requestTakeBack() is just an awaited flush-broadcast of
+      // taken-back (no ack-wait, deck has no autosave/dirty state to flush) —
+      // so this stays effectively instant. Kept async and NOT awaited before
+      // the render/flush below so the terminal repaint never blocks on it.
+      void (async () => {
+        await h.requestTakeBack();
+        await h.stop();
+      })();
       prevFrameLocal = [];
       process.stdout.write('\x1b[2J\x1b[H');
       flushHost(panel!.render());

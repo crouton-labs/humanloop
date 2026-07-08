@@ -13,6 +13,7 @@ function payload(content: string): ReviewPayload {
     content,
     result: { file: '/abs/source.md', submitted: false, approved: false, comments: [], savedAt: '2026-07-07T00:00:00.000Z' },
     version: 0,
+    activated: true,
   };
 }
 
@@ -240,6 +241,7 @@ const base = buildInitialReviewState(payload(content));
   const ro = reviewReducer(withComment, { type: 'server/mark-readonly' });
   assert.equal(ro.readOnly, true);
   assert.equal(ro.comments.length, 1, 'the existing comment survives going read-only');
+  assert.equal(ro.saveState, 'dirty', 'server/mark-readonly must not silently force the draft clean while an edit is still unsaved (Finding 2b)');
 
   const openBlocked = reviewReducer(ro, { type: 'composer/open' });
   assert.equal(openBlocked.composer, null, 'read-only blocks composer/open');

@@ -13,6 +13,7 @@ import {
 export type ReviewAction =
   | { type: 'server/replace'; review: ReviewPayload }
   | { type: 'server/mark-readonly'; reason?: string }
+  | { type: 'server/unmark-readonly' }
   | { type: 'cursor/move'; delta: number; extend?: boolean }
   | { type: 'cursor/set-line'; line: number }
   | { type: 'cursor/first' }
@@ -65,7 +66,16 @@ export function reviewReducer(prev: ReviewState, action: ReviewAction): ReviewSt
 
   switch (action.type) {
     case 'server/mark-readonly':
-      return { ...state, readOnly: true, composer: null, notice: action.reason ?? state.notice, saveState: 'clean' };
+      return { ...state, readOnly: true, composer: null, notice: action.reason ?? state.notice };
+
+    // Counterpart to mark-readonly, for the ONE freeze reason that isn't
+    // permanently terminal: a submit attempt that fails. mark-readonly is a
+    // ratchet everywhere else (taking-back/taken-back/submitted/etc. never
+    // reverse), so this must only ever be dispatched from the submit
+    // failure path in ReviewSurface — never generically alongside
+    // mark-readonly, or a genuinely terminal freeze could be undone.
+    case 'server/unmark-readonly':
+      return { ...state, readOnly: false };
 
     case 'cursor/move': {
       const nextLine = clampLine(state, state.activeLine + action.delta);

@@ -10,6 +10,7 @@ function payload(): ReviewPayload {
     content: 'a\nb\nc\n',
     result: { file: '/f', submitted: false, approved: false, comments: [], savedAt: '' },
     version: 0,
+    activated: true,
   };
 }
 

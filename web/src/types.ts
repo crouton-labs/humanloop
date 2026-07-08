@@ -98,4 +98,5 @@ export interface ReviewPayload {
   content: string;
   result: FeedbackResult;
   version: number;
+  activated: boolean;
 }

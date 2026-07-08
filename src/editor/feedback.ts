@@ -51,19 +51,64 @@ export function sanitizeFeedbackComments(raw: unknown): FeedbackComment[] {
   return out;
 }
 
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+function isPositiveInteger(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0;
+}
+function isNonNegativeInteger(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0;
+}
+
+// Strict, per-item validator for the browser-write API (PUT /api/review/draft,
+// POST /api/review/submit) — malformed anchors are rejected with a 400
+// instead of being silently normalized/dropped. `sanitizeFeedbackComments`
+// stays the separate, deliberately permissive path for loading legacy on-disk
+// drafts (readStoredFeedbackResult/readStoredDraftFeedbackResult), which must
+// keep tolerating old/hand-edited files.
 export function parseFeedbackComments(raw: unknown): { ok: true; comments: FeedbackComment[] } | { ok: false; message: string } {
   if (!Array.isArray(raw)) {
     return { ok: false, message: 'comments must be an array.' };
   }
-  for (const item of raw) {
-    if (!isRecord(item)) {
-      return { ok: false, message: 'comments must contain objects.' };
+  const comments: FeedbackComment[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (!isRecord(item)) return { ok: false, message: `comments[${i}] must be an object.` };
+    const { id, comment, line, endLine, lineText, createdAt, colStart, colEnd, quote } = item;
+    if (!isNonEmptyString(id)) return { ok: false, message: `comments[${i}].id must be a non-empty string.` };
+    if (!isNonEmptyString(comment)) return { ok: false, message: `comments[${i}].comment must be a non-empty string.` };
+    if (!isPositiveInteger(line)) return { ok: false, message: `comments[${i}].line must be a positive integer.` };
+    if (!isPositiveInteger(endLine)) return { ok: false, message: `comments[${i}].endLine must be a positive integer.` };
+    if (endLine < line) return { ok: false, message: `comments[${i}].endLine must be >= line.` };
+    if (typeof lineText !== 'string') return { ok: false, message: `comments[${i}].lineText must be a string.` };
+    if (!isNonEmptyString(createdAt)) return { ok: false, message: `comments[${i}].createdAt must be a non-empty string.` };
+    const hasColStart = colStart !== undefined;
+    const hasColEnd = colEnd !== undefined;
+    if (hasColStart !== hasColEnd) return { ok: false, message: `comments[${i}].colStart/colEnd must be provided together.` };
+    let outColStart: number | undefined;
+    let outColEnd: number | undefined;
+    if (hasColStart && hasColEnd) {
+      if (!isNonNegativeInteger(colStart) || !isNonNegativeInteger(colEnd)) {
+        return { ok: false, message: `comments[${i}].colStart/colEnd must be non-negative integers.` };
+      }
+      if (line === endLine && colEnd <= colStart) {
+        return { ok: false, message: `comments[${i}].colEnd must be greater than colStart on a single-line range.` };
+      }
+      outColStart = colStart;
+      outColEnd = colEnd;
     }
-    if (typeof item.comment !== 'string') {
-      return { ok: false, message: 'each comment must include a string comment.' };
+    if (quote !== undefined && typeof quote !== 'string') {
+      return { ok: false, message: `comments[${i}].quote must be a string when present.` };
     }
+    comments.push({
+      id, line, endLine,
+      colStart: outColStart, colEnd: outColEnd,
+      quote: typeof quote === 'string' && quote.length > 0 ? quote : undefined,
+      lineText, comment: comment.trim(), createdAt,
+    });
   }
-  return { ok: true, comments: sanitizeFeedbackComments(raw) };
+  return { ok: true, comments };
 }
 
 export function buildDraftFeedbackResult(file: string, comments: FeedbackComment[], savedAt = nowIso()): FeedbackResult {

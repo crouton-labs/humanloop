@@ -71,15 +71,27 @@ export interface ReviewWebServerOpts {
   submitFlagPath?: string;
   /** Fired after the HTTP submit ack has finished flushing. */
   onSubmit?: (result: FeedbackResult, submittedAt: string, outputPath: string) => void;
+  /** Test-only override for how long `requestTakeBack()` waits for open tabs
+   *  to ack a flush before giving up and broadcasting `taken-back` anyway.
+   *  Defaults to 2000ms in real usage. */
+  takeBackAckTimeoutMs?: number;
 }
 
 export interface WebServerHandle {
   /** `http://127.0.0.1:<port>/` — open this in a browser. */
   url: string;
   port: number;
-  /** Broadcast `{type:'taken-back'}` to every connected browser tab. Safe to
-   *  call with zero open sockets (e.g. the browser was never opened). */
-  notifyTakenBack(): void;
+  /** Mark this server as the active editing authority — until called, the
+   *  write endpoints (review draft/submit) 409 with `not_handed_off`. Deck's
+   *  implementation is a documented no-op: a deck server is only ever created
+   *  post-handoff (see `enterHandoff` in tui/app.ts), so it has no separate
+   *  activation moment to gate. */
+  activate(): void;
+  /** Ask every connected browser tab to flush any pending edit and ack, then
+   *  broadcast `{type:'taken-back'}`. Bounded by a timeout so a tab that never
+   *  acks (closed, network hiccup) can't hang take-back forever. Safe to call
+   *  with zero open sockets (e.g. the browser was never opened). */
+  requestTakeBack(): Promise<void>;
   /** Stop listening, close all sockets (WS and HTTP), and tear down. */
   stop(): Promise<void>;
 }
@@ -137,11 +149,19 @@ function createServerScaffold() {
   });
 
   let stopped = false;
-  function broadcast(message: unknown): void {
+  // Resolves once every currently-open socket's `ws.send` has actually
+  // flushed its payload to the OS socket buffer — NOT once the browser has
+  // received/processed it. Callers that follow a broadcast with a teardown
+  // (stop()/closeAllConnections()) must await this first, or the terminate
+  // can race the send and the frame never leaves the process.
+  function broadcast(message: unknown): Promise<void> {
     const payload = JSON.stringify(message);
+    const flushed: Promise<void>[] = [];
     for (const ws of sockets) {
-      if (ws.readyState === ws.OPEN) ws.send(payload);
+      if (ws.readyState !== ws.OPEN) continue;
+      flushed.push(new Promise((resolveSend) => { ws.send(payload, () => resolveSend()); }));
     }
+    return Promise.all(flushed).then(() => undefined);
   }
 
   function setHandler(next: (req: IncomingMessage, res: ServerResponse) => Promise<void>): void {
@@ -162,7 +182,7 @@ function createServerScaffold() {
     });
   }
 
-  return { httpServer, broadcast, setHandler, stop };
+  return { httpServer, broadcast, setHandler, stop, sockets };
 }
 
 async function listen(server: HttpServer): Promise<number> {
@@ -222,7 +242,10 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
       const responsePath = writeResponse(dir, responses, completedAt, deck);
       submitted = { responsePath, completedAt };
       clearProgress(dir);
-      scaffold.broadcast({ type: 'converged' });
+      // Await the flush BEFORE registering the finish callback that can
+      // trigger caller-side stop() — that ordering is what closes the race
+      // between a lost WS frame and the teardown it precedes.
+      await scaffold.broadcast({ type: 'converged' });
       // Ack-ordering guarantee: the HTTP caller must always receive its 200
       // body before any lifecycle teardown can close its socket.
       res.once('finish', () => {
@@ -243,8 +266,11 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
   return {
     url,
     port,
-    notifyTakenBack(): void {
-      scaffold.broadcast({ type: 'taken-back' });
+    // No-op: a deck server is only ever started post-handoff (enterHandoff in
+    // tui/app.ts), so it has no separate activation moment to gate.
+    activate(): void {},
+    async requestTakeBack(): Promise<void> {
+      await scaffold.broadcast({ type: 'taken-back' });
     },
     stop(): Promise<void> {
       return scaffold.stop();
@@ -255,7 +281,10 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
 async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHandle> {
   const { jobDir, file, output, submitFlagPath } = opts;
   const scaffold = createServerScaffold();
+  let activated = false;
   let version = 0;
+  let ackWaiter: { expected: number; count: number; resolve: () => void } | null = null;
+  const TAKE_BACK_ACK_TIMEOUT_MS = opts.takeBackAckTimeoutMs ?? 2000;
   let currentResult = readStoredDraftFeedbackResult(output, file)
     ?? buildDraftFeedbackResult(file, [], new Date().toISOString());
 
@@ -271,6 +300,26 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
 
   function currentSnapshot(): FeedbackResult {
     return currentResult;
+  }
+
+  // Bounded wait for `expected` open tabs to POST /api/review/take-back-ack
+  // after a take-back-requested broadcast. Resolves early once every tab has
+  // acked, or after `timeoutMs` regardless — a tab that never acks (closed,
+  // network hiccup) can't hang take-back forever.
+  function waitForTakeBackAcks(expected: number, timeoutMs: number): Promise<void> {
+    if (expected <= 0) return Promise.resolve();
+    return new Promise((resolveWait) => {
+      let settled = false;
+      const timer = setTimeout(finish, timeoutMs);
+      function finish(): void {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ackWaiter = null;
+        resolveWait();
+      }
+      ackWaiter = { expected, count: 0, resolve: finish };
+    });
   }
 
   scaffold.setHandler(async (req, res) => {
@@ -299,7 +348,18 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         content,
         result: currentSnapshot(),
         version,
+        activated,
       });
+      return;
+    }
+    if (url === '/api/review/take-back-ack' && req.method === 'POST') {
+      // No activation gate needed — acking a flush request is safe regardless
+      // of handoff state.
+      if (ackWaiter !== null) {
+        ackWaiter.count += 1;
+        if (ackWaiter.count >= ackWaiter.expected) ackWaiter.resolve();
+      }
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (url === '/api/review/draft' && req.method === 'PUT') {
@@ -308,6 +368,10 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         parsed = JSON.parse(await readRequestBody(req)) as { comments?: unknown; baseVersion?: unknown };
       } catch {
         sendJson(res, 400, { error: 'bad_json', message: 'Request body is not valid JSON.' });
+        return;
+      }
+      if (!activated) {
+        sendJson(res, 409, { error: 'not_handed_off', message: 'Review authority has not been handed off to the browser yet.' });
         return;
       }
       refreshInitialDraftFromDisk();
@@ -338,7 +402,7 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
       }
       currentResult = nextResult;
       version += 1;
-      scaffold.broadcast({ type: 'review-draft-updated', version, savedAt });
+      await scaffold.broadcast({ type: 'review-draft-updated', version, savedAt });
       sendJson(res, 200, { ok: true, result: currentSnapshot(), version });
       return;
     }
@@ -348,6 +412,10 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         parsed = JSON.parse(await readRequestBody(req)) as { comments?: unknown; baseVersion?: unknown };
       } catch {
         sendJson(res, 400, { error: 'bad_json', message: 'Request body is not valid JSON.' });
+        return;
+      }
+      if (!activated) {
+        sendJson(res, 409, { error: 'not_handed_off', message: 'Review authority has not been handed off to the browser yet.' });
         return;
       }
       refreshInitialDraftFromDisk();
@@ -386,7 +454,10 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
         return;
       }
-      scaffold.broadcast({ type: 'converged' });
+      // Await the flush BEFORE registering the finish callback that can
+      // trigger caller-side stop() — that ordering is what closes the race
+      // between a lost WS frame and the teardown it precedes.
+      await scaffold.broadcast({ type: 'converged' });
       res.once('finish', () => {
         opts.onSubmit?.(currentSnapshot(), submittedAt, output);
       });
@@ -405,8 +476,24 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
   return {
     url,
     port,
-    notifyTakenBack(): void {
-      scaffold.broadcast({ type: 'taken-back' });
+    activate(): void {
+      activated = true;
+    },
+    async requestTakeBack(): Promise<void> {
+      const targets = [...scaffold.sockets].filter((ws) => ws.readyState === ws.OPEN);
+      if (targets.length > 0) {
+        // Arm the ack waiter BEFORE broadcasting take-back-requested — a very
+        // fast browser could otherwise flush its dirty draft and POST
+        // /api/review/take-back-ack while the broadcast's own ws.send flush
+        // callbacks are still resolving. Arming after the broadcast (the old
+        // order) drops that ack on the floor (ackWaiter was still null when
+        // it arrived), forcing the full timeout even though the flush
+        // already succeeded. Starting the waiter first, then awaiting both
+        // the broadcast flush and the waiter together, closes that window.
+        const acked = waitForTakeBackAcks(targets.length, TAKE_BACK_ACK_TIMEOUT_MS);
+        await Promise.all([scaffold.broadcast({ type: 'take-back-requested' }), acked]);
+      }
+      await scaffold.broadcast({ type: 'taken-back' });
     },
     stop(): Promise<void> {
       return scaffold.stop();
