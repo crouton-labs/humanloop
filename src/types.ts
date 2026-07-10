@@ -178,15 +178,87 @@ export interface ResolutionEnvelope {
  * One pending interaction discovered by `scanInbox`. Read from the
  * `deck.json` header only — never the full deck.
  */
-export interface InboxItem {
+export interface ClaimSummary {
+  owner: string;
+  claimedAt: string;
+  heartbeatAt: string;
+}
+
+interface TicketSummaryBase {
   dir: string;
   id: string;
-  title?: string;
+  title: string;
   subtitle?: string;
-  kind?: InteractionKind;
-  /** `deck.source.blockedSince` ?? `statSync(deck.json).mtime` (ISO). */
   blockedSince: string;
-  source?: DeckSource;
+  source: DeckSource;
+  claim?: ClaimSummary;
+}
+
+export interface DeckTicketSummary extends TicketSummaryBase {
+  kind: 'deck';
+  interactionKind?: InteractionKind;
+}
+
+export interface ReviewTicketSummary extends TicketSummaryBase {
+  kind: 'review';
+  file: string;
+  output: string;
+}
+
+/** The only pending-ticket shape scanners expose. */
+export type TicketSummary = DeckTicketSummary | ReviewTicketSummary;
+/** Compatibility name retained only while the list adapter is moved in H2. */
+export type InboxItem = TicketSummary;
+
+export interface ReviewDescriptor {
+  schema: 'humanloop.review/v1';
+  file: string;
+  output: string;
+  title: string;
+  source: DeckSource;
+  blockedSince: string;
+}
+
+export interface DeckTicketResult {
+  schema: 'humanloop.response/v2';
+  kind: 'deck';
+  responses: InteractionResponse[];
+  summary: string;
+  completedAt: string;
+}
+
+export interface ReviewTicketResult {
+  schema: 'humanloop.review-response/v1';
+  kind: 'review';
+  result: FeedbackResult;
+  completedAt: string;
+}
+
+export interface CanceledTicketResult {
+  schema: 'humanloop.cancel/v1';
+  kind: 'canceled';
+  canceledAt: string;
+  reason?: string;
+  actor?: string;
+}
+
+/** The sole canonical response.json union. */
+export type TicketResult = DeckTicketResult | ReviewTicketResult | CanceledTicketResult;
+
+export interface InboxBindingState {
+  state: 'installed' | 'collision' | 'unbound';
+  key: string;
+  isDefault: boolean;
+}
+
+export interface CompletionEvent {
+  schema: 'humanloop.completion/v1';
+  root: string;
+  dir: string;
+  ticketId: string;
+  kind: 'deck' | 'review' | 'canceled';
+  outcome: 'resolved' | 'canceled';
+  responsePath: string;
 }
 
 /** Options for `display()` — the live-watch tmux pane surface. The pane always

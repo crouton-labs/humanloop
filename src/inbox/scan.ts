@@ -1,69 +1,57 @@
-import { readdirSync, statSync } from 'fs';
-import { resolve, basename } from 'path';
-import type { InboxItem, Deck } from '../types.js';
-import { deckPath, isResolved, isClaimed, readJson } from './convention.js';
+import { readdirSync, realpathSync, statSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
+import type { Deck, ReviewDescriptor, TicketSummary } from '../types.js';
+import { claimPath, deckPath, isResolved, readJson, reviewPath } from './convention.js';
+import { validateDeck, validateReviewDescriptor } from './deck-schema.js';
+import { listInboxRoots } from './registry.js';
 
-// ── scanInbox ─────────────────────────────────────────────────────────────────
+function claimSummary(dir: string): TicketSummary['claim'] {
+  const claim = readJson<{ host?: unknown; claimedAt?: unknown; heartbeatAt?: unknown }>(claimPath(dir));
+  if (claim === null || typeof claim.host !== 'string' || typeof claim.claimedAt !== 'string' || typeof claim.heartbeatAt !== 'string') return undefined;
+  return { owner: claim.host, claimedAt: claim.claimedAt, heartbeatAt: claim.heartbeatAt };
+}
 
-export function scanInbox(roots: string[]): InboxItem[] {
-  const items: InboxItem[] = [];
+function deckSummary(dir: string, id: string): TicketSummary | null {
+  const raw = readJson<unknown>(deckPath(dir));
+  if (raw === null) return null;
+  let deck: Deck;
+  try { deck = validateDeck(raw); } catch { return null; }
+  const first = deck.interactions[0];
+  if (first === undefined) return null;
+  let blockedSince = deck.source?.blockedSince;
+  if (blockedSince === undefined) {
+    try { blockedSince = statSync(deckPath(dir)).mtime.toISOString(); } catch { return null; }
+  }
+  return { dir, id, kind: 'deck', title: deck.title ?? first.title, subtitle: first.subtitle, interactionKind: first.kind, source: deck.source ?? {}, blockedSince, claim: claimSummary(dir) };
+}
 
-  for (const root of roots) {
+function reviewSummary(dir: string, id: string): TicketSummary | null {
+  const raw = readJson<unknown>(reviewPath(dir));
+  if (raw === null) return null;
+  let review: ReviewDescriptor;
+  try { review = validateReviewDescriptor(raw); } catch { return null; }
+  return { dir, id, kind: 'review', title: review.title, file: review.file, output: review.output, source: review.source, blockedSince: review.blockedSince, claim: claimSummary(dir) };
+}
+
+/** Read all unresolved deck/review tickets, newest first. Progress never affects visibility. */
+export function scanInbox(roots?: string[]): TicketSummary[] {
+  const selectedRoots = roots ?? listInboxRoots().filter((root) => root.available).map((root) => root.root);
+  const seen = new Set<string>();
+  const items: TicketSummary[] = [];
+  for (const root of selectedRoots) {
+    let canonicalRoot: string;
+    try { canonicalRoot = realpathSync(root); } catch { continue; }
     let entries: string[];
-    try {
-      entries = readdirSync(root);
-    } catch {
-      // root doesn't exist or isn't readable — skip silently
-      continue;
-    }
-
+    try { entries = readdirSync(canonicalRoot); } catch { continue; }
     for (const entry of entries) {
-      const dir = resolve(root, entry);
-
-      try {
-        const stat = statSync(dir);
-        if (!stat.isDirectory()) continue;
-      } catch {
-        continue;
-      }
-
-      // Skip resolved or actively claimed dirs
-      if (isResolved(dir) || isClaimed(dir)) continue;
-
-      const dp = deckPath(dir);
-      const deck = readJson<Deck>(dp);
-      if (deck === null) continue;
-
-      // Derive blockedSince: prefer deck.source.blockedSince, fall back to mtime
-      let blockedSince: string;
-      if (deck.source?.blockedSince !== undefined) {
-        blockedSince = deck.source.blockedSince;
-      } else {
-        try {
-          blockedSince = new Date(statSync(dp).mtime).toISOString();
-        } catch {
-          blockedSince = new Date().toISOString();
-        }
-      }
-
-      const firstInteraction = deck.interactions[0];
-
-      const item: InboxItem = {
-        dir,
-        id: firstInteraction?.id ?? basename(dir),
-        title: deck.title ?? firstInteraction?.title,
-        subtitle: firstInteraction?.subtitle,
-        kind: firstInteraction?.kind,
-        source: deck.source,
-        blockedSince,
-      };
-
-      items.push(item);
+      const dir = resolve(canonicalRoot, entry);
+      let canonicalDir: string;
+      try { if (!statSync(dir).isDirectory()) continue; canonicalDir = realpathSync(dir); } catch { continue; }
+      if (resolve(canonicalDir, '..') !== canonicalRoot || seen.has(canonicalDir) || isResolved(canonicalDir)) continue;
+      seen.add(canonicalDir);
+      const item = deckSummary(canonicalDir, basename(canonicalDir)) ?? reviewSummary(canonicalDir, basename(canonicalDir));
+      if (item !== null) items.push(item);
     }
   }
-
-  // Sort ascending by blockedSince (ISO string compare is monotonic)
-  items.sort((a, b) => (a.blockedSince < b.blockedSince ? -1 : a.blockedSince > b.blockedSince ? 1 : 0));
-
-  return items;
+  return items.sort((a, b) => b.blockedSince.localeCompare(a.blockedSince) || a.id.localeCompare(b.id));
 }
