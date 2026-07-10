@@ -7,10 +7,12 @@ import {
   buildFinalFeedbackResult,
   parseFeedbackComments,
   readStoredDraftFeedbackResult,
+  readReviewDraft,
   sanitizeFeedbackComments,
   serializeFeedbackResult,
   writeDraftFeedbackResult,
   writeFinalFeedbackResult,
+  writeReviewDraft,
   writeSubmitFlag,
 } from '../editor/feedback.js';
 
@@ -85,6 +87,11 @@ try {
   writeFinalFeedbackResult(output, file, comments, '2026-07-07T20:02:00.000Z');
   assert.equal(readFileSync(output, 'utf8'), JSON.stringify(final, null, 2) + '\n');
   assert.equal(readStoredDraftFeedbackResult(output, file), null, 'submitted feedback is not reloadable as a draft');
+
+  const progress = join(dir, 'progress.json');
+  const reviewDraft = writeReviewDraft(progress, comments, 4, '2026-07-10T20:00:00.000Z');
+  assert.deepEqual(reviewDraft, { kind: 'review', comments, savedAt: '2026-07-10T20:00:00.000Z', version: 4 });
+  assert.deepEqual(readReviewDraft(progress), reviewDraft, 'review progress is separate from canonical feedback');
 
   const approved = buildFinalFeedbackResult(file, [], '2026-07-07T20:03:00.000Z');
   assert.equal(approved.approved, true, 'zero-comment final feedback is approved');

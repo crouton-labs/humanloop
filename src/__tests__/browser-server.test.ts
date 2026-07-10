@@ -208,11 +208,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
   handle.activate();
   writeFileSync(output, JSON.stringify({
-    file,
-    submitted: false,
-    approved: false,
+    kind: 'review',
     comments: [{ id: 'nvim-draft', line: 1, endLine: 1, lineText: '# Source', comment: 'from nvim', createdAt: '2026-07-07T20:00:00.000Z' }],
     savedAt: '2026-07-07T20:00:01.000Z',
+    version: 1,
   }, null, 2) + '\n');
   const ws = await openWs(handle.url);
 
@@ -293,23 +292,63 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   const submitBody = await submit.json() as { ok: boolean; output: string; submittedAt: string; result: FeedbackResult };
   assert.equal(submitBody.ok, true);
   assert.equal(submitBody.output, output);
-  assert.equal(submitBody.result.submitted, true);
-  assert.equal(submitBody.result.approved, true);
-  assert.equal(submitBody.result.submittedAt, submitBody.submittedAt);
-  assert.equal(submitBody.result.savedAt, submitBody.submittedAt);
+  assert.equal(submitBody.result.submitted, false, 'browser submit proposes; the controller owns canonical finalization');
   assert.equal(existsSync(submitFlag), true, 'review browser submit must write the submit sentinel');
-  assert.equal(readFileSync(output, 'utf8'), JSON.stringify(submitBody.result, null, 2) + '\n');
+  assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')), {
+    kind: 'review', comments: [], savedAt: submitBody.submittedAt, version: 3,
+  });
   const convergedMessage = await convergedSignal;
   assert.equal(convergedMessage.type, 'converged');
   assert.equal(onSubmitFired, 1);
-  assert.deepEqual(submittedResult, submitBody.result);
+  assert.equal(submittedResult?.submitted, true, 'the controller callback receives the final proposal');
 
   ws.close();
   rmSync(dir, { recursive: true, force: true });
   console.log('OK: review endpoints write drafts, reject stale edits, submit with ack ordering, and broadcast signals');
 }
 
-// ── Test 5: review submit is single-assignment and source 404s ───────────────
+// ── Test 5: a persisted draft retains its version even when its contents are unchanged ──
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'hl-review-server-test-'));
+  const file = resolve(join(dir, 'source.md'));
+  const output = join(dir, 'feedback.json');
+  writeFileSync(file, 'body\n');
+  writeFileSync(output, JSON.stringify({
+    kind: 'review',
+    comments: [{ id: 'persisted', line: 1, endLine: 1, lineText: 'body', comment: 'keep version', createdAt: '2026-07-07T20:00:00.000Z' }],
+    savedAt: '2026-07-07T20:00:01.000Z',
+    version: 4,
+  }, null, 2) + '\n');
+
+  const handle = await startReviewWebServer({ jobDir: dir, file, output });
+  handle.activate();
+  const initial = await fetch(`${handle.url}api/review`);
+  const initialBody = await initial.json() as { version: number; result: FeedbackResult };
+  assert.equal(initialBody.version, 4, 'the browser must receive the persisted version even when no content refresh is needed');
+  assert.equal(initialBody.result.comments[0]!.id, 'persisted');
+
+  const stale = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseVersion: 0, comments: [] }),
+  });
+  assert.equal(stale.status, 409, 'a stale base version must not overwrite a persisted draft');
+
+  const update = await fetch(`${handle.url}api/review/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseVersion: 4, comments: [] }),
+  });
+  assert.equal(update.status, 200);
+  assert.equal((await update.json() as { version: number }).version, 5, 'the next durable edit increments from the persisted version');
+
+  await handle.stop();
+  rmSync(dir, { recursive: true, force: true });
+  console.log('OK: unchanged persisted drafts retain their version token');
+}
+
+// ── Test 6: review submit is single-assignment and source 404s ───────────────
 
 {
   const dir = mkdtempSync(join(tmpdir(), 'hl-review-server-test-'));
@@ -342,11 +381,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
     body: JSON.stringify({ comments: [], baseVersion: 0 }),
   });
   assert.equal(second.status, 409);
-  const secondBody = await second.json() as { ok: boolean; error: string; output: string; submittedAt: string; result: FeedbackResult };
+  const secondBody = await second.json() as { ok: boolean; error: string; output: string; result: FeedbackResult };
   assert.equal(secondBody.ok, false);
   assert.equal(secondBody.error, 'already_submitted');
   assert.equal(secondBody.output, firstBody.output);
-  assert.equal(secondBody.submittedAt, firstBody.submittedAt);
   assert.deepEqual(secondBody.result, firstBody.result);
   assert.equal(onSubmitFired, 1, 'review onSubmit must fire once for the first accepted submit');
 

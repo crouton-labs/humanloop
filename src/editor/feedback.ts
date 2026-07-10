@@ -210,6 +210,31 @@ export function writeFinalFeedbackResult(
   return result;
 }
 
+export interface ReviewDraft {
+  kind: 'review';
+  comments: FeedbackComment[];
+  savedAt: string;
+  version: number;
+}
+
+/** Durable, resumable review work. Canonical feedback is produced only by the ticket finalizer. */
+export function readReviewDraft(path: string): ReviewDraft | null {
+  if (!existsSync(path)) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(path, 'utf8')) as unknown; } catch { return null; }
+  if (!isRecord(raw) || raw.kind !== 'review' || !Number.isInteger(raw.version) || (raw.version as number) < 0 || typeof raw.savedAt !== 'string') return null;
+  return { kind: 'review', comments: sanitizeFeedbackComments(raw.comments), savedAt: raw.savedAt, version: raw.version as number };
+}
+
+export function writeReviewDraft(path: string, comments: FeedbackComment[], version: number, savedAt = nowIso()): ReviewDraft {
+  const draft: ReviewDraft = { kind: 'review', comments: sanitizeFeedbackComments(comments), savedAt, version };
+  const tmp = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(tmp, `${JSON.stringify(draft, null, 2)}\n`);
+  renameSync(tmp, path);
+  return draft;
+}
+
 export function writeSubmitFlag(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, '');

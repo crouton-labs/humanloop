@@ -11,9 +11,9 @@ import {
   buildDraftFeedbackResult,
   buildFinalFeedbackResult,
   parseFeedbackComments,
-  readStoredDraftFeedbackResult,
+  readReviewDraft,
   serializeFeedbackResult,
-  writeFeedbackResult,
+  writeReviewDraft,
   writeSubmitFlag,
 } from '../editor/feedback.js';
 
@@ -61,15 +61,15 @@ export interface WebServerOpts {
 }
 
 export interface ReviewWebServerOpts {
-  /** Shared review job dir — carries review.vim and feedback.json. */
+  /** Shared review job dir — carries review.vim and progress.json. */
   jobDir: string;
   /** Absolute source file under review. */
   file: string;
-  /** Absolute feedback JSON output path. */
+  /** Absolute resumable review draft path. */
   output: string;
   /** Optional submit sentinel written on final browser submit. */
   submitFlagPath?: string;
-  /** Fired after the HTTP submit ack has finished flushing. */
+  /** Fired after the HTTP proposal ack has finished flushing. The controller owns finalization. */
   onSubmit?: (result: FeedbackResult, submittedAt: string, outputPath: string) => void;
   /** Test-only override for how long `requestTakeBack()` waits for open tabs
    *  to ack a flush before giving up and broadcasting `taken-back` anyway.
@@ -282,19 +282,21 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
   const { jobDir, file, output, submitFlagPath } = opts;
   const scaffold = createServerScaffold();
   let activated = false;
-  let version = 0;
+  const persistedDraft = readReviewDraft(output);
+  let version = persistedDraft?.version ?? 0;
   let ackWaiter: { expected: number; count: number; resolve: () => void } | null = null;
   const TAKE_BACK_ACK_TIMEOUT_MS = opts.takeBackAckTimeoutMs ?? 2000;
-  let currentResult = readStoredDraftFeedbackResult(output, file)
-    ?? buildDraftFeedbackResult(file, [], new Date().toISOString());
+  let currentResult = buildDraftFeedbackResult(file, persistedDraft?.comments ?? [], persistedDraft?.savedAt ?? new Date().toISOString());
+  let proposed = false;
 
   function refreshInitialDraftFromDisk(): void {
-    if (version !== 0 || currentResult.submitted) return;
-    const onDisk = readStoredDraftFeedbackResult(output, file);
-    if (onDisk === null) return;
-    if (serializeFeedbackResult(onDisk) !== serializeFeedbackResult(currentResult)) {
-      currentResult = onDisk;
-      version += 1;
+    if (proposed) return;
+    const onDisk = readReviewDraft(output);
+    if (onDisk === null || onDisk.version < version) return;
+    const next = buildDraftFeedbackResult(file, onDisk.comments, onDisk.savedAt);
+    if (onDisk.version > version || serializeFeedbackResult(next) !== serializeFeedbackResult(currentResult)) {
+      currentResult = next;
+      version = onDisk.version;
     }
   }
 
@@ -375,7 +377,7 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         return;
       }
       refreshInitialDraftFromDisk();
-      if (currentResult.submitted) {
+      if (proposed) {
         sendJson(res, 409, { error: 'already_submitted', result: currentSnapshot() });
         return;
       }
@@ -395,7 +397,7 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
       const savedAt = new Date().toISOString();
       const nextResult = buildDraftFeedbackResult(file, parsedComments.comments, savedAt);
       try {
-        writeFeedbackResult(output, nextResult);
+        writeReviewDraft(output, parsedComments.comments, version + 1, savedAt);
       } catch (err) {
         sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
         return;
@@ -419,14 +421,8 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         return;
       }
       refreshInitialDraftFromDisk();
-      if (currentResult.submitted) {
-        sendJson(res, 409, {
-          ok: false,
-          error: 'already_submitted',
-          output,
-          submittedAt: currentResult.submittedAt,
-          result: currentSnapshot(),
-        });
+      if (proposed) {
+        sendJson(res, 409, { ok: false, error: 'already_submitted', output, result: currentSnapshot() });
         return;
       }
       if (!Number.isInteger(parsed.baseVersion)) {
@@ -445,11 +441,11 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
       const submittedAt = new Date().toISOString();
       const nextResult = buildFinalFeedbackResult(file, parsedComments.comments, submittedAt);
       try {
-        writeFeedbackResult(output, nextResult);
-        currentResult = nextResult;
-        if (submitFlagPath !== undefined && submitFlagPath.length > 0) {
-          writeSubmitFlag(submitFlagPath);
-        }
+        writeReviewDraft(output, parsedComments.comments, version + 1, submittedAt);
+        currentResult = buildDraftFeedbackResult(file, parsedComments.comments, submittedAt);
+        version += 1;
+        proposed = true;
+        if (submitFlagPath !== undefined && submitFlagPath.length > 0) writeSubmitFlag(submitFlagPath);
       } catch (err) {
         sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
         return;
@@ -459,7 +455,7 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
       // between a lost WS frame and the teardown it precedes.
       await scaffold.broadcast({ type: 'converged' });
       res.once('finish', () => {
-        opts.onSubmit?.(currentSnapshot(), submittedAt, output);
+        opts.onSubmit?.(nextResult, submittedAt, output);
       });
       sendJson(res, 200, { ok: true, output, submittedAt, result: currentSnapshot() });
       return;
