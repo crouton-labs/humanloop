@@ -37,7 +37,7 @@ export type { NotifyDeckOpts } from './inbox/deck-factories.js';
 
 // Interaction-directory convention helpers (§B) — names humanloop owns.
 export {
-  deckPath, responsePath, progressPath, visualsDir,
+  deckPath, reviewPath, responsePath, progressPath, visualsDir,
   interactionState, isResolved, isClaimed,
   atomicWriteJson, readJson, writeResponse, writeProgress, clearProgress,
 } from './inbox/convention.js';
