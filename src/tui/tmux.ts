@@ -1,88 +1,178 @@
-import { execFileSync } from 'child_process';
-import { existsSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import type { ResolutionEnvelope } from '../types.js';
+import { createHash } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { InboxBindingState } from '../types.js';
 
-export interface TmuxDispatchOpts {
-  sessionId?: string;
-  visuals: boolean;
-  /** Interaction dir forwarded to the child so response.json lands there. */
-  dir: string;
+const DEFAULT_KEY = 'M-i';
+const POPUP_TITLE = 'humanloop · inbox';
+const POPUP_STYLE = 'bg=#20242d';
+const POPUP_BORDER_STYLE = 'fg=#5c6370';
+
+export interface TmuxPopupTarget { socket: string; client: string; targetPane?: string; }
+export type ToggleInboxPopupResult = 'opened' | 'closed' | 'other_popup' | 'ambiguous_client' | 'not_in_tmux' | 'failed';
+
+function runtimeDirectory(): string {
+  const base = process.env['XDG_RUNTIME_DIR'] || process.env['TMPDIR'] || tmpdir();
+  return join(base, `humanloop-${process.getuid?.() ?? process.env['UID'] ?? 'user'}`);
 }
 
-
-function shellQuote(s: string): string {
-  if (s.length > 0 && /^[a-zA-Z0-9_\-./:@%+=]+$/.test(s)) return s;
-  return "'" + s.replace(/'/g, `'\\''`) + "'";
+export function popupPaths(target: TmuxPopupTarget): { controlSocket: string; startupLock: string } {
+  const identity = createHash('sha256').update(`${target.socket}\0${target.client}`).digest('hex').slice(0, 16);
+  const base = join(runtimeDirectory(), 'inbox');
+  return { controlSocket: join(base, `${identity}.sock`), startupLock: join(base, `${identity}.lock`) };
 }
 
-function buildChildCmd(file: string, resultPath: string, opts: TmuxDispatchOpts): string {
-  const scriptPath = process.argv[1];
-  if (!scriptPath) {
-    throw new Error('Cannot determine hl script path from process.argv[1]');
-  }
-  const parts = [
-    shellQuote(process.execPath),
-    shellQuote(scriptPath),
-    'ask',
-    shellQuote(file),
-    '--dir',
-    shellQuote(opts.dir),
-    '--write-to',
-    shellQuote(resultPath),
-  ];
-  if (opts.sessionId) {
-    parts.push('--session-id', shellQuote(opts.sessionId));
-  }
-  if (!opts.visuals) {
-    parts.push('--no-visuals');
-  }
-  return parts.join(' ');
+function tmux(socket: string, args: string[]): string {
+  return execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-export async function dispatchToTmuxPane(
-  file: string,
-  opts: TmuxDispatchOpts,
-): Promise<ResolutionEnvelope> {
-  const parentTmp = mkdtempSync(join(tmpdir(), 'hl-'));
-  const resultPath = join(parentTmp, 'result.json');
+function quote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 
-  const cmd = buildChildCmd(file, resultPath, opts);
-  // Capture the spawned pane id so we can detect if the user closes it
-  // without finishing — otherwise the parent would poll forever.
-  const paneId = execFileSync(
-    'tmux',
-    ['split-window', '-P', '-F', '#{pane_id}', '-h', '-d', cmd],
-    { encoding: 'utf8' },
-  ).trim();
+function bindingCommand(): string {
+  return 'hl inbox toggle --tmux-socket "#{socket_path}" --tmux-client "#{client_name}" --target-pane "#{pane_id}"';
+}
 
-  await new Promise<void>((resolve, reject) => {
-    const poll = setInterval(() => {
-      if (existsSync(resultPath)) {
-        clearInterval(poll);
-        resolve();
-        return;
-      }
-      // Check the pane is still alive. If it's gone and there's still no
-      // result file, the child died (closed pane, crash, etc).
-      try {
-        const panes = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_id}'], {
-          encoding: 'utf8',
-        });
-        if (!panes.split('\n').map((s) => s.trim()).includes(paneId)) {
-          clearInterval(poll);
-          reject(new Error(`tmux pane ${paneId} closed before writing a result`));
-        }
-      } catch (err) {
-        clearInterval(poll);
-        reject(new Error(`tmux list-panes failed: ${err instanceof Error ? err.message : String(err)}`));
-      }
-    }, 150);
+function configuredKeyPath(): string {
+  const state = process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state');
+  return join(state, 'humanloop', 'inbox-key');
+}
+
+function configuredKey(): string {
+  try { return readFileSync(configuredKeyPath(), 'utf8').trim() || DEFAULT_KEY; } catch { return DEFAULT_KEY; }
+}
+
+function writeConfiguredKey(key: string): void {
+  mkdirSync(join(configuredKeyPath(), '..'), { recursive: true, mode: 0o700 });
+  writeFileSync(configuredKeyPath(), `${key}\n`, { mode: 0o600 });
+}
+
+function rootBinding(socket: string, key: string): string | undefined {
+  try {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = tmux(socket, ['list-keys', '-T', 'root']).split('\n').map((row) => new RegExp(`^bind-key\\s+-T root\\s+${escaped}\\s+(.*)$`).exec(row)).find((entry) => entry !== null);
+    return match?.[1];
+  } catch { return undefined; }
+}
+
+function isCanonical(command: string | undefined): boolean {
+  const normalized = command?.replace(/\\"/g, '"');
+  return normalized !== undefined && normalized.includes('hl inbox toggle') && normalized.includes('--tmux-socket "#{socket_path}"') && normalized.includes('--tmux-client "#{client_name}"') && normalized.includes('--target-pane "#{pane_id}"');
+}
+
+export function inspectInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
+  const key = configuredKey();
+  if (socket === undefined) return { state: 'unbound', key, isDefault: key === DEFAULT_KEY };
+  const command = rootBinding(socket, key);
+  return { state: command === undefined ? 'unbound' : isCanonical(command) ? 'installed' : 'collision', key, isDefault: key === DEFAULT_KEY };
+}
+
+export function installInboxBinding(opts: { socket?: string; key?: string } = {}): InboxBindingState {
+  const socket = opts.socket ?? tmuxSocketFromEnvironment();
+  const key = opts.key ?? configuredKey();
+  if (socket === undefined) return { state: 'unbound', key, isDefault: key === DEFAULT_KEY };
+  const existing = rootBinding(socket, key);
+  if (existing !== undefined && !isCanonical(existing)) return { state: 'collision', key, isDefault: key === DEFAULT_KEY };
+  if (existing === undefined) tmux(socket, ['bind-key', '-T', 'root', key, 'run-shell', '-b', bindingCommand()]);
+  if (opts.key !== undefined) {
+    // Switching to a new key: drop the previous configured key iff it still holds the
+    // canonical toggle, so bindings don't accrete and inspect/unbind track a single live key.
+    const previous = configuredKey();
+    if (previous !== key && isCanonical(rootBinding(socket, previous))) tmux(socket, ['unbind-key', '-T', 'root', previous]);
+    writeConfiguredKey(key);
+  }
+  return { state: 'installed', key, isDefault: key === DEFAULT_KEY };
+}
+
+export function unbindInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
+  const key = configuredKey();
+  if (socket !== undefined && isCanonical(rootBinding(socket, key))) tmux(socket, ['unbind-key', '-T', 'root', key]);
+  return inspectInboxBinding(socket);
+}
+
+export function tmuxSocketFromEnvironment(): string | undefined {
+  const value = process.env['TMUX'];
+  return value?.split(',')[0] || undefined;
+}
+
+export function inferTmuxClient(socket: string, pane = process.env['TMUX_PANE']): string | undefined | 'ambiguous' {
+  if (pane === undefined) return undefined;
+  const matches = tmux(socket, ['list-clients', '-F', '#{client_name}\t#{pane_id}']).split('\n')
+    .map((line) => line.split('\t')).filter((parts) => parts[1] === pane).map((parts) => parts[0]!);
+  return matches.length === 1 ? matches[0] : matches.length > 1 ? 'ambiguous' : undefined;
+}
+
+function acquireStartupLock(path: string): boolean {
+  try { mkdirSync(path, { mode: 0o700 }); return true; } catch { return false; }
+}
+
+export async function toggleInboxPopup(target?: Partial<TmuxPopupTarget>): Promise<ToggleInboxPopupResult> {
+  const socket = target?.socket ?? tmuxSocketFromEnvironment();
+  if (socket === undefined) return 'not_in_tmux';
+  const inferred = target?.client ?? inferTmuxClient(socket, target?.targetPane);
+  if (inferred === 'ambiguous') return 'ambiguous_client';
+  if (inferred === undefined) return 'ambiguous_client';
+  const resolved: TmuxPopupTarget = { socket, client: inferred, targetPane: target?.targetPane };
+  const paths = popupPaths(resolved);
+  mkdirSync(join(paths.controlSocket, '..'), { recursive: true, mode: 0o700 });
+  if (await requestPopupClose(paths.controlSocket)) return 'closed';
+  if (!acquireStartupLock(paths.startupLock)) return 'failed';
+  try {
+    // Re-probe under the lock: between the first probe and acquiring the lock a concurrent
+    // toggle may have brought a live popup up. Deleting its control socket now would orphan
+    // that popup, so close it instead. The finally below releases the lock on every path.
+    if (await requestPopupClose(paths.controlSocket)) return 'closed';
+    if (existsSync(paths.controlSocket)) rmSync(paths.controlSocket, { force: true });
+    const command = `${quote(process.execPath)} ${quote(fileURLToPath(new URL('../cli.js', import.meta.url)))} inbox open --control-socket ${quote(paths.controlSocket)}`;
+    return await launchPopup(socket, resolved, paths.controlSocket, command);
+  } finally { rmSync(paths.startupLock, { recursive: true, force: true }); }
+}
+
+/** Connect to the control socket and, if a live popup owns it, ask it to close. Resolves true when a popup answered. */
+async function requestPopupClose(controlSocket: string): Promise<boolean> {
+  const { Socket } = await import('node:net');
+  return new Promise<boolean>((resolve) => {
+    const client = new Socket();
+    const done = (value: boolean) => { client.destroy(); resolve(value); };
+    client.setTimeout(300, () => done(false));
+    client.once('error', () => done(false));
+    client.connect(controlSocket, () => { client.end('close\n'); done(true); });
   });
-
-  const json = readFileSync(resultPath, 'utf8');
-  try { unlinkSync(resultPath); } catch { /* ignore */ }
-  try { rmdirSync(parentTmp); } catch { /* ignore */ }
-  return JSON.parse(json) as ResolutionEnvelope;
 }
+
+/** Launch one popup and report `opened` only once its controller owns the control socket. */
+async function launchPopup(socket: string, target: TmuxPopupTarget, controlSocket: string, command: string): Promise<ToggleInboxPopupResult> {
+  const args = ['-S', socket, 'display-popup', '-E', '-c', target.client, ...inboxPopupFlags(), ...(target.targetPane === undefined ? [] : ['-t', target.targetPane]), command];
+  const child = spawn('tmux', args, { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+  const exited = new Promise<ToggleInboxPopupResult>((resolve) => {
+    child.once('exit', (code) => resolve(code === 0 ? 'closed' : /popup/i.test(stderr) ? 'other_popup' : 'failed'));
+    child.once('error', () => resolve('failed'));
+  });
+  const { Socket } = await import('node:net');
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const outcome = await Promise.race([
+      exited,
+      new Promise<'opened' | 'pending'>((resolve) => {
+        const probe = new Socket();
+        const done = (value: 'opened' | 'pending') => { probe.destroy(); setTimeout(() => resolve(value), value === 'pending' ? 100 : 0); };
+        probe.setTimeout(200, () => done('pending'));
+        probe.once('error', () => done('pending'));
+        probe.connect(controlSocket, () => done('opened'));
+      }),
+    ]);
+    if (outcome === 'opened') { child.unref(); return 'opened'; }
+    if (outcome !== 'pending') return outcome === 'closed' ? 'failed' : outcome;
+  }
+  return 'failed';
+}
+
+/** The static tmux `display-popup` geometry and style flags; the client and target pane are added per-invocation. */
+export function inboxPopupFlags(): string[] {
+  return ['-w', '90%', '-h', '90%', '-b', 'rounded', '-T', POPUP_TITLE, '-s', POPUP_STYLE, '-S', POPUP_BORDER_STYLE];
+}
+
+export const inboxPopupStyle = { width: '90%', height: '90%', border: 'rounded', title: POPUP_TITLE, background: '#20242d', chrome: '#2b3245', borderColor: '#5c6370' } as const;

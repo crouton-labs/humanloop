@@ -5,7 +5,9 @@ export { launchReview as review } from './editor/review.js';
 export type { ReviewOptions } from './editor/review.js';
 
 // Interaction-layer surface (SDK).
-export { ask, notify, inbox } from './api.js';
+export { ask, notify, openInbox } from './api.js';
+export { openInboxPopup } from './surfaces/inbox-popup.js';
+export { toggleInboxPopup, installInboxBinding, inspectInboxBinding, unbindInboxBinding, inboxPopupStyle } from './tui/tmux.js';
 export { display } from './surfaces/display.js';
 export { scanInbox } from './inbox/scan.js';
 export { registerInboxRoot, unregisterInboxRoot, listInboxRoots, managedInboxRoot } from './inbox/registry.js';
