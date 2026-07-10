@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Deck, InteractionResponse } from '../types.js';
 import { buildSummary } from '../summary.js';
 
@@ -40,6 +41,68 @@ export function atomicWriteJson(path: string, value: unknown): void {
 
 export function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T; } catch { return null; }
+}
+
+interface LockOwner { token: string; }
+interface DirectoryLock { path: string; token: string; }
+function pause(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+function lockOwnerPath(path: string): string { return `${path}/owner.json`; }
+function lockHeartbeatPath(path: string): string { return `${path}/heartbeat`; }
+function ownsLock(lock: DirectoryLock): boolean { return readJson<LockOwner>(lockOwnerPath(lock.path))?.token === lock.token; }
+function releaseDirectoryLock(lock: DirectoryLock): void { if (ownsLock(lock)) rmSync(lock.path, { recursive: true, force: true }); }
+function lockAge(path: string): number {
+  try { return Date.now() - statSync(existsSync(lockHeartbeatPath(path)) ? lockHeartbeatPath(path) : path).mtimeMs; } catch { return 0; }
+}
+function tryAcquireDirectoryLock(path: string, staleMs: number): DirectoryLock | null {
+  const token = randomUUID();
+  try {
+    mkdirSync(path, { mode: 0o700 });
+    // A lock owner never changes. Heartbeats are a separate non-destructive lease file.
+    writeFileSync(lockOwnerPath(path), `${JSON.stringify({ token })}\n`, { flag: 'wx', mode: 0o600 });
+    writeFileSync(lockHeartbeatPath(path), '', { flag: 'wx', mode: 0o600 });
+    return { path, token };
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    // A just-created directory without owner.json is initializing, not stale.
+    if (lockAge(path) > staleMs) rmSync(path, { recursive: true, force: true });
+    return null;
+  }
+}
+function acquireDirectoryLock(path: string, staleMs: number, timeoutMs: number): DirectoryLock {
+  const startedAt = Date.now();
+  while (true) {
+    const lock = tryAcquireDirectoryLock(path, staleMs);
+    if (lock !== null) return lock;
+    if (Date.now() - startedAt >= timeoutMs) throw new Error('exclusive operation lock acquisition timed out');
+    pause(5);
+  }
+}
+async function acquireDirectoryLockAsync(path: string, staleMs: number, timeoutMs: number): Promise<DirectoryLock> {
+  const startedAt = Date.now();
+  while (true) {
+    const lock = tryAcquireDirectoryLock(path, staleMs);
+    if (lock !== null) return lock;
+    if (Date.now() - startedAt >= timeoutMs) throw new Error('exclusive operation lock acquisition timed out');
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
+
+/** Runs a short filesystem transition under a token-checked, crash-reclaimable directory lock. */
+export function withExclusiveDirectoryLock<T>(path: string, operation: () => T, options: { staleMs?: number; timeoutMs?: number } = {}): T {
+  const lock = acquireDirectoryLock(path, options.staleMs ?? 30_000, options.timeoutMs ?? 5_000);
+  try { return operation(); } finally { releaseDirectoryLock(lock); }
+}
+
+/** Async counterpart heartbeats while its operation runs, so a valid long handler is never stolen. */
+export async function withExclusiveDirectoryLockAsync<T>(path: string, operation: () => Promise<T>, options: { staleMs?: number; timeoutMs?: number } = {}): Promise<T> {
+  const staleMs = options.staleMs ?? 35_000;
+  const lock = await acquireDirectoryLockAsync(path, staleMs, options.timeoutMs ?? staleMs + 5_000);
+  const heartbeat = setInterval(() => {
+    if (ownsLock(lock)) {
+      try { utimesSync(lockHeartbeatPath(lock.path), new Date(), new Date()); } catch { /* a reclaimed lock is no longer ours */ }
+    }
+  }, 1_000);
+  try { return await operation(); } finally { clearInterval(heartbeat); releaseDirectoryLock(lock); }
 }
 
 // Kept for the existing panel until H2 routes all finalization through tickets.ts.

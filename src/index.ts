@@ -8,6 +8,16 @@ export type { ReviewOptions } from './editor/review.js';
 export { ask, notify, inbox } from './api.js';
 export { display } from './surfaces/display.js';
 export { scanInbox } from './inbox/scan.js';
+export { registerInboxRoot, unregisterInboxRoot, listInboxRoots, managedInboxRoot } from './inbox/registry.js';
+export type { CompletionHandler, InboxRootRegistration, InboxRootStatus, RegisterInboxRootOptions } from './inbox/registry.js';
+export {
+  submitDeck, submitReview, readTicketResult,
+  finalizeDeck, finalizeReview, completeDeck, completeReview, cancelTicket, cancelTicketResult,
+} from './inbox/tickets.js';
+export type { SubmitDeckOptions, SubmitReviewOptions } from './inbox/tickets.js';
+export { dispatchCompletion, reconcileCompletions } from './inbox/completion.js';
+export { claimTicket, heartbeatClaim, releaseClaim, readTicketClaim } from './inbox/claim.js';
+export type { TicketClaim, ClaimOptions } from './inbox/claim.js';
 
 // Renderer binding — the sole org-wide termrender caller. Consumers
 // (sisyphus md-render / ask-schema) route markdown through these.
@@ -39,6 +49,9 @@ export type {
   MountedPanel, MountedPanelOpts, GenerateVisual, VisualBlock,
   FeedbackComment, FeedbackResult,
   ResolutionEnvelope, InboxItem, DisplayOpts,
+  ClaimSummary, TicketSummary, DeckTicketSummary, ReviewTicketSummary,
+  ReviewDescriptor, DeckTicketResult, ReviewTicketResult, CanceledTicketResult, TicketResult,
+  InboxBindingState, CompletionEvent,
 } from './types.js';
 export type { Key } from './tui/terminal.js';
 export type { ConversationMessage } from './conversation/reader.js';

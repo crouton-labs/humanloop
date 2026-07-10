@@ -1,11 +1,11 @@
-import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { basename, resolve } from 'node:path';
 import type { CompletionEvent, TicketResult } from '../types.js';
-import { atomicWriteJson, deliveryErrorPath, deliveryPath, responsePath, readJson, reviewPath } from './convention.js';
+import { atomicWriteJson, deliveryErrorPath, deliveryPath, responsePath, readJson, reviewPath, withExclusiveDirectoryLockAsync } from './convention.js';
 import { registeredInboxRoot } from './registry.js';
 import { readTicketResult, ticketRoot } from './tickets.js';
-import { validateReviewDescriptor } from './deck-schema.js';
+import { validateReviewProjection } from './deck-schema.js';
 
 interface DeliveryReceipt { schema: 'humanloop.delivery/v1'; responsePath: string; deliveredAt: string; }
 function receiptMatches(dir: string): boolean {
@@ -14,19 +14,6 @@ function receiptMatches(dir: string): boolean {
 }
 function eventFor(root: string, dir: string, result: TicketResult): CompletionEvent {
   return { schema: 'humanloop.completion/v1', root, dir, ticketId: basename(dir), kind: result.kind, outcome: result.kind === 'canceled' ? 'canceled' : 'resolved', responsePath: responsePath(dir) };
-}
-function delay(ms: number): Promise<void> { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
-async function withDeliveryLock<T>(dir: string, operation: () => Promise<T>): Promise<T> {
-  const lock = `${dir}/.delivery-lock`; let acquired = false;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    try { mkdirSync(lock, { mode: 0o700 }); acquired = true; break; } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try { if (Date.now() - statSync(lock).mtimeMs > 35_000) rmSync(lock, { recursive: true, force: true }); } catch { /* holder released */ }
-      await delay(10);
-    }
-  }
-  if (!acquired) throw new Error('delivery lock acquisition timed out');
-  try { return await operation(); } finally { rmSync(lock, { recursive: true, force: true }); }
 }
 
 async function runHandler(command: string, args: string[], event: CompletionEvent): Promise<void> {
@@ -47,7 +34,7 @@ async function runHandler(command: string, args: string[], event: CompletionEven
 
 function projectReview(dir: string, result: TicketResult): void {
   if (result.kind !== 'review') return;
-  const descriptor = validateReviewDescriptor(readJson<unknown>(reviewPath(dir)));
+  const descriptor = validateReviewProjection(dir, readJson<unknown>(reviewPath(dir)));
   atomicWriteJson(descriptor.output, result.result);
 }
 
@@ -56,7 +43,7 @@ export async function dispatchCompletion(root: string, dir: string): Promise<'de
   const registration = registeredInboxRoot(root);
   const canonicalRoot = ticketRoot(dir);
   if (registration === null || canonicalRoot !== registration.root) throw new Error('ticket is not a canonical direct child of a registered root');
-  return withDeliveryLock(resolve(dir), async () => {
+  return withExclusiveDirectoryLockAsync(`${resolve(dir)}/.delivery-lock`, async () => {
     const result = readTicketResult(dir);
     if (result === null) return 'none';
     try { projectReview(dir, result); } catch (error) {

@@ -1,10 +1,10 @@
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import type { Deck, DeckTicketResult, FeedbackResult, ReviewDescriptor, ReviewTicketResult, TicketResult } from '../types.js';
 import { buildSummary } from '../summary.js';
-import { atomicWriteJson, clearProgress, deckPath, responsePath, reviewPath } from './convention.js';
-import { validateDeck, validateReviewDescriptor, resolveDeckBodyPaths } from './deck-schema.js';
+import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, progressPath, responsePath, reviewPath } from './convention.js';
+import { validateDeck, validateReviewDescriptor, validateReviewProjection, resolveDeckBodyPaths } from './deck-schema.js';
 import { registeredInboxRoot } from './registry.js';
 import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js';
 import { dispatchCompletion } from './completion.js';
@@ -46,15 +46,20 @@ function rootAndDir(root: string, id: string): { root: string; dir: string } {
   if (dirname(dir) !== registration.root) throw new Error('ticket directory must be a direct child of its registered root');
   return { root: registration.root, dir };
 }
-function createTicketDir(root: string, id: string): string {
+function ticketDir(root: string, id: string): { dir: string; created: boolean } {
   const candidate = rootAndDir(root, id);
-  try { mkdirSync(candidate.dir, { mode: 0o700 }); } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`ticket already exists: ${id}`);
-    throw error;
+  let created = false;
+  if (!existsSync(candidate.dir)) {
+    mkdirSync(candidate.dir, { mode: 0o700 });
+    created = true;
   }
   const dir = realpathSync(candidate.dir);
   if (dirname(dir) !== candidate.root) throw new Error('ticket directory must canonically be a direct child of its registered root');
-  return dir;
+  return { dir, created };
+}
+function discardCreatedTicket(dir: string, created: boolean): void { if (created) rmSync(dir, { recursive: true, force: true }); }
+function hasTicketProtocolState(dir: string): boolean {
+  return [deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir)].some(existsSync);
 }
 function requireRegisteredTicket(dir: string): { root: string; dir: string } {
   const canonical = realpathSync(dir);
@@ -77,21 +82,36 @@ function publishRequest(path: string, value: unknown): void {
 
 export interface SubmitDeckOptions { root: string; id: string; deck: Deck; }
 export function submitDeck(opts: SubmitDeckOptions): { id: string; dir: string; kind: 'deck' } {
-  const dir = createTicketDir(opts.root, opts.id);
-  const deck = validateDeck(resolveDeckBodyPaths(opts.deck, dir));
-  const stamped: Deck = { ...deck, source: { ...(deck.source ?? {}), blockedSince: deck.source?.blockedSince ?? new Date().toISOString() } };
-  publishRequest(deckPath(dir), stamped);
-  return { id: opts.id, dir, kind: 'deck' };
+  // Validate shape before mutating caller-owned interaction directories.
+  validateDeck(opts.deck);
+  const { dir, created } = ticketDir(opts.root, opts.id);
+  try {
+    if (hasTicketProtocolState(dir)) throw new Error(`ticket protocol state already exists: ${dir}`);
+    const deck = validateDeck(resolveDeckBodyPaths(opts.deck, dir));
+    const stamped: Deck = { ...deck, source: { ...(deck.source ?? {}), blockedSince: deck.source?.blockedSince ?? new Date().toISOString() } };
+    publishRequest(deckPath(dir), stamped);
+    return { id: opts.id, dir, kind: 'deck' };
+  } catch (error) {
+    discardCreatedTicket(dir, created);
+    throw error;
+  }
 }
 
 export interface SubmitReviewOptions { root: string; id: string; review: Omit<ReviewDescriptor, 'schema' | 'file' | 'output' | 'blockedSince'> & { file: string; output?: string; blockedSince?: string }; }
 export function submitReview(opts: SubmitReviewOptions): { id: string; dir: string; kind: 'review' } {
-  const dir = createTicketDir(opts.root, opts.id);
   if (!isAbsolute(opts.review.file) || !existsSync(opts.review.file)) throw new Error('review file must be an existing absolute markdown file');
   if (!/\.md(?:own)?$/i.test(opts.review.file)) throw new Error('review file must be markdown');
-  const descriptor = validateReviewDescriptor({ schema: 'humanloop.review/v1', file: resolve(opts.review.file), output: resolve(opts.review.output ?? `${dir}/feedback.json`), title: opts.review.title, source: opts.review.source, blockedSince: opts.review.blockedSince ?? new Date().toISOString() });
-  publishRequest(reviewPath(dir), descriptor);
-  return { id: opts.id, dir, kind: 'review' };
+  const source = realpathSync(opts.review.file);
+  const { dir, created } = ticketDir(opts.root, opts.id);
+  try {
+    if (hasTicketProtocolState(dir)) throw new Error(`ticket protocol state already exists: ${dir}`);
+    const descriptor = validateReviewProjection(dir, { schema: 'humanloop.review/v1', file: source, output: resolve(opts.review.output ?? `${dir}/feedback.json`), title: opts.review.title, source: opts.review.source, blockedSince: opts.review.blockedSince ?? new Date().toISOString() });
+    publishRequest(reviewPath(dir), descriptor);
+    return { id: opts.id, dir, kind: 'review' };
+  } catch (error) {
+    discardCreatedTicket(dir, created);
+    throw error;
+  }
 }
 
 function exclusiveResult(dir: string, result: TicketResult): boolean {
@@ -146,10 +166,9 @@ export function finalizeReview(dir: string, feedback: FeedbackResult, claimToken
     requireClaimOwnership(ticket.dir, claimToken);
     const descriptor = requireReview(ticket.dir);
     const parsed = feedbackSchema.parse(feedback) as FeedbackResult;
-    if (resolve(parsed.file) !== descriptor.file) throw new Error('review result file does not match descriptor');
+    if (realpathSync(parsed.file) !== descriptor.file) throw new Error('review result file does not match descriptor');
     const result: ReviewTicketResult = { schema: 'humanloop.review-response/v1', kind: 'review', result: parsed, completedAt };
     const won = exclusiveResult(ticket.dir, result);
-    if (won) atomicWriteJson(descriptor.output, parsed);
     clearOwnedWork(ticket.dir, claimToken);
     return { won, result: won ? result : readTicketResult(ticket.dir) ?? result, descriptor };
   });
@@ -176,7 +195,7 @@ export async function completeDeck(dir: string, responses: DeckTicketResult['res
   return completed;
 }
 
-/** Finalize a review, project its bare FeedbackResult, then notify its root owner. */
+/** Finalize a review, then let completion own its projection and notification boundary. */
 export async function completeReview(dir: string, feedback: FeedbackResult, claimToken: string): Promise<{ won: boolean; result: TicketResult; descriptor: ReviewDescriptor }> {
   const completed = finalizeReview(dir, feedback, claimToken);
   const root = ticketRoot(dir);

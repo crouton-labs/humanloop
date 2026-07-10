@@ -1,30 +1,12 @@
-import { existsSync, mkdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { ClaimSummary } from '../types.js';
-import { claimPath, readJson } from './convention.js';
+import { claimPath, deckPath, readJson, responsePath, reviewPath, withExclusiveDirectoryLock } from './convention.js';
 
 export interface TicketClaim { token: string; host: string; pid: number; claimedAt: string; heartbeatAt: string; tmuxClient?: string; }
 export interface ClaimOptions { host?: string; pid?: number; tmuxClient?: string; now?: Date; }
 const REMOTE_STALE_MS = 30_000;
-const LOCK_STALE_MS = 30_000;
-
-function pause(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-/** Serializes every mutation that can change a ticket's claim or final marker. */
-export function withTicketLock<T>(dir: string, operation: () => T): T {
-  const lock = `${dir}/.ticket-lock`;
-  let acquired = false;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    try { mkdirSync(lock, { mode: 0o700 }); acquired = true; break; } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true }); } catch { /* contender released it */ }
-      pause(5);
-      continue;
-    }
-  }
-  if (!acquired) throw new Error('ticket lock acquisition timed out');
-  try { return operation(); } finally { rmSync(lock, { recursive: true, force: true }); }
-}
 
 function parseClaim(raw: unknown): TicketClaim | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -40,20 +22,23 @@ export function isStaleClaim(claim: TicketClaim, now = Date.now(), localHost = h
   return !Number.isFinite(heartbeat) || now - heartbeat > REMOTE_STALE_MS;
 }
 
+/** Acquire a visible claim only for a still-pending ticket. Malformed crash artifacts are stale claims. */
 export function claimTicket(dir: string, opts: ClaimOptions = {}): TicketClaim | null {
-  return withTicketLock(dir, () => {
-    const host = opts.host ?? hostname(); const pid = opts.pid ?? process.pid; const now = (opts.now ?? new Date()).toISOString();
+  return withExclusiveDirectoryLock(`${dir}/.ticket-lock`, () => {
+    if (existsSync(responsePath(dir)) || (!existsSync(deckPath(dir)) && !existsSync(reviewPath(dir)))) return null;
+    const path = claimPath(dir);
     const existing = readTicketClaim(dir);
-    if (existing !== null && !isStaleClaim(existing, Date.now(), host)) return null;
-    if (existing !== null) unlinkSync(claimPath(dir));
+    if (existing !== null && !isStaleClaim(existing, Date.now(), opts.host ?? hostname())) return null;
+    if (existsSync(path)) unlinkSync(path);
+    const host = opts.host ?? hostname(); const pid = opts.pid ?? process.pid; const now = (opts.now ?? new Date()).toISOString();
     const claim: TicketClaim = { token: randomUUID(), host, pid, claimedAt: now, heartbeatAt: now, ...(opts.tmuxClient ? { tmuxClient: opts.tmuxClient } : {}) };
-    writeFileSync(claimPath(dir), `${JSON.stringify(claim)}\n`, { flag: 'wx', mode: 0o600 });
+    writeFileSync(path, `${JSON.stringify(claim)}\n`, { flag: 'wx', mode: 0o600 });
     return claim;
   });
 }
 
 export function heartbeatClaim(dir: string, token: string, now = new Date()): boolean {
-  return withTicketLock(dir, () => {
+  return withExclusiveDirectoryLock(`${dir}/.ticket-lock`, () => {
     const claim = readTicketClaim(dir);
     if (claim === null || claim.token !== token) return false;
     const temp = `${claimPath(dir)}.${token}.heartbeat`;
@@ -69,5 +54,6 @@ export function releaseClaimLocked(dir: string, token: string): boolean {
   unlinkSync(claimPath(dir));
   return true;
 }
-export function releaseClaim(dir: string, token: string): boolean { return withTicketLock(dir, () => releaseClaimLocked(dir, token)); }
+export function releaseClaim(dir: string, token: string): boolean { return withExclusiveDirectoryLock(`${dir}/.ticket-lock`, () => releaseClaimLocked(dir, token)); }
 export function claimExists(dir: string): boolean { return existsSync(claimPath(dir)); }
+export function withTicketLock<T>(dir: string, operation: () => T): T { return withExclusiveDirectoryLock(`${dir}/.ticket-lock`, operation); }

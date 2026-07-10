@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
+import { claimPath, deckPath, deliveryErrorPath, deliveryPath, progressPath, responsePath, reviewPath } from './convention.js';
 import { z } from 'zod';
 import { INTERACTION_KINDS } from '../types.js';
 import type { Deck, ReviewDescriptor } from '../types.js';
@@ -63,3 +64,15 @@ export function parseDeck(path: string): Deck {
 
 export function validateDeck(parsed: unknown): Deck { return deckSchema.parse(parsed) as Deck; }
 export function validateReviewDescriptor(parsed: unknown): ReviewDescriptor { return reviewDescriptorSchema.parse(parsed) as ReviewDescriptor; }
+
+/** Canonicalize and authorize the one review projection boundary before every write. */
+export function validateReviewProjection(dir: string, parsed: unknown): ReviewDescriptor {
+  const descriptor = validateReviewDescriptor(parsed);
+  if (!/\.md(?:own)?$/i.test(descriptor.file) || !existsSync(descriptor.file)) throw new Error('review file must be an existing absolute markdown file');
+  const file = realpathSync(descriptor.file);
+  const output = resolve(realpathSync(dirname(descriptor.output)), basename(descriptor.output));
+  const reserved = new Set(['deck.json', 'review.json', 'response.json', 'progress.json', 'claim.json', 'delivery.json', 'delivery-error.json']);
+  const ownProtocolPaths = new Set([deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir)]);
+  if (output === file || reserved.has(basename(output)) || ownProtocolPaths.has(output)) throw new Error('review output must not alias the source or ticket protocol files');
+  return { ...descriptor, file, output };
+}

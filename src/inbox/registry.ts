@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { CompletionEvent } from '../types.js';
-import { atomicWriteJson, readJson } from './convention.js';
+import { atomicWriteJson, readJson, withExclusiveDirectoryLock } from './convention.js';
 
 export interface CompletionHandler { command: string; args: string[]; }
 export interface InboxRootRegistration { schema: 'humanloop.inbox-root/v1'; root: string; owner: string; handler?: CompletionHandler; }
@@ -13,19 +13,7 @@ export interface RegisterInboxRootOptions { root: string; owner: string; handler
 function stateHome(): string { return process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'); }
 export function inboxRootsDirectory(): string { return join(stateHome(), 'humanloop', 'inbox-roots'); }
 function recordPath(root: string): string { return join(inboxRootsDirectory(), createHash('sha256').update(root).digest('hex')); }
-function pause(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-function withRecordLock<T>(path: string, operation: () => T): T {
-  const lock = `${path}.lock`; let acquired = false;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    try { mkdirSync(lock, { mode: 0o700 }); acquired = true; break; } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try { if (Date.now() - statSync(lock).mtimeMs > 30_000) rmSync(lock, { recursive: true, force: true }); } catch { /* released */ }
-      pause(5);
-    }
-  }
-  if (!acquired) throw new Error('inbox root registry lock acquisition timed out');
-  try { return operation(); } finally { rmSync(lock, { recursive: true, force: true }); }
-}
+function canonicalRoot(root: string): string { try { return realpathSync(root); } catch { return resolve(root); } }
 
 function validateHandler(handler: CompletionHandler | undefined): CompletionHandler | undefined {
   if (handler === undefined) return undefined;
@@ -47,7 +35,7 @@ export function registerInboxRoot(opts: RegisterInboxRootOptions): InboxRootRegi
   const root = realpathSync(opts.root);
   const path = recordPath(root);
   mkdirSync(inboxRootsDirectory(), { recursive: true, mode: 0o700 });
-  return withRecordLock(path, () => {
+  return withExclusiveDirectoryLock(`${path}.lock`, () => {
     const existing = validateRegistration(readJson<unknown>(path));
     if (existing !== null && existing.root === root && existing.owner !== opts.owner) throw new Error(`inbox root is already owned by ${existing.owner}`);
     if (existing !== null && existing.root !== root) throw new Error('inbox root registry hash collision');
@@ -58,10 +46,11 @@ export function registerInboxRoot(opts: RegisterInboxRootOptions): InboxRootRegi
   });
 }
 
+/** Removes a matching available root through its real path, or an unavailable record by its stored canonical path. */
 export function unregisterInboxRoot(root: string, owner: string): boolean {
-  const canonical = resolve(root);
+  const canonical = canonicalRoot(root);
   const path = recordPath(canonical);
-  return withRecordLock(path, () => {
+  return withExclusiveDirectoryLock(`${path}.lock`, () => {
     const existing = validateRegistration(readJson<unknown>(path));
     if (existing === null || existing.root !== canonical || existing.owner !== owner) return false;
     unlinkSync(path);
