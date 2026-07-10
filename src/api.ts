@@ -2,14 +2,12 @@ import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
-  Deck, InteractionResponse, ResolutionEnvelope, GenerateVisual,
+  Deck, ResolutionEnvelope,
 } from './types.js';
 import { resolveInteractionDir } from './tui/app.js';
-import { scanInbox } from './inbox/scan.js';
-import { pickFromInbox } from './inbox/tui.js';
-import { deckPath, atomicWriteJson, readJson, stampCanvasNode } from './inbox/convention.js';
+import { InboxController } from './inbox/controller.js';
+import { deckPath, atomicWriteJson, stampCanvasNode } from './inbox/convention.js';
 import { resolveDeckBodyPaths } from './inbox/deck-schema.js';
-import { getTerminalSize } from './tui/terminal.js';
 import { notifyDeck } from './inbox/deck-factories.js';
 import { buildSummary } from './summary.js';
 
@@ -69,33 +67,16 @@ export async function notify(title: string, body?: string): Promise<void> {
 export interface InboxOpts {
   cols?: number;
   rows?: number;
-  generateVisual?: GenerateVisual;
+  roots?: string[];
 }
 
-/**
- * List → resolve loop across `roots`. Shows pending interactions, lets the
- * human pick one, resolves it (writing its `response.json`), then rescans —
- * resolved items drop out — until the human quits or nothing is pending.
- */
-export async function inbox(roots: string[], opts: InboxOpts = {}): Promise<void> {
-  for (;;) {
-    const items = scanInbox(roots);
-    if (items.length === 0) return;
+/** Open the centralized inbox controller in the current human terminal. */
+export async function openInbox(opts: InboxOpts = {}): Promise<void> {
+  const controller = new InboxController({ roots: opts.roots, cols: opts.cols, rows: opts.rows });
+  await controller.run();
+}
 
-    const term = getTerminalSize();
-    const cols = opts.cols ?? term.cols;
-    const rows = opts.rows ?? term.rows;
-
-    const picked = await pickFromInbox(items, { cols, rows });
-    if (picked === null) return;
-
-    const deck = readJson<Deck>(deckPath(picked.dir));
-    if (deck === null) continue; // raced/removed — rescan
-
-    await resolveInteractionDir(picked.dir, deck, {
-      generateVisual: opts.generateVisual,
-      cols,
-      rows,
-    });
-  }
+// Compatibility export for the current package entrypoint; it invokes the centralized controller.
+export async function inbox(roots: string[], opts: Omit<InboxOpts, 'roots'> = {}): Promise<void> {
+  await openInbox({ ...opts, roots });
 }

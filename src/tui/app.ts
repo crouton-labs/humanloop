@@ -222,6 +222,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
 
     loadDeck(deck, loadOpts) {
       if (!internals.mounted) return;
+      const prior = collectResponses(internals.state);
       internals.state = buildInitialState(deck);
       if (loadOpts !== undefined && loadOpts.progressPath !== undefined) {
         internals.progressPath = loadOpts.progressPath;
@@ -230,6 +231,17 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       rebindPersist(internals);
       if (internals.progressPath !== undefined) {
         tryResume(internals.state, internals.progressPath, deck.interactions);
+      }
+      // A live request replacement is allowed to add/remove questions but not
+      // discard answers the human has already made to surviving ids.
+      const validIds = new Set(deck.interactions.map((interaction) => interaction.id));
+      for (const response of prior) {
+        if (validIds.has(response.id)) internals.state.responses.set(response.id, response);
+      }
+      const currentId = internals.state.interactions[internals.state.currentIndex]?.id;
+      if (currentId === undefined || !validIds.has(currentId)) {
+        const firstUnanswered = internals.state.interactions.findIndex((interaction) => !internals.state.responses.has(interaction.id));
+        internals.state.currentIndex = firstUnanswered >= 0 ? firstUnanswered : 0;
       }
       fireVisuals(internals, deck.interactions);
     },
