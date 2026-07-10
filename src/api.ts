@@ -75,8 +75,3 @@ export async function openInbox(opts: InboxOpts = {}): Promise<void> {
   const controller = new InboxController({ roots: opts.roots, cols: opts.cols, rows: opts.rows });
   await controller.run();
 }
-
-// Compatibility export for the current package entrypoint; it invokes the centralized controller.
-export async function inbox(roots: string[], opts: Omit<InboxOpts, 'roots'> = {}): Promise<void> {
-  await openInbox({ ...opts, roots });
-}

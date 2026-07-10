@@ -3,9 +3,8 @@ import type { Deck, InteractionResponse } from './types.js';
 /**
  * Deterministic, no-LLM resolution summary — one line per answered
  * interaction: `"<title>: <option label>[ — <freetext>]"`. Shared by `ask()`
- * (envelope summary), `writeResponse` (persisted into response.json at write
- * time), and `hl job result` (fallback rebuild for legacy response.json files
- * written before the summary field existed).
+ * (envelope summary) and `writeResponse` (persisted into response.json at write
+ * time).
  */
 export function buildSummary(deck: Deck, responses: InteractionResponse[]): string {
   const byId = new Map(responses.map((r) => [r.id, r] as const));

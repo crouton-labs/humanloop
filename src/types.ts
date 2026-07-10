@@ -159,8 +159,7 @@ export interface TuiState {
 
 /**
  * Resolution contract returned by `ask`/`inbox`. On-disk `response.json` stays
- * `{ responses, completedAt }`; `responsePath` points at it. `hl schema
- * response` returns the JSON Schema this `schema` id names.
+ * `{ responses, completedAt }`; `responsePath` points at it.
  */
 export interface ResolutionEnvelope {
   /** 1 line/interaction "<title>: <option label>[ — <freetext>]"; deterministic, no LLM. */
