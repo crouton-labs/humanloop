@@ -57,10 +57,13 @@ assert.equal(scanned.find((item) => item.id === 'review')?.kind, 'review');
 const firstClaim = claimTicket(newDeck.dir);
 assert.notEqual(firstClaim, null);
 assert.equal(claimTicket(newDeck.dir), null, 'a second controller cannot claim a live ticket');
+// A separate process writes a genuine remote claim whose heartbeat is already
+// stale, then exits; this process recovers it — cross-process stale recovery.
 const staleDir = submitDeck({ root, id: 'stale', deck: deck('2025-01-03T00:00:00.000Z') }).dir;
-const stale = claimTicket(staleDir, { host: 'other-host', pid: 1, now: new Date(Date.now() - 31_000) });
-assert.notEqual(stale, null);
-assert.notEqual(claimTicket(staleDir), null, 'expired remote claim recovers');
+const staleClaimReady = join(temp, 'stale-claim-ready');
+await new Promise<void>((resolveWorker, rejectWorker) => spawn(process.execPath, ['--import', 'tsx', 'src/__tests__/inbox-stale-claim-worker.ts', staleDir, staleClaimReady], { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'inherit'] }).once('exit', (code) => code === 0 ? resolveWorker() : rejectWorker(new Error('stale-claim worker failed'))));
+assert.notEqual(JSON.parse(readFileSync(staleClaimReady, 'utf8')), null, 'a separate process wrote a stale remote claim on disk');
+assert.notEqual(claimTicket(staleDir), null, 'a remote claim written by another process recovers once its heartbeat has expired');
 const malformedDir = submitDeck({ root, id: 'malformed-claim', deck: deck('2025-01-03T00:00:00.000Z') }).dir;
 writeFileSync(join(malformedDir, 'claim.json'), '{');
 assert.notEqual(claimTicket(malformedDir), null, 'partial claim crash artifact recovers');
@@ -79,15 +82,28 @@ for (const [index, result] of exactResults.entries()) {
   writeFileSync(responsePath(dir), JSON.stringify(result));
   assert.equal(readTicketResult(dir)?.kind, result.kind, `strict decoder accepts exact ${result.kind} result`);
 }
-writeFileSync(responsePath(oldDeck.dir), JSON.stringify({ schema: 'humanloop.response/v2', kind: 'deck', responses: [], summary: '', completedAt: 'now', extra: true }));
-assert.equal(readTicketResult(oldDeck.dir), null, 'result decoder rejects malformed and extra fields');
-for (const [index, result] of [
-  { schema: 'humanloop.review-response/v1', kind: 'review', result: exactResults[1].result, completedAt: '2025-01-04T00:00:00.000Z', extra: true },
-  { schema: 'humanloop.cancel/v1', kind: 'canceled', canceledAt: '2025-01-04T00:00:00.000Z', extra: true },
-].entries()) {
+const validFeedback = exactResults[1].result;
+const iso = '2025-01-04T00:00:00.000Z';
+const rejectFixtures: { why: string; result: unknown }[] = [
+  { why: 'a wrong kind for a known schema', result: { schema: 'humanloop.response/v2', kind: 'review', responses: [], summary: '', completedAt: iso } },
+  { why: 'an unknown schema id', result: { schema: 'humanloop.response/v9', kind: 'deck', responses: [], summary: '', completedAt: iso } },
+  { why: 'a deck missing its required completedAt', result: { schema: 'humanloop.response/v2', kind: 'deck', responses: [], summary: '' } },
+  { why: 'a deck with a non-ISO completedAt', result: { schema: 'humanloop.response/v2', kind: 'deck', responses: [], summary: '', completedAt: 'now' } },
+  { why: 'a deck with an unrecognized nested response field', result: { schema: 'humanloop.response/v2', kind: 'deck', responses: [{ id: 'go', bogus: true }], summary: '', completedAt: iso } },
+  { why: 'a deck with an extra top-level field', result: { schema: 'humanloop.response/v2', kind: 'deck', responses: [], summary: '', completedAt: iso, extra: true } },
+  { why: 'a review missing its required result', result: { schema: 'humanloop.review-response/v1', kind: 'review', completedAt: iso } },
+  { why: 'a review whose nested result is not submitted', result: { schema: 'humanloop.review-response/v1', kind: 'review', result: { ...validFeedback, submitted: false }, completedAt: iso } },
+  { why: 'a review whose approved flag contradicts its comments', result: { schema: 'humanloop.review-response/v1', kind: 'review', result: { ...validFeedback, approved: true, comments: [{ id: 'c1', line: 1, endLine: 1, lineText: '# Source', comment: 'x', createdAt: iso }] }, completedAt: iso } },
+  { why: 'a review nested comment whose endLine precedes its line', result: { schema: 'humanloop.review-response/v1', kind: 'review', result: { ...validFeedback, approved: false, comments: [{ id: 'c1', line: 5, endLine: 2, lineText: '# Source', comment: 'x', createdAt: iso }] }, completedAt: iso } },
+  { why: 'a review with an extra top-level field', result: { schema: 'humanloop.review-response/v1', kind: 'review', result: validFeedback, completedAt: iso, extra: true } },
+  { why: 'a canceled result missing its required canceledAt', result: { schema: 'humanloop.cancel/v1', kind: 'canceled', reason: 'stop' } },
+  { why: 'a canceled result with a non-ISO canceledAt', result: { schema: 'humanloop.cancel/v1', kind: 'canceled', canceledAt: 'now' } },
+  { why: 'a canceled result with an extra top-level field', result: { schema: 'humanloop.cancel/v1', kind: 'canceled', canceledAt: iso, extra: true } },
+];
+for (const [index, fixture] of rejectFixtures.entries()) {
   const dir = submitDeck({ root, id: `strict-reject-${index}`, deck: deck('2025-01-03T00:00:00.000Z') }).dir;
-  writeFileSync(responsePath(dir), JSON.stringify(result));
-  assert.equal(readTicketResult(dir), null, `strict decoder rejects extra ${result.kind} fields`);
+  writeFileSync(responsePath(dir), JSON.stringify(fixture.result));
+  assert.equal(readTicketResult(dir), null, `strict decoder rejects ${fixture.why}`);
 }
 const protocolDir = join(root, 'stale-protocol');
 mkdirSync(protocolDir);

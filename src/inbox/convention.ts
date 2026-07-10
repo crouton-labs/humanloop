@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Deck, InteractionResponse } from '../types.js';
@@ -43,28 +43,48 @@ export function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T; } catch { return null; }
 }
 
-interface LockOwner { token: string; }
 interface DirectoryLock { path: string; token: string; }
 function pause(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-function lockOwnerPath(path: string): string { return `${path}/owner.json`; }
-function lockHeartbeatPath(path: string): string { return `${path}/heartbeat`; }
-function ownsLock(lock: DirectoryLock): boolean { return readJson<LockOwner>(lockOwnerPath(lock.path))?.token === lock.token; }
+// The holder's identity lives in the NAME of its single marker file. The marker's
+// mtime is the heartbeat and its presence is ownership, so the observed token, the
+// staleness clock, and the reclaim gate are one atomic fact.
+const MARKER_PREFIX = 'owner.';
+function markerPath(path: string, token: string): string { return `${path}/${MARKER_PREFIX}${token}`; }
+function observedMarkerToken(path: string): string | null {
+  try { return readdirSync(path).find((entry) => entry.startsWith(MARKER_PREFIX))?.slice(MARKER_PREFIX.length) ?? null; } catch { return null; }
+}
+function ownsLock(lock: DirectoryLock): boolean { return existsSync(markerPath(lock.path, lock.token)); }
 function releaseDirectoryLock(lock: DirectoryLock): void { if (ownsLock(lock)) rmSync(lock.path, { recursive: true, force: true }); }
-function lockAge(path: string): number {
-  try { return Date.now() - statSync(existsSync(lockHeartbeatPath(path)) ? lockHeartbeatPath(path) : path).mtimeMs; } catch { return 0; }
+function lockAge(path: string, token: string | null): number {
+  const target = token !== null ? markerPath(path, token) : path;
+  try { return Date.now() - statSync(existsSync(target) ? target : path).mtimeMs; } catch { return 0; }
+}
+// Reclamation is bound to the exact instance it observed: it unlinks ONLY that
+// token's marker, then removes the now-empty directory with an empty-guarded
+// rmdir. A successor lock holds a different random token (a different marker
+// name), so a lagging reclaimer that saw the old stale lock can never strip a
+// live successor — its unlink targets a name that no longer exists.
+function reclaimIfStale(path: string, staleMs: number): void {
+  const token = observedMarkerToken(path);
+  if (lockAge(path, token) <= staleMs) return;
+  if (token !== null) {
+    try { unlinkSync(markerPath(path, token)); }
+    catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  }
+  try { rmdirSync(path); } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'EEXIST') throw error;
+  }
 }
 function tryAcquireDirectoryLock(path: string, staleMs: number): DirectoryLock | null {
   const token = randomUUID();
   try {
     mkdirSync(path, { mode: 0o700 });
-    // A lock owner never changes. Heartbeats are a separate non-destructive lease file.
-    writeFileSync(lockOwnerPath(path), `${JSON.stringify({ token })}\n`, { flag: 'wx', mode: 0o600 });
-    writeFileSync(lockHeartbeatPath(path), '', { flag: 'wx', mode: 0o600 });
+    writeFileSync(markerPath(path, token), '', { flag: 'wx', mode: 0o600 });
     return { path, token };
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    // A just-created directory without owner.json is initializing, not stale.
-    if (lockAge(path) > staleMs) rmSync(path, { recursive: true, force: true });
+    reclaimIfStale(path, staleMs);
     return null;
   }
 }
@@ -99,7 +119,7 @@ export async function withExclusiveDirectoryLockAsync<T>(path: string, operation
   const lock = await acquireDirectoryLockAsync(path, staleMs, options.timeoutMs ?? staleMs + 5_000);
   const heartbeat = setInterval(() => {
     if (ownsLock(lock)) {
-      try { utimesSync(lockHeartbeatPath(lock.path), new Date(), new Date()); } catch { /* a reclaimed lock is no longer ours */ }
+      try { utimesSync(markerPath(lock.path, lock.token), new Date(), new Date()); } catch { /* a reclaimed lock is no longer ours */ }
     }
   }, 1_000);
   try { return await operation(); } finally { clearInterval(heartbeat); releaseDirectoryLock(lock); }
