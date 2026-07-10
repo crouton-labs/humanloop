@@ -1,1 +1,1 @@
-export const TERMRENDER_VERSION = '4.10.5';
+export const TERMRENDER_VERSION = '4.10.6';
