@@ -18,15 +18,21 @@ function eventFor(root: string, dir: string, result: TicketResult): CompletionEv
 
 async function runHandler(command: string, args: string[], event: CompletionEvent): Promise<void> {
   await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+    // stdout stays ignored (a handler acknowledges by exit code, never stdout),
+    // but stderr is captured so a nonzero exit surfaces the handler's own
+    // diagnostics in the delivery-error record instead of a bare exit code.
+    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += chunk; if (stderr.length > 8192) stderr = stderr.slice(-8192); });
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30_000);
     child.once('error', (error) => { clearTimeout(timeout); rejectPromise(error); });
     child.once('exit', (code, signal) => {
       clearTimeout(timeout);
-      if (timedOut) rejectPromise(new Error('completion handler timed out after 30 seconds'));
+      const detail = stderr.trim() === '' ? '' : `: ${stderr.trim()}`;
+      if (timedOut) rejectPromise(new Error(`completion handler timed out after 30 seconds${detail}`));
       else if (code === 0) resolvePromise();
-      else rejectPromise(new Error(`completion handler failed (${signal ?? code ?? 'unknown'})`));
+      else rejectPromise(new Error(`completion handler failed (${signal ?? code ?? 'unknown'})${detail}`));
     });
     child.stdin.end(`${JSON.stringify(event)}\n`);
   });
