@@ -1,8 +1,9 @@
-import { watch, type FSWatcher } from 'node:fs';
-import type { Deck, InteractionResponse, TicketSummary } from '../types.js';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
+import type { Deck, DeckSource, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
+import { renderMarkdown } from '../render/termrender.js';
 import { BOLD, CYAN, DIM, RESET, YELLOW } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
@@ -10,8 +11,10 @@ import { scanInbox } from './scan.js';
 import { inboxRootsDirectory, listInboxRoots } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { completeDeck, readTicketResult } from './tickets.js';
-import { clearProgress, deckPath, progressPath, readJson } from './convention.js';
+import { reconcileCompletions } from './completion.js';
+import { clearProgress, deckPath, progressPath, readJson, reviewPath } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
+import { ReviewAdapter } from './review-adapter.js';
 
 export interface InboxControllerOptions {
   roots?: string[];
@@ -33,7 +36,12 @@ export class InboxController {
   private selectedIndex = 0;
   private screen: Screen = 'list';
   private adapter: DeckAdapter | undefined;
+  private reviewAdapter: ReviewAdapter | undefined;
   private claim: { dir: string; token: string } | undefined;
+  private reconciling = false;
+  private suspended = false;
+  private submittingDir: string | undefined;
+  private stdinListener: ((data: Buffer) => void) | undefined;
   private cols: number;
   private rows: number;
   private frame: string[] = [];
@@ -71,7 +79,10 @@ export class InboxController {
     if (this.adapter !== undefined && priorDir !== undefined) {
       const canceled = readTicketResult(priorDir)?.kind === 'canceled';
       if (canceled) clearProgress(priorDir);
-      this.status = canceled ? 'canceled by requester' : 'ticket resolved elsewhere';
+      // Suppress the "resolved elsewhere" banner when WE are the ones resolving
+      // this ticket: the response.json we just published trips the root watch
+      // mid-submit, and that is our own completion, not an external event.
+      if (priorDir !== this.submittingDir) this.status = canceled ? 'canceled by requester' : 'ticket resolved elsewhere';
       this.leaveDetail();
     }
     if (this.items.length === 0) {
@@ -110,7 +121,11 @@ export class InboxController {
   }
 
   handleKey(input: string, key: Key): void {
-    if (key.ctrl && input === 'c') { this.close(); return; }
+    // Option/Alt+I (M-i) and Ctrl-C request graceful close from ANY controller
+    // mode. A root-table binding cannot fire while the popup grabs client input,
+    // so the close-from-open path must live here — checked before adapter
+    // forwarding so it works in active deck freetext as well as the list.
+    if ((key.ctrl && input === 'c') || isToggleCloseChord(input)) { this.close(); return; }
     if (this.screen === 'detail' && this.adapter !== undefined) {
       this.adapter.handleKey(input, key);
       this.repaint();
@@ -125,7 +140,9 @@ export class InboxController {
 
   activate(): void {
     const item = this.items[this.selectedIndex];
-    if (item === undefined || item.kind !== 'deck') return;
+    if (item === undefined) return;
+    if (item.kind === 'review') { void this.activateReview(item); return; }
+    if (item.kind !== 'deck') return;
     const claim = claimTicket(item.dir);
     if (claim === null) { this.status = 'ticket is being edited by another inbox'; return; }
     this.claim = { dir: item.dir, token: claim.token };
@@ -148,11 +165,35 @@ export class InboxController {
     this.watchSelected(item.dir);
   }
 
+  /** Claim the review, hand the whole popup TTY to the native editor, then
+   *  converge to the on-disk outcome when it exits. Draft/final ownership stays
+   *  in ReviewAdapter; the controller only owns the terminal handoff. */
+  private async activateReview(item: ReviewTicketSummary): Promise<void> {
+    const claim = claimTicket(item.dir);
+    if (claim === null) { this.status = 'ticket is being edited by another inbox'; this.repaint(); return; }
+    const descriptor = readJson<ReviewDescriptor>(reviewPath(item.dir));
+    if (descriptor === null) { releaseClaim(item.dir, claim.token); this.invalidate(); return; }
+    this.reviewAdapter = new ReviewAdapter({ dir: item.dir, descriptor, claim });
+    this.suspendForChild();
+    try {
+      await this.reviewAdapter.start();
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.reviewAdapter = undefined;
+      this.resumeAfterChild();
+      this.rescan();
+      this.reconcileRoots();
+      this.repaint(true);
+    }
+  }
+
   reloadSelectedDeck(): void { this.adapter?.reload(); this.repaint(); }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    void this.reviewAdapter?.stop();
     this.leaveDetail();
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
@@ -165,6 +206,9 @@ export class InboxController {
     setupTerminal();
     this.running = true;
     this.watchRoots();
+    // Close the crash window between an earlier result publication and its
+    // handler launch: dispatch every resolved-but-undelivered ticket now.
+    this.reconcileRoots();
     this.repaint(true);
     const heartbeat = setInterval(() => {
       if (this.claim !== undefined) heartbeatClaim(this.claim.dir, this.claim.token);
@@ -175,12 +219,14 @@ export class InboxController {
         this.handleKey(input, key);
         if (this.closed) finish();
       };
+      this.stdinListener = onData;
       const onResize = () => this.resize();
       let done = false;
       this.finishRun = () => {
         if (done) return;
         done = true;
         process.stdin.removeListener('data', onData);
+        this.stdinListener = undefined;
         process.stdout.removeListener('resize', onResize);
         clearInterval(heartbeat);
         this.running = false;
@@ -197,11 +243,46 @@ export class InboxController {
   private async complete(responses: InteractionResponse[]): Promise<void> {
     const claim = this.claim;
     if (claim === undefined) return;
+    this.submittingDir = claim.dir;
     try { await this.finishDeck(claim.dir, responses, claim.token); }
-    catch (error) { this.status = error instanceof Error ? error.message : String(error); return; }
+    catch (error) { this.submittingDir = undefined; this.status = error instanceof Error ? error.message : String(error); return; }
+    this.submittingDir = undefined;
     this.leaveDetail(false);
     this.rescan();
+    this.reconcileRoots();
     this.repaint();
+  }
+
+  /** Give the raw TTY to a child process (native review editor). */
+  private suspendForChild(): void {
+    this.suspended = true;
+    if (this.stdinListener !== undefined) process.stdin.removeListener('data', this.stdinListener);
+    restoreTerminal();
+  }
+
+  /** Retake the TTY after the child exits and force a full repaint. */
+  private resumeAfterChild(): void {
+    this.suspended = false;
+    if (this.closed) return;
+    setupTerminal();
+    if (this.stdinListener !== undefined) process.stdin.on('data', this.stdinListener);
+    this.frame = [];
+  }
+
+  private resolvedRoots(): string[] {
+    return this.options.roots ?? listInboxRoots().filter((root) => root.available).map((root) => root.root);
+  }
+
+  /** Owner-boundary reconciliation for resolved results still lacking an ack.
+   *  Guarded so overlapping fs events cannot stack concurrent scans. */
+  private reconcileRoots(): void {
+    if (this.reconciling) return;
+    this.reconciling = true;
+    const roots = this.resolvedRoots();
+    void (async () => {
+      try { for (const root of roots) { try { await reconcileCompletions(root); } catch { /* undelivered stays for the next pass */ } } }
+      finally { this.reconciling = false; }
+    })();
   }
 
   private leaveDetail(release = true): void {
@@ -229,7 +310,22 @@ export class InboxController {
     if (this.adapter !== undefined) return this.adapter.render();
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
-    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind} · ${selected.source.sessionName ?? selected.source.askedBy ?? 'unknown source'}${RESET}`];
+    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind} · ${sourceLabel(selected.source)}${RESET}`];
+    if (selected.kind === 'review') {
+      lines.push('', `  ${DIM}${selected.file}${RESET}`);
+      const draft = readJson<{ comments?: unknown[] }>(progressPath(selected.dir))?.comments;
+      const draftCount = Array.isArray(draft) ? draft.length : 0;
+      lines.push(`  ${DIM}${draftCount} draft comment${draftCount === 1 ? '' : 's'}${RESET}`, '');
+      let md = '';
+      try { md = readFileSync(selected.file, 'utf8'); } catch { md = ''; }
+      if (md === '') lines.push(`  ${DIM}(source file unavailable)${RESET}`);
+      else for (const rendered of renderMarkdown(md, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+      lines.push('', `  ${DIM}Enter${RESET} start review  ${DIM}j/k${RESET} select  ${DIM}q${RESET} close`);
+      while (lines.length < rows) lines.push('');
+      // Rendered markdown carries ANSI; slicing by column count would sever
+      // escape sequences, so review preview lines are returned unsliced.
+      return lines;
+    }
     if (selected.kind === 'deck') {
       const deck = readJson<Deck>(deckPath(selected.dir));
       if (deck !== null) {
@@ -256,7 +352,9 @@ export class InboxController {
   }
 
   private repaint(clear = false): void {
-    if (this.closed || !this.running) return;
+    // While a child owns the TTY (native review), fs-watch invalidations must
+    // not scribble the inbox frame over the editor's screen.
+    if (this.closed || !this.running || this.suspended) return;
     if (clear) process.stdout.write('\x1b[2J\x1b[H');
     const diff = diffFrame(this.frame, this.render(), this.rows, this.cols);
     process.stdout.write('\x1b[?2026h');
@@ -266,9 +364,8 @@ export class InboxController {
   }
 
   private watchRoots(): void {
-    const roots = this.options.roots ?? listInboxRoots().filter((root) => root.available).map((root) => root.root);
-    for (const root of roots) {
-      try { this.watchers.push(watch(root, () => this.invalidate())); } catch { /* unavailable roots remain discoverable through later rescans */ }
+    for (const root of this.resolvedRoots()) {
+      try { this.watchers.push(watch(root, () => { this.invalidate(); this.reconcileRoots(); })); } catch { /* unavailable roots remain discoverable through later rescans */ }
     }
     if (this.options.roots === undefined) {
       try { this.watchers.push(watch(inboxRootsDirectory(), () => this.invalidate())); } catch { /* registry appears after the next explicit open */ }
@@ -289,3 +386,10 @@ export class InboxController {
 }
 
 function visibleWidth(line: string): number { return line.replace(/\x1b\[[0-9;]*m/g, '').length; }
+
+/** M-i (Option/Alt+I) reaches the controller as the two-byte ESC-i sequence. */
+function isToggleCloseChord(input: string): boolean { return input === '\x1bi' || input === '\x1bI'; }
+
+/** Prefer a human-meaningful source label, falling back to the raw node id
+ *  before an opaque "unknown source" — a crouter ticket always carries nodeId. */
+function sourceLabel(source: DeckSource): string { return source.sessionName ?? source.askedBy ?? source.nodeId ?? 'unknown source'; }

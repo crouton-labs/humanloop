@@ -30,7 +30,7 @@ export function buildInboxLines(items: TicketSummary[], width: number, selectedI
     const item = items[index]!;
     const kind = item.kind === 'deck' ? item.interactionKind ?? 'decision' : 'review';
     const icon = KIND_ICON[kind] ?? '·';
-    const source = item.source.sessionName ?? item.source.askedBy ?? '';
+    const source = item.source.sessionName ?? item.source.askedBy ?? item.source.nodeId ?? '';
     const age = formatTimeAgo(item.blockedSince);
     const cursor = index === selectedIndex ? `${CYAN}▸${RESET} ` : '  ';
     const titleWidth = Math.max(10, contentWidth - source.length - age.length - 8);
