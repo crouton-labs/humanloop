@@ -1,5 +1,6 @@
 node_modules/
 dist/
 .venv/
+.hl-termrender.lock
 *.log
 .DS_Store
