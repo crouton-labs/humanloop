@@ -57,9 +57,12 @@ inbox.command('open').description('Open the inbox controller in this human TTY.'
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail('hl inbox open requires an interactive TTY; use hl inbox list for read-only output');
   await openInboxPopup(options.controlSocket, roots(options.root));
 });
-inbox.command('toggle').description('Toggle the inbox popup for one tmux client.').option('--tmux-socket <path>').option('--tmux-client <name>').option('--target-pane <pane>').action(async (options: { tmuxSocket?: string; tmuxClient?: string; targetPane?: string }) => {
+inbox.command('toggle').description('Toggle the inbox popup for one tmux client.').option('--tmux-socket <path>').option('--tmux-client <name>').option('--target-pane <pane>').option('--quiet', 'suppress result JSON on success (the tmux binding uses this so run-shell -b output never overlays the pane)').action(async (options: { tmuxSocket?: string; tmuxClient?: string; targetPane?: string; quiet?: boolean }) => {
   const result = await toggleInboxPopup({ socket: options.tmuxSocket, client: options.tmuxClient, targetPane: options.targetPane });
-  emit({ result, next: result === 'not_in_tmux' ? 'Run hl inbox open in a human terminal.' : undefined });
+  // Under the `run-shell -b` binding, any stdout becomes a tmux view-mode overlay on the active
+  // pane. The opened/closed popup is its own feedback, so stay silent on every non-failure result;
+  // a genuine `failed` still prints so a broken binding is not invisible.
+  if (!options.quiet || result === 'failed') emit({ result, next: result === 'not_in_tmux' ? 'Run hl inbox open in a human terminal.' : undefined });
   process.exit(result === 'failed' || result === 'ambiguous_client' ? 1 : 0);
 });
 inbox.command('list').description('Print pending tickets newest first as JSON.').option('--root <path>', 'filter to a root', (value, prior: string[]) => [...prior, value], [] as string[]).action((options: { root: string[] }) => emit(scanInbox(roots(options.root))));

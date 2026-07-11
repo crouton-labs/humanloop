@@ -32,7 +32,10 @@ function tmux(socket: string, args: string[]): string {
 function quote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 
 function bindingCommand(): string {
-  return 'hl inbox toggle --tmux-socket "#{socket_path}" --tmux-client "#{client_name}" --target-pane "#{pane_id}"';
+  // --quiet keeps the background `run-shell -b` binding from printing its result JSON, which
+  // tmux would otherwise surface as a view-mode overlay on the active pane. The popup opening
+  // is the feedback; a genuine failure still prints (see the CLI toggle action).
+  return 'hl inbox toggle --quiet --tmux-socket "#{socket_path}" --tmux-client "#{client_name}" --target-pane "#{pane_id}"';
 }
 
 function configuredKeyPath(): string {
@@ -118,7 +121,10 @@ export async function toggleInboxPopup(target?: Partial<TmuxPopupTarget>): Promi
   const paths = popupPaths(resolved);
   mkdirSync(join(paths.controlSocket, '..'), { recursive: true, mode: 0o700 });
   if (await requestPopupClose(paths.controlSocket)) return 'closed';
-  if (!acquireStartupLock(paths.startupLock)) return 'failed';
+  // A concurrent toggle for this same client won the startup lock and is opening the popup.
+  // This gesture must not launch a second one; report a benign no-op close rather than a
+  // generic failure, so exactly one popup exists and the loser never exits with an error.
+  if (!acquireStartupLock(paths.startupLock)) return 'closed';
   try {
     // Re-probe under the lock: between the first probe and acquiring the lock a concurrent
     // toggle may have brought a live popup up. Deleting its control socket now would orphan
@@ -149,7 +155,12 @@ async function launchPopup(socket: string, target: TmuxPopupTarget, controlSocke
   let stderr = '';
   child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
   const exited = new Promise<ToggleInboxPopupResult>((resolve) => {
-    child.once('exit', (code) => resolve(code === 0 ? 'closed' : /popup/i.test(stderr) ? 'other_popup' : 'failed'));
+    // `display-popup -E` blocks until our popup closes, so a successful open keeps the child
+    // alive while the control socket comes up (detected below). An early exit before that means
+    // the popup command never ran: tmux 3.x silently declines to stack a popup on a client that
+    // already shows one (exit 0, command dropped), which is exactly the foreign-popup case the
+    // design must report as `other_popup` without disturbing the existing popup or its process.
+    child.once('exit', (code) => resolve(code === 0 || /popup/i.test(stderr) ? 'other_popup' : 'failed'));
     child.once('error', () => resolve('failed'));
   });
   const { Socket } = await import('node:net');
@@ -165,7 +176,7 @@ async function launchPopup(socket: string, target: TmuxPopupTarget, controlSocke
       }),
     ]);
     if (outcome === 'opened') { child.unref(); return 'opened'; }
-    if (outcome !== 'pending') return outcome === 'closed' ? 'failed' : outcome;
+    if (outcome !== 'pending') return outcome;
   }
   return 'failed';
 }
