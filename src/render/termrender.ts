@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import stringWidth from 'string-width';
@@ -28,9 +28,49 @@ const PKG_ROOT = findPkgRoot();
 const VENV_DIR = resolve(PKG_ROOT, '.venv');
 const VENV_BIN = resolve(PKG_ROOT, '.venv/bin/termrender');
 const VENV_PYTHON = resolve(PKG_ROOT, '.venv/bin/python');
+// Stamp written after a verified install: records the pin we provisioned and
+// the binary's mtime at that moment. Steady-state validation is a stat + a
+// tiny JSON read against this — no subprocess — so attach no longer pays the
+// ~149ms `termrender -h` + `importlib.metadata` spawn tax on every launch.
+const VENV_STAMP = resolve(PKG_ROOT, '.venv/.hl-termrender-stamp.json');
 
 type RendererState = 'unchecked' | 'ready' | 'unavailable';
 let rendererState: RendererState = 'unchecked';
+
+type Stamp = { version: string; mtimeMs: number };
+
+function readStamp(): Stamp | null {
+  try {
+    const parsed = JSON.parse(readFileSync(VENV_STAMP, 'utf8')) as Stamp;
+    if (typeof parsed.version === 'string' && typeof parsed.mtimeMs === 'number') return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStamp(): void {
+  try {
+    writeFileSync(VENV_STAMP, JSON.stringify({ version: TERMRENDER_VERSION, mtimeMs: statSync(VENV_BIN).mtimeMs }));
+  } catch {
+    // Best-effort: an unwritable stamp just means the next process re-verifies
+    // the slow way once and re-stamps. Correctness is unaffected.
+  }
+}
+
+// Cheap steady-state trust: the pinned binary is present and unchanged since
+// the verified install that wrote the stamp. A version bump or an out-of-band
+// rewrite of the binary changes the pin or the mtime and forces re-provision.
+function stampValid(): boolean {
+  if (!existsSync(VENV_BIN)) return false;
+  const stamp = readStamp();
+  if (!stamp || stamp.version !== TERMRENDER_VERSION) return false;
+  try {
+    return statSync(VENV_BIN).mtimeMs === stamp.mtimeMs;
+  } catch {
+    return false;
+  }
+}
 
 function binaryOk(): boolean {
   if (!existsSync(VENV_BIN)) return false;
@@ -82,6 +122,11 @@ function uvAvailable(): boolean {
  * degradation path: `uv` absent → one stderr remediation line + plaintext
  * fallback. win32 → plaintext (no renderer).
  *
+ * Steady state is subprocess-free: a valid stamp is trusted outright. The
+ * spawn-based verification (`binaryOk` + `installedVersion`) runs only when the
+ * stamp is absent or stale — once, after which the venv is re-stamped — and the
+ * full `uv` reinstall runs only when the binary is actually missing or drifted.
+ *
  * Invoked at postinstall AND lazily on the first render/check/display call,
  * so `npm ci --ignore-scripts` consumers still self-heal on first use.
  */
@@ -93,7 +138,17 @@ export function ensureRenderer(): void {
     return;
   }
 
+  // Steady state: trust the stamp — zero subprocess spawns.
+  if (stampValid()) {
+    rendererState = 'ready';
+    return;
+  }
+
+  // No/stale stamp but the correct binary is already present (a venv from a
+  // pre-stamp humanloop, or an interrupted stamp write): verify once the slow
+  // way, stamp it, and skip the reinstall.
   if (binaryOk() && installedVersion() === TERMRENDER_VERSION) {
+    writeStamp();
     rendererState = 'ready';
     return;
   }
@@ -130,8 +185,11 @@ export function ensureRenderer(): void {
     return;
   }
 
-  rendererState = (binaryOk() && installedVersion() === TERMRENDER_VERSION) ? 'ready' : 'unavailable';
-  if (rendererState === 'unavailable') {
+  if (binaryOk() && installedVersion() === TERMRENDER_VERSION) {
+    writeStamp();
+    rendererState = 'ready';
+  } else {
+    rendererState = 'unavailable';
     process.stderr.write('[hl] termrender install completed but health check failed; using plaintext fallback\n');
   }
 }
@@ -140,7 +198,7 @@ export function ensureRenderer(): void {
 export function isRendererReady(): boolean {
   if (rendererState === 'ready') return true;
   if (rendererState === 'unavailable') return false;
-  return process.platform !== 'win32' && binaryOk();
+  return process.platform !== 'win32' && (stampValid() || binaryOk());
 }
 
 // ── Plaintext fallback helpers (kept here so this is the only termrender site) ─
