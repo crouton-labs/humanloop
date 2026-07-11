@@ -4,7 +4,7 @@ import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
 import { renderMarkdown } from '../render/termrender.js';
-import { BOLD, CYAN, DIM, RESET, YELLOW } from '../tui/ansi.js';
+import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
 import { scanInbox } from './scan.js';
@@ -112,10 +112,15 @@ export class InboxController {
     if (geometry.mode === 'list') return this.withStatus(list);
     if (geometry.mode === 'detail') return this.withStatus(detail);
     const lines: string[] = [];
+    // Dim box-drawing rule in the single-column gutter the layout reserves
+    // (detailWidth = cols - listWidth - 1) so the list and detail read as two
+    // distinct panels rather than one run-together block.
+    const divider = `${GRAY}│${RESET}`;
     for (let i = 0; i < geometry.height; i++) {
       const left = list[i] ?? '';
       const right = detail[i] ?? '';
-      lines.push(`${left}${' '.repeat(Math.max(1, geometry.listWidth - visibleWidth(left)))} ${right}`);
+      const pad = ' '.repeat(Math.max(1, geometry.listWidth - visibleWidth(left)));
+      lines.push(`${left}${pad}${divider}${right}`);
     }
     return this.withStatus(lines);
   }

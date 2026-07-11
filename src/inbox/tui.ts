@@ -38,7 +38,7 @@ export function buildInboxLines(items: TicketSummary[], width: number, selectedI
     if (source) row += `${ansiColor(source, 'yellow')} ${DIM}·${RESET} `;
     row += `${BOLD}${truncateRow(item.title || `(${item.id.slice(0, 8)})`, titleWidth)}${RESET}  ${DIM}${age}${RESET}`;
     lines.push(row);
-    if (item.claim) lines.push(`      ${DIM}claimed by ${item.claim.owner}${RESET}`);
+    if (item.claim) lines.push(`      ${DIM}${truncateRow(`claimed by ${item.claim.owner}`, contentWidth - 6)}${RESET}`);
     else if (item.subtitle) lines.push(`      ${DIM}${truncateRow(item.subtitle, contentWidth - 6)}${RESET}`);
   }
   return lines;
