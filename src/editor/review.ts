@@ -17,6 +17,10 @@ export interface ReviewOptions {
   editor?: string;
   /** Called exactly once when the human explicitly submits a final proposal. */
   onPropose?: (result: FeedbackResult) => Promise<void> | void;
+  /** Fired when the human presses Option/Alt+I inside the editor: a request to
+   *  gracefully close the WHOLE inbox (not submit, not return-to-list). The
+   *  draft is saved and the ticket stays pending. */
+  onClose?: () => Promise<void> | void;
   /** Controller cancellation closes the editor/browser handoff without proposing a result. */
   signal?: AbortSignal;
   /** Reuse this controller-owned directory for `review.vim`; an existing script is left untouched. */
@@ -328,6 +332,17 @@ export function reviewVimscript(): string {
     `  qa!`,
     `endfunction`,
     ``,
+    `" Option/Alt+I: request graceful close of the whole inbox. Saves the draft`,
+    `" (ticket stays PENDING — this is close, never submit) and quits nvim; the`,
+    `" controller reads the close flag on editor exit and dismisses the popup.`,
+    `function! s:Close() abort`,
+    `  call s:Save()`,
+    `  if $HL_CLOSE_FLAG !=# ''`,
+    `    call writefile([''], $HL_CLOSE_FLAG)`,
+    `  endif`,
+    `  qa!`,
+    `endfunction`,
+    ``,
     `function! s:HandOff() abort`,
     `  call s:Save()`,
     `  if g:hl_handoff_flag ==# ''`,
@@ -343,7 +358,13 @@ export function reviewVimscript(): string {
     `command! HLUndo call <SID>Undo()`,
     `command! HLSubmit call <SID>Submit()`,
     `command! HLBrowser call <SID>HandOff()`,
-    `command! HLHelp echo 'REVIEW  <Space>c comment   <Space>l list   <Space>u undo-last   <Space>s submit & quit   <Space>w browser handoff   |  in list: e/<CR> edit · dd delete · q close'`,
+    `command! HLClose call <SID>Close()`,
+    `" M-i (Option/Alt+I) closes the whole inbox from any mode, mirroring the`,
+    `" controller's list/deck close chord. Global (not buffer-local) so it fires`,
+    `" from the source buffer, the comment scratch buffer, and the list.`,
+    `nnoremap <silent> <M-i> :call <SID>Close()<CR>`,
+    `inoremap <silent> <M-i> <C-\\><C-o>:call <SID>Close()<CR>`,
+    `command! HLHelp echo 'REVIEW  <Space>c comment   <Space>l list   <Space>u undo-last   <Space>s submit & quit   <Space>w browser handoff   M-i close inbox   |  in list: e/<CR> edit · dd delete · q close'`,
     ``,
     `" Highlights are (re)applied after any colorscheme so the user's theme`,
     `" (e.g. gloam) loads first, then our anchor highlight sits on top.`,
@@ -629,6 +650,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
 
   const handoffFlagPath = join(dir, 'browser-handoff.flag');
   const submitFlagPath = join(dir, 'review-submit.flag');
+  const closeFlagPath = join(dir, 'review-close.flag');
   // `-u NONE`: do NOT load the user's init.lua / LazyVim / plugins / keymaps.
   // Default runtimepath still includes the config dir (for the gloam
   // colorscheme) and the site dir (for the treesitter markdown parser), so the
@@ -642,6 +664,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
       HL_REVIEW_URL: reviewUrl,
       HL_HANDOFF_FLAG: handoffFlagPath,
       HL_SUBMIT_FLAG: submitFlagPath,
+      HL_CLOSE_FLAG: closeFlagPath,
     };
 
     process.stderr.write(
@@ -658,6 +681,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
   while (true) {
     clearFlag(handoffFlagPath);
     clearFlag(submitFlagPath);
+    clearFlag(closeFlagPath);
     let resolveSubmitted!: (result: FeedbackResult) => void;
     const submitted = new Promise<FeedbackResult>((resolveSubmittedPromise) => {
       resolveSubmitted = resolveSubmittedPromise;
@@ -677,6 +701,16 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
 
     try {
       await runEditor(server.url);
+
+      // Option/Alt+I close request wins over every other exit outcome: save the
+      // draft, leave the ticket pending, and tell the controller to dismiss the
+      // whole inbox. Checked before handoff/submit so it is never misread.
+      if (existsSync(closeFlagPath)) {
+        await stopReviewServer(server);
+        clearFlag(closeFlagPath);
+        await opts.onClose?.();
+        return draftFeedback(outPath, absFile);
+      }
 
       if (existsSync(handoffFlagPath)) {
         server.activate();

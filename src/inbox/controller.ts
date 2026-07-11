@@ -173,7 +173,8 @@ export class InboxController {
     if (claim === null) { this.status = 'ticket is being edited by another inbox'; this.repaint(); return; }
     const descriptor = readJson<ReviewDescriptor>(reviewPath(item.dir));
     if (descriptor === null) { releaseClaim(item.dir, claim.token); this.invalidate(); return; }
-    this.reviewAdapter = new ReviewAdapter({ dir: item.dir, descriptor, claim });
+    let closeRequested = false;
+    this.reviewAdapter = new ReviewAdapter({ dir: item.dir, descriptor, claim, onClose: () => { closeRequested = true; } });
     this.suspendForChild();
     try {
       await this.reviewAdapter.start();
@@ -181,10 +182,17 @@ export class InboxController {
       this.status = error instanceof Error ? error.message : String(error);
     } finally {
       this.reviewAdapter = undefined;
-      this.resumeAfterChild();
-      this.rescan();
-      this.reconcileRoots();
-      this.repaint(true);
+      // M-i inside native review is a graceful close of the WHOLE inbox: the
+      // adapter already saved the draft and released the claim, so just tear the
+      // controller down instead of returning to the list. The ticket stays
+      // pending because no submit flag was written.
+      if (closeRequested) { this.suspended = false; this.close(); }
+      else {
+        this.resumeAfterChild();
+        this.rescan();
+        this.reconcileRoots();
+        this.repaint(true);
+      }
     }
   }
 

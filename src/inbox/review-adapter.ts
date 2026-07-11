@@ -10,6 +10,8 @@ export interface ReviewAdapterOptions {
   claim: TicketClaim;
   editor?: ReviewOptions['editor'];
   onSubmitted?: (result: TicketResult) => Promise<void> | void;
+  /** Human pressed Option/Alt+I inside the editor: close the whole inbox. */
+  onClose?: () => Promise<void> | void;
 }
 
 /** Controller-owned native review child. It persists drafts but delegates the sole final write to tickets.ts. */
@@ -33,6 +35,7 @@ export class ReviewAdapter {
       jobDir: this.opts.dir,
       editor: this.opts.editor,
       signal: this.abortController.signal,
+      onClose: this.opts.onClose,
       onPropose: async (proposal) => {
         if (this.stopped || this.abortController.signal.aborted) return;
         const completed = await completeReview(this.opts.dir, proposal, this.opts.claim.token);
