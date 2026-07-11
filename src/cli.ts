@@ -38,7 +38,8 @@ function fail(error: unknown): never {
   process.exit(1);
 }
 
-function roots(values: string[] | undefined): string[] | undefined { return values?.map((root) => resolve(root)); }
+/** Explicit --root values filter the scan; no --root (an empty array from commander) falls through to the registered-roots fallback in scanInbox/the controller, so it must be undefined, not []. */
+function roots(values: string[] | undefined): string[] | undefined { return values && values.length > 0 ? values.map((root) => resolve(root)) : undefined; }
 
 /** Resolve an explicit --root to its existing registration; an unregistered root is an error, never a silent humanloop-owned registration. */
 function requireRegisteredRoot(root: string): InboxRootRegistration {
