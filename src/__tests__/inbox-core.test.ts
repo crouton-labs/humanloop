@@ -125,22 +125,33 @@ await new Promise<void>((resolveWorker, rejectWorker) => cancelWorker.once('exit
 assert.equal(readTicketResult(finalRaceDir)?.kind, finalRace.won ? 'deck' : 'canceled', 'submit and cancellation race has one canonical winner');
 const concurrentDir = submitDeck({ root, id: 'concurrent-claim', deck: deck('2025-01-03T00:00:00.000Z') }).dir;
 const claimBarrier = join(temp, 'claim-race-barrier');
+// Both workers block on this release until the parent has read both results, so
+// neither winner's pid dies during the peer's attempt (a dead same-host pid is
+// legitimately reclaimable — that stale-recovery race, not a double claim, is
+// what previously flaked this assertion).
+const claimRelease = join(temp, 'claim-race-release');
 let claimWorkerNumber = 0;
 const claimReadyPaths: string[] = [];
-const runClaimWorker = () => new Promise<unknown>((resolveWorker, rejectWorker) => {
-  const ready = join(temp, `claim-race-ready-${claimWorkerNumber++}`);
+const claimResultPaths: string[] = [];
+const runClaimWorker = () => new Promise<void>((resolveWorker, rejectWorker) => {
+  const n = claimWorkerNumber++;
+  const ready = join(temp, `claim-race-ready-${n}`);
+  const result = join(temp, `claim-race-result-${n}`);
   claimReadyPaths.push(ready);
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/__tests__/inbox-claim-worker.ts', concurrentDir, claimBarrier, ready], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = ''; let errors = '';
-  child.stdout.on('data', (chunk) => { output += chunk; });
+  claimResultPaths.push(result);
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/__tests__/inbox-claim-worker.ts', concurrentDir, claimBarrier, ready, result, claimRelease], { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] });
+  let errors = '';
   child.stderr.on('data', (chunk) => { errors += chunk; });
-  child.once('exit', (code) => code === 0 ? resolveWorker(JSON.parse(output)) : rejectWorker(new Error(errors)));
+  child.once('exit', (code) => code === 0 ? resolveWorker() : rejectWorker(new Error(errors)));
 });
 const concurrentClaimRuns = [runClaimWorker(), runClaimWorker()];
 await waitFor(claimReadyPaths);
 writeFileSync(claimBarrier, 'go');
-const concurrentClaims = await Promise.all(concurrentClaimRuns);
+await waitFor(claimResultPaths);
+const concurrentClaims = claimResultPaths.map((path) => JSON.parse(readFileSync(path, 'utf8')));
 assert.equal(concurrentClaims.filter((claim) => claim !== null).length, 1, 'separate processes exclusively claim one ticket');
+writeFileSync(claimRelease, 'go');
+await Promise.all(concurrentClaimRuns);
 
 const feedback: FeedbackResult = { file: source, submitted: true, approved: true, comments: [], submittedAt: '2025-01-04T00:00:00.000Z', savedAt: '2025-01-04T00:00:00.000Z' };
 assert.throws(() => submitReview({ root, id: 'bad-output', review: { file: source, output: responsePath(review.dir), title: 'Bad output', source: {} } }), /must not alias/, 'review output cannot replace a ticket response');
