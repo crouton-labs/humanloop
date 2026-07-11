@@ -30,8 +30,13 @@ export function buildInboxLines(items: TicketSummary[], width: number, selectedI
     const item = items[index]!;
     const kind = item.kind === 'deck' ? item.interactionKind ?? 'decision' : 'review';
     const icon = KIND_ICON[kind] ?? '·';
-    const source = item.source.sessionName ?? item.source.askedBy ?? item.source.nodeId ?? '';
+    // Source and title share the row budget: an unbounded source (a long node
+    // or session name) would floor the title at its minimum and overflow the
+    // column, bending the panel divider. Shrink the source only when the row
+    // cannot hold it alongside the title's 10-col minimum.
+    const rawSource = item.source.sessionName ?? item.source.askedBy ?? item.source.nodeId ?? '';
     const age = formatTimeAgo(item.blockedSince);
+    const source = truncateRow(rawSource, Math.max(8, contentWidth - age.length - 8 - 10));
     const cursor = index === selectedIndex ? `${CYAN}▸${RESET} ` : '  ';
     const titleWidth = Math.max(10, contentWidth - source.length - age.length - 8);
     let row = `${cursor}${ansiColor(icon, KIND_COLOR[kind] ?? 'cyan')} `;

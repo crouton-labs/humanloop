@@ -4,7 +4,7 @@ import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
 import { renderMarkdown } from '../render/termrender.js';
-import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW } from '../tui/ansi.js';
+import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW, clipLine } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
 import { scanInbox } from './scan.js';
@@ -117,9 +117,11 @@ export class InboxController {
     // distinct panels rather than one run-together block.
     const divider = `${GRAY}│${RESET}`;
     for (let i = 0; i < geometry.height; i++) {
-      const left = list[i] ?? '';
+      // Hard-clip the list line to its column: an overflowing row would eat
+      // the pad and push the divider out of alignment for that row alone.
+      const left = clipLine(list[i] ?? '', geometry.listWidth);
       const right = detail[i] ?? '';
-      const pad = ' '.repeat(Math.max(1, geometry.listWidth - visibleWidth(left)));
+      const pad = ' '.repeat(Math.max(0, geometry.listWidth - visibleWidth(left)));
       lines.push(`${left}${pad}${divider}${right}`);
     }
     return this.withStatus(lines);
