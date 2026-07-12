@@ -38,8 +38,7 @@ function bindingCommand(): string {
 
 /** The argv crouter's tmux-binding installer binds on the root table to toggle the inbox popup.
  *  Humanloop owns the command text; crouter owns which key(s) run it (via its keybindings catalog
- *  and the single `installTmuxBindings()` manifest sweep). Humanloop no longer persists or
- *  reconciles any key itself. */
+ *  and the single `installTmuxBindings()` manifest sweep). */
 export function inboxToggleTmuxCommand(): string[] {
   return ['run-shell', '-b', bindingCommand()];
 }
