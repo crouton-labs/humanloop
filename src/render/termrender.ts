@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  existsSync, readFileSync, writeFileSync, statSync,
+  existsSync, readFileSync, writeFileSync, statSync, mkdirSync,
   openSync, closeSync, unlinkSync, renameSync, accessSync, realpathSync, constants,
 } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import stringWidth from 'string-width';
 import { TERMRENDER_VERSION } from './version.js';
 
@@ -15,22 +15,15 @@ import { TERMRENDER_VERSION } from './version.js';
 // resolved by ABSOLUTE PATH inside that venv — never `$PATH` — so a user's
 // own `pip install termrender` can never shadow or break the pin.
 
-function findPkgRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 12; i++) {
-    if (existsSync(join(dir, 'package.json'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  // dist/render/termrender.js or src/render/termrender.ts → two up is pkgRoot.
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-}
-
-const PKG_ROOT = findPkgRoot();
-const VENV_DIR = resolve(PKG_ROOT, '.venv');
-const VENV_BIN = resolve(PKG_ROOT, '.venv/bin/termrender');
-const VENV_PYTHON = resolve(PKG_ROOT, '.venv/bin/python');
+const RENDERER_CACHE_DIR = join(
+  resolve(process.env.XDG_CACHE_HOME || join(homedir(), '.cache')),
+  'humanloop',
+  'termrender',
+  TERMRENDER_VERSION,
+);
+const VENV_DIR = join(RENDERER_CACHE_DIR, 'venv');
+const VENV_BIN = join(VENV_DIR, 'bin/termrender');
+const VENV_PYTHON = join(VENV_DIR, 'bin/python');
 // Readiness marker written by the single authoritative provisioning transition
 // after a verified install. It fingerprints the ACTUAL verified environment —
 // launcher + interpreter (mtime, size, mode) and the interpreter's realpath —
@@ -42,11 +35,12 @@ const VENV_PYTHON = resolve(PKG_ROOT, '.venv/bin/python');
 // marker (see invalidateRenderer), so the next process repairs. Together these
 // remove the ~149ms `termrender -h` + `importlib.metadata` spawn tax from the
 // steady path without letting a stale marker trust a broken renderer forever.
-const VENV_STAMP = resolve(PKG_ROOT, '.venv/.hl-termrender-stamp.json');
+const VENV_STAMP = join(VENV_DIR, '.hl-termrender-stamp.json');
 // Provisioning lock — lives OUTSIDE .venv (which `uv venv --clear` wipes) so it
-// survives a reinstall. Serializes venv mutation + stamp publication across
-// processes: a stamp can never certify a concurrently-changing venv.
-const VENV_LOCK = resolve(PKG_ROOT, '.hl-termrender.lock');
+// survives a reinstall. The user cache stays writable when humanloop is installed
+// in a read-only runtime image, and serializes venv mutation + stamp publication
+// across processes: a stamp can never certify a concurrently-changing venv.
+const VENV_LOCK = join(RENDERER_CACHE_DIR, '.hl-termrender.lock');
 // A lock older than this is from a crashed process and may be stolen. Set
 // comfortably above the worst-case held path (uv probe 5s + venv 60s + install
 // 120s + re-verify ~10s ≈ 195s) so a slow-but-alive holder is never judged
@@ -222,13 +216,29 @@ function stealStaleLock(): void {
 }
 
 function withProvisionLock(provision: () => void): void {
+  try {
+    mkdirSync(RENDERER_CACHE_DIR, { recursive: true });
+  } catch (err) {
+    rendererState = 'unavailable';
+    process.stderr.write(
+      `[hl] termrender unavailable — renderer cache cannot be created (${err instanceof Error ? err.message : String(err)}); using plaintext fallback\n`,
+    );
+    return;
+  }
+
   const giveUpAt = Date.now() + LOCK_GIVE_UP_MS;
   for (;;) {
     let fd: number;
     try {
       fd = openSync(VENV_LOCK, 'wx'); // O_CREAT | O_EXCL — atomic acquire
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        rendererState = 'unavailable';
+        process.stderr.write(
+          `[hl] termrender unavailable — renderer cache cannot be locked (${err instanceof Error ? err.message : String(err)}); using plaintext fallback\n`,
+        );
+        return;
+      }
       if (lockIsStale()) { stealStaleLock(); continue; }
       // A live process is provisioning — give it a chance, then adopt its result.
       // Never steal a lock we can't prove stale; if we wait too long, give up to
