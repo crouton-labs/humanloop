@@ -1,19 +1,30 @@
-import { execSync } from 'child_process';
-import { homedir } from 'os';
-import { join } from 'path';
-import { existsSync } from 'fs';
+import { execSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { FileEntry, SessionEntry, SessionInfo } from '@earendil-works/pi-coding-agent';
 
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
 }
 
-const CLAUDE_DB_PATH = join(homedir(), '.claude', '__store.db');
+export type ConversationReadErrorCode = 'session_not_found' | 'session_ambiguous' | 'session_unreadable' | 'session_id_mismatch' | 'conversation_empty';
 
-export function readConversation(sessionId: string): ConversationMessage[] {
-  if (!existsSync(CLAUDE_DB_PATH)) {
-    throw new Error(`Claude database not found at ${CLAUDE_DB_PATH}`);
+export class ConversationReadError extends Error {
+  constructor(readonly code: ConversationReadErrorCode) {
+    super(code);
+    this.name = 'ConversationReadError';
   }
+}
+
+const CLAUDE_DB_PATH = join(homedir(), '.claude', '__store.db');
+const MAX_SESSION_ID_LENGTH = 256;
+const piSessionIndex = new Map<string, Map<string, string[]>>();
+
+/** Legacy Claude-store reader retained for callers that explicitly use Claude sessions. */
+export function readConversation(sessionId: string): ConversationMessage[] {
+  if (!existsSync(CLAUDE_DB_PATH)) throw new Error('Claude conversation store unavailable');
 
   const query = `
     SELECT bm.message_type,
@@ -31,44 +42,132 @@ export function readConversation(sessionId: string): ConversationMessage[] {
   });
 
   if (!raw.trim()) return [];
+  const rows = JSON.parse(raw) as Array<{ message_type: string; content: string | null }>;
+  return rows.flatMap((row) => row.content && (row.message_type === 'user' || row.message_type === 'assistant')
+    ? [{ role: row.message_type, content: row.content }]
+    : []);
+}
 
-  const rows = JSON.parse(raw) as Array<{
-    message_type: string;
-    content: string | null;
-  }>;
+/** Resolve a pi session by exact header id and return its active useful context. */
+export async function readPiConversationText(sessionId: string): Promise<string> {
+  if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID_LENGTH) throw new ConversationReadError('session_not_found');
 
-  const messages: ConversationMessage[] = [];
+  const pi = await import('@earendil-works/pi-coding-agent').catch(() => {
+    throw new ConversationReadError('session_unreadable');
+  });
+  const paths = await resolvePiSessionPaths(pi.SessionManager, sessionId);
+  if (paths.length === 0) throw new ConversationReadError('session_not_found');
+  if (paths.length !== 1) throw new ConversationReadError('session_ambiguous');
 
-  for (const row of rows) {
-    if (!row.content) continue;
-    if (row.message_type === 'user' || row.message_type === 'assistant') {
-      messages.push({
-        role: row.message_type,
-        content: row.content,
-      });
-    }
+  let entries: FileEntry[];
+  try {
+    // parseSessionEntries is the package-root parser. Reading only the SDK-discovered
+    // path keeps an untrusted deck id from becoming a filesystem locator.
+    entries = pi.parseSessionEntries(readFileSync(paths[0]!, 'utf8'));
+  } catch {
+    throw new ConversationReadError('session_unreadable');
   }
 
-  return messages;
+  const header = entries[0];
+  if (!isMatchingHeader(header, sessionId)) throw new ConversationReadError('session_id_mismatch');
+  if (entries.length < 2) throw new ConversationReadError('conversation_empty');
+
+  try {
+    pi.migrateSessionEntries(entries);
+    const sessionEntries = entries.slice(1).filter((entry): entry is SessionEntry => entry.type !== 'session');
+    const context = pi.buildSessionContext(sessionEntries);
+    const text = context.messages.map(serializePiMessage).filter((part): part is string => part !== '').join('\n\n').trim();
+    if (text === '') throw new ConversationReadError('conversation_empty');
+    return text;
+  } catch (error) {
+    if (error instanceof ConversationReadError) throw error;
+    throw new ConversationReadError('session_unreadable');
+  }
 }
+
+async function resolvePiSessionPaths(SessionManager: typeof import('@earendil-works/pi-coding-agent').SessionManager, sessionId: string): Promise<string[]> {
+  const root = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent');
+  let index = piSessionIndex.get(root);
+  if (index === undefined) {
+    index = await buildPiSessionIndex(SessionManager);
+    piSessionIndex.set(root, index);
+  }
+  let paths = index.get(sessionId) ?? [];
+  // A popup can outlive session creation. Refresh once on a miss, then keep the
+  // process-local cache for subsequent visuals instead of rescanning every transcript.
+  if (paths.length === 0) {
+    index = await buildPiSessionIndex(SessionManager);
+    piSessionIndex.set(root, index);
+    paths = index.get(sessionId) ?? [];
+  }
+  return paths;
+}
+
+async function buildPiSessionIndex(SessionManager: typeof import('@earendil-works/pi-coding-agent').SessionManager): Promise<Map<string, string[]>> {
+  let sessions: SessionInfo[];
+  try {
+    sessions = await SessionManager.listAll();
+  } catch {
+    throw new ConversationReadError('session_unreadable');
+  }
+  const index = new Map<string, string[]>();
+  for (const session of sessions) {
+    const paths = index.get(session.id);
+    if (paths === undefined) index.set(session.id, [session.path]);
+    else paths.push(session.path);
+  }
+  return index;
+}
+
+function isMatchingHeader(entry: FileEntry | undefined, sessionId: string): boolean {
+  return entry?.type === 'session' && entry.id === sessionId;
+}
+
+function serializePiMessage(message: { role?: unknown; content?: unknown; summary?: unknown; toolName?: unknown }): string {
+  switch (message.role) {
+    case 'user': return labeledText('user', message.content);
+    case 'assistant': {
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      const text = blocks.flatMap((block) => {
+        if (!isRecord(block)) return [];
+        if (block.type === 'text' && typeof block.text === 'string') return [block.text];
+        if (block.type === 'toolCall' && typeof block.name === 'string') return [`tool call ${block.name}: ${safeJson(block.arguments)}`];
+        return [];
+      }).filter((part) => part.trim() !== '');
+      return text.length === 0 ? '' : `assistant: ${text.join('\n')}`;
+    }
+    case 'toolResult': return labeledText(`tool result${typeof message.toolName === 'string' ? ` ${message.toolName}` : ''}`, message.content);
+    case 'compactionSummary': return typeof message.summary === 'string' && message.summary.trim() !== '' ? `compaction summary: ${message.summary}` : '';
+    case 'branchSummary': return typeof message.summary === 'string' && message.summary.trim() !== '' ? `branch summary: ${message.summary}` : '';
+    default: return '';
+  }
+}
+
+function labeledText(label: string, content: unknown): string {
+  const text = textFromContent(content);
+  return text === '' ? '' : `${label}: ${text}`;
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((block) => isRecord(block) && block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n').trim();
+}
+
+function safeJson(value: unknown): string {
+  try { return JSON.stringify(value); } catch { return '[unserializable arguments]'; }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null; }
 
 export function findRecentSessionId(cwd?: string): string | null {
   if (!existsSync(CLAUDE_DB_PATH)) return null;
-
-  const whereClause = cwd
-    ? `WHERE cwd = '${cwd.replace(/'/g, "''")}'`
-    : '';
-
+  const whereClause = cwd ? `WHERE cwd = '${cwd.replace(/'/g, "''")}'` : '';
   const query = `SELECT DISTINCT session_id FROM base_messages ${whereClause} ORDER BY timestamp DESC LIMIT 1;`;
-
   try {
-    const raw = execSync(`sqlite3 -json "${CLAUDE_DB_PATH}" "${query.replace(/"/g, '\\"')}"`, {
-      encoding: 'utf8',
-    });
-
+    const raw = execSync(`sqlite3 -json "${CLAUDE_DB_PATH}" "${query.replace(/"/g, '\\"')}"`, { encoding: 'utf8' });
     if (!raw.trim()) return null;
-    const rows = JSON.parse(raw) as Array<{ session_id: string }>;
-    return rows[0]?.session_id ?? null;
+    return (JSON.parse(raw) as Array<{ session_id: string }>)[0]?.session_id ?? null;
   } catch {
     return null;
   }
