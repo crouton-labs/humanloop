@@ -60,9 +60,14 @@ function rootBinding(socket: string, key: string): string | undefined {
   } catch { return undefined; }
 }
 
-function isCanonical(command: string | undefined): boolean {
+function isOwnedBinding(command: string | undefined): boolean {
   const normalized = command?.replace(/\\"/g, '"');
   return normalized !== undefined && normalized.includes('hl inbox toggle') && normalized.includes('--tmux-socket "#{socket_path}"') && normalized.includes('--tmux-client "#{client_name}"') && normalized.includes('--target-pane "#{pane_id}"');
+}
+
+function isCanonical(command: string | undefined): boolean {
+  const normalized = command?.replace(/\\"/g, '"');
+  return isOwnedBinding(command) && normalized?.includes('--quiet') === true;
 }
 
 export function inspectInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
@@ -77,13 +82,16 @@ export function installInboxBinding(opts: { socket?: string; key?: string } = {}
   const key = opts.key ?? configuredKey();
   if (socket === undefined) return { state: 'unbound', key, isDefault: key === DEFAULT_KEY };
   const existing = rootBinding(socket, key);
-  if (existing !== undefined && !isCanonical(existing)) return { state: 'collision', key, isDefault: key === DEFAULT_KEY };
-  if (existing === undefined) tmux(socket, ['bind-key', '-T', 'root', key, 'run-shell', '-b', bindingCommand()]);
+  if (existing !== undefined && !isOwnedBinding(existing)) return { state: 'collision', key, isDefault: key === DEFAULT_KEY };
+  // Rebind owned-but-stale commands as well as installing a missing binding.
+  // In particular, bindings created before --quiet would leave the toggle's
+  // result JSON in a tmux view-mode overlay after the popup closed.
+  if (!isCanonical(existing)) tmux(socket, ['bind-key', '-T', 'root', key, 'run-shell', '-b', bindingCommand()]);
   if (opts.key !== undefined) {
     // Switching to a new key: drop the previous configured key iff it still holds the
     // canonical toggle, so bindings don't accrete and inspect/unbind track a single live key.
     const previous = configuredKey();
-    if (previous !== key && isCanonical(rootBinding(socket, previous))) tmux(socket, ['unbind-key', '-T', 'root', previous]);
+    if (previous !== key && isOwnedBinding(rootBinding(socket, previous))) tmux(socket, ['unbind-key', '-T', 'root', previous]);
     writeConfiguredKey(key);
   }
   return { state: 'installed', key, isDefault: key === DEFAULT_KEY };
@@ -91,7 +99,7 @@ export function installInboxBinding(opts: { socket?: string; key?: string } = {}
 
 export function unbindInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
   const key = configuredKey();
-  if (socket !== undefined && isCanonical(rootBinding(socket, key))) tmux(socket, ['unbind-key', '-T', 'root', key]);
+  if (socket !== undefined && isOwnedBinding(rootBinding(socket, key))) tmux(socket, ['unbind-key', '-T', 'root', key]);
   return inspectInboxBinding(socket);
 }
 

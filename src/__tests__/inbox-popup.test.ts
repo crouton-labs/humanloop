@@ -50,6 +50,9 @@ try {
   execFileSync('tmux', ['-S', bindingSocket, 'bind-key', '-T', 'root', 'M-i', 'display-message', 'occupied']);
   assert.deepEqual(installInboxBinding({ socket: bindingSocket }), { state: 'collision', key: 'M-i', isDefault: true });
   assert.match(execFileSync('tmux', ['-S', bindingSocket, 'list-keys', '-T', 'root'], { encoding: 'utf8' }), /M-i\s+display-message occupied/, 'an existing binding remains intact');
+  execFileSync('tmux', ['-S', bindingSocket, 'bind-key', '-T', 'root', 'M-i', 'run-shell', '-b', 'hl inbox toggle --tmux-socket "#{socket_path}" --tmux-client "#{client_name}" --target-pane "#{pane_id}"']);
+  assert.deepEqual(installInboxBinding({ socket: bindingSocket }), { state: 'installed', key: 'M-i', isDefault: true }, 'an owned pre-quiet binding is migrated rather than treated as a collision');
+  assert.match(execFileSync('tmux', ['-S', bindingSocket, 'list-keys', '-T', 'root'], { encoding: 'utf8' }), /hl inbox toggle --quiet/, 'the migrated binding suppresses toggle result output');
   assert.deepEqual(installInboxBinding({ socket: bindingSocket, key: 'M-z' }), { state: 'installed', key: 'M-z', isDefault: false });
   assert.deepEqual(inspectInboxBinding(bindingSocket), { state: 'installed', key: 'M-z', isDefault: false });
 
