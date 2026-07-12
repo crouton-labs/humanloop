@@ -244,12 +244,6 @@ export interface CanceledTicketResult {
 /** The sole canonical response.json union. */
 export type TicketResult = DeckTicketResult | ReviewTicketResult | CanceledTicketResult;
 
-export interface InboxBindingState {
-  state: 'installed' | 'collision' | 'unbound';
-  key: string;
-  isDefault: boolean;
-}
-
 export interface CompletionEvent {
   schema: 'humanloop.completion/v1';
   root: string;

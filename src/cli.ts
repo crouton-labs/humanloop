@@ -9,7 +9,7 @@ import { managedInboxRoot, registerInboxRoot, registeredInboxRoot, unregisterInb
 import { submitDeck, submitReview } from './inbox/tickets.js';
 import { scanInbox } from './inbox/scan.js';
 import { openInboxPopup } from './surfaces/inbox-popup.js';
-import { installInboxBinding, inspectInboxBinding, toggleInboxPopup, unbindInboxBinding } from './tui/tmux.js';
+import { toggleInboxPopup } from './tui/tmux.js';
 import { ask } from './api.js';
 import { launchReview } from './editor/review.js';
 import { writeFeedbackResult } from './editor/feedback.js';
@@ -55,7 +55,13 @@ program.name('hl').description('Humanloop durable inbox and review surface.').he
 const inbox = program.command('inbox').description('Open, inspect, and configure the centralized human inbox.');
 inbox.command('open').description('Open the inbox controller in this human TTY.').option('--root <path>', 'filter to a registered root', (value, prior: string[]) => [...prior, value], [] as string[]).option('--control-socket <path>', 'popup control socket').action(async (options: { root: string[]; controlSocket?: string }) => {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail('hl inbox open requires an interactive TTY; use hl inbox list for read-only output');
-  await openInboxPopup(options.controlSocket, roots(options.root));
+  try { await openInboxPopup(options.controlSocket, roots(options.root)); } catch (error) { fail(error); }
+  // This process IS the popup: `tmux display-popup -E` keeps the popup on screen
+  // until it exits. Once the controller has closed, exit hard — a stray live
+  // handle (e.g. an in-flight completion-handler child that hangs) must never
+  // keep a dismissed inbox occupying the terminal. Delivery is receipt-based
+  // and crash-safe, so cutting an unfinished handler here is always safe.
+  process.exit(0);
 });
 inbox.command('toggle').description('Toggle the inbox popup for one tmux client.').option('--tmux-socket <path>').option('--tmux-client <name>').option('--target-pane <pane>').option('--quiet', 'suppress result JSON on success (the tmux binding uses this so run-shell -b output never overlays the pane)').action(async (options: { tmuxSocket?: string; tmuxClient?: string; targetPane?: string; quiet?: boolean }) => {
   const result = await toggleInboxPopup({ socket: options.tmuxSocket, client: options.tmuxClient, targetPane: options.targetPane });
@@ -74,9 +80,6 @@ root.command('register').description('Register a root owned by a host.').require
 });
 root.command('unregister').description('Remove a matching root registration without deleting tickets.').requiredOption('--root <path>').requiredOption('--owner <owner>').action((options: { root: string; owner: string }) => emit({ removed: unregisterInboxRoot(resolve(options.root), options.owner) }));
 root.command('list').description('List registered roots and availability.').action(() => emit(listInboxRoots()));
-inbox.command('bind').description('Install a collision-safe tmux inbox toggle binding.').option('--key <tmux-key>').action((options: { key?: string }) => emit(installInboxBinding({ key: options.key })));
-inbox.command('unbind').description('Remove the configured inbox binding only when it is humanloop-owned.').action(() => emit(unbindInboxBinding()));
-inbox.command('binding').description('Inspect the configured inbox binding.').action(() => emit(inspectInboxBinding()));
 
 program.command('deck').command('ask').description('Submit a durable deck ticket; it never changes tmux. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'present the deck in this terminal and block until it is answered').action(async (options: { root?: string; inline?: boolean }) => {
   try {

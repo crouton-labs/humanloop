@@ -1,12 +1,10 @@
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { InboxBindingState } from '../types.js';
 
-const DEFAULT_KEY = 'M-i';
 const POPUP_TITLE = 'humanloop · inbox';
 const POPUP_STYLE = 'bg=#20242d';
 const POPUP_BORDER_STYLE = 'fg=#5c6370';
@@ -38,69 +36,12 @@ function bindingCommand(): string {
   return 'hl inbox toggle --quiet --tmux-socket "#{socket_path}" --tmux-client "#{client_name}" --target-pane "#{pane_id}"';
 }
 
-function configuredKeyPath(): string {
-  const state = process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state');
-  return join(state, 'humanloop', 'inbox-key');
-}
-
-function configuredKey(): string {
-  try { return readFileSync(configuredKeyPath(), 'utf8').trim() || DEFAULT_KEY; } catch { return DEFAULT_KEY; }
-}
-
-function writeConfiguredKey(key: string): void {
-  mkdirSync(join(configuredKeyPath(), '..'), { recursive: true, mode: 0o700 });
-  writeFileSync(configuredKeyPath(), `${key}\n`, { mode: 0o600 });
-}
-
-function rootBinding(socket: string, key: string): string | undefined {
-  try {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = tmux(socket, ['list-keys', '-T', 'root']).split('\n').map((row) => new RegExp(`^bind-key\\s+-T root\\s+${escaped}\\s+(.*)$`).exec(row)).find((entry) => entry !== null);
-    return match?.[1];
-  } catch { return undefined; }
-}
-
-function isOwnedBinding(command: string | undefined): boolean {
-  const normalized = command?.replace(/\\"/g, '"');
-  return normalized !== undefined && normalized.includes('hl inbox toggle') && normalized.includes('--tmux-socket "#{socket_path}"') && normalized.includes('--tmux-client "#{client_name}"') && normalized.includes('--target-pane "#{pane_id}"');
-}
-
-function isCanonical(command: string | undefined): boolean {
-  const normalized = command?.replace(/\\"/g, '"');
-  return isOwnedBinding(command) && normalized?.includes('--quiet') === true;
-}
-
-export function inspectInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
-  const key = configuredKey();
-  if (socket === undefined) return { state: 'unbound', key, isDefault: key === DEFAULT_KEY };
-  const command = rootBinding(socket, key);
-  return { state: command === undefined ? 'unbound' : isCanonical(command) ? 'installed' : 'collision', key, isDefault: key === DEFAULT_KEY };
-}
-
-export function installInboxBinding(opts: { socket?: string; key?: string } = {}): InboxBindingState {
-  const socket = opts.socket ?? tmuxSocketFromEnvironment();
-  const key = opts.key ?? configuredKey();
-  if (socket === undefined) return { state: 'unbound', key, isDefault: key === DEFAULT_KEY };
-  const existing = rootBinding(socket, key);
-  if (existing !== undefined && !isOwnedBinding(existing)) return { state: 'collision', key, isDefault: key === DEFAULT_KEY };
-  // Rebind owned-but-stale commands as well as installing a missing binding.
-  // In particular, bindings created before --quiet would leave the toggle's
-  // result JSON in a tmux view-mode overlay after the popup closed.
-  if (!isCanonical(existing)) tmux(socket, ['bind-key', '-T', 'root', key, 'run-shell', '-b', bindingCommand()]);
-  if (opts.key !== undefined) {
-    // Switching to a new key: drop the previous configured key iff it still holds the
-    // canonical toggle, so bindings don't accrete and inspect/unbind track a single live key.
-    const previous = configuredKey();
-    if (previous !== key && isOwnedBinding(rootBinding(socket, previous))) tmux(socket, ['unbind-key', '-T', 'root', previous]);
-    writeConfiguredKey(key);
-  }
-  return { state: 'installed', key, isDefault: key === DEFAULT_KEY };
-}
-
-export function unbindInboxBinding(socket = tmuxSocketFromEnvironment()): InboxBindingState {
-  const key = configuredKey();
-  if (socket !== undefined && isOwnedBinding(rootBinding(socket, key))) tmux(socket, ['unbind-key', '-T', 'root', key]);
-  return inspectInboxBinding(socket);
+/** The argv crouter's tmux-binding installer binds on the root table to toggle the inbox popup.
+ *  Humanloop owns the command text; crouter owns which key(s) run it (via its keybindings catalog
+ *  and the single `installTmuxBindings()` manifest sweep). Humanloop no longer persists or
+ *  reconciles any key itself. */
+export function inboxToggleTmuxCommand(): string[] {
+  return ['run-shell', '-b', bindingCommand()];
 }
 
 export function tmuxSocketFromEnvironment(): string | undefined {

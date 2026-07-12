@@ -7,7 +7,7 @@ export type { ReviewOptions } from './editor/review.js';
 // Interaction-layer surface (SDK).
 export { ask, notify, openInbox } from './api.js';
 export { openInboxPopup } from './surfaces/inbox-popup.js';
-export { toggleInboxPopup, installInboxBinding, inspectInboxBinding, unbindInboxBinding, inboxPopupStyle } from './tui/tmux.js';
+export { toggleInboxPopup, inboxToggleTmuxCommand, inboxPopupStyle } from './tui/tmux.js';
 export { display } from './surfaces/display.js';
 export { scanInbox } from './inbox/scan.js';
 export { registerInboxRoot, unregisterInboxRoot, listInboxRoots, managedInboxRoot } from './inbox/registry.js';
@@ -53,7 +53,7 @@ export type {
   ResolutionEnvelope, InboxItem, DisplayOpts,
   ClaimSummary, TicketSummary, DeckTicketSummary, ReviewTicketSummary,
   ReviewDescriptor, DeckTicketResult, ReviewTicketResult, CanceledTicketResult, TicketResult,
-  InboxBindingState, CompletionEvent,
+  CompletionEvent,
 } from './types.js';
 export type { Key } from './tui/terminal.js';
 export type { ConversationMessage } from './conversation/reader.js';
