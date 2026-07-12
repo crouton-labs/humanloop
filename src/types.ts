@@ -272,6 +272,8 @@ export interface DisplayOpts {
 
 export type GenerateVisual = (
   interaction: Interaction,
+  /** Render width owned by the mounting surface. */
+  cols: number,
 ) => Promise<
   | { ok: true; ansi: string; markdown: string }
   | { ok: false; error: string }

@@ -10,5 +10,5 @@ export function visualGeneratorForConversationSession(sessionId: string): Genera
   } catch {
     // A missing or unreadable history still permits the ticket to be answered.
   }
-  return (interaction) => defaultGenerateVisual(interaction, conversationContext);
+  return (interaction, cols) => defaultGenerateVisual(interaction, conversationContext, cols);
 }

@@ -15,7 +15,7 @@ import { inboxRootsDirectory, listInboxRoots } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { completeDeck, readTicketResult } from './tickets.js';
 import { reconcileCompletions } from './completion.js';
-import { clearProgress, deckPath, progressPath, readJson, reviewPath } from './convention.js';
+import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { ReviewAdapter } from './review-adapter.js';
 import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
@@ -50,6 +50,9 @@ export class InboxController {
   private reviewAdapter: ReviewAdapter | undefined;
   private deckBrowser: WebServerHandle | undefined;
   private deckBrowserStarting = false;
+  private deckBrowserStartingGeneration: number | undefined;
+  /** Invalidates an in-flight asynchronous browser start when ownership ends. */
+  private deckBrowserGeneration = 0;
   private claim: { dir: string; token: string } | undefined;
   private reconciling = false;
   private suspended = false;
@@ -241,25 +244,48 @@ export class InboxController {
     const deck = readJson<Deck>(deckPath(item.dir));
     if (deck === null) return;
     this.deckBrowserStarting = true;
+    const generation = ++this.deckBrowserGeneration;
+    this.deckBrowserStartingGeneration = generation;
+    const claim = this.claim;
+    const adapter = this.adapter;
     try {
       const start = this.options.startDeckBrowser ?? startWebServer;
       let browser: WebServerHandle;
       browser = await start({
         dir: item.dir,
         deck,
+        finalize: async (responses) => this.finalizeDeckBrowser(item.dir, claim.token, responses),
         onSubmit: () => { void this.finishDeckBrowser(item.dir, browser); },
       });
+      // Closing, taking back, or losing the claim while listen() was pending
+      // retires this start. Stop the fresh listener before it can open a tab.
+      if (this.closed || generation !== this.deckBrowserGeneration || this.claim?.token !== claim.token || this.adapter !== adapter) {
+        await browser.stop();
+        return;
+      }
       this.deckBrowser = browser;
       (this.options.openBrowser ?? openBrowser)(browser.url);
     } catch (error) {
-      this.status = error instanceof Error ? error.message : String(error);
+      if (!this.closed && generation === this.deckBrowserGeneration) this.status = error instanceof Error ? error.message : String(error);
     } finally {
-      this.deckBrowserStarting = false;
+      if (this.deckBrowserStartingGeneration === generation) {
+        this.deckBrowserStarting = false;
+        this.deckBrowserStartingGeneration = undefined;
+      }
       this.repaint();
     }
   }
 
-  /** The browser has atomically published the response; reconcile its owner delivery. */
+  /** Finalize through this controller's claim-safe lifecycle before HTTP acks. */
+  private async finalizeDeckBrowser(dir: string, token: string, responses: InteractionResponse[]): Promise<{ completedAt: string; responsePath: string }> {
+    if (this.claim?.dir !== dir || this.claim.token !== token) throw new Error('browser handoff no longer owns this ticket');
+    await this.finishDeck(dir, responses, token);
+    const result = readTicketResult(dir);
+    if (result?.kind !== 'deck') throw new Error('ticket did not produce a deck result');
+    return { completedAt: result.completedAt, responsePath: responsePath(dir) };
+  }
+
+  /** The browser has finalized through the controller; reconcile its owner delivery. */
   private async finishDeckBrowser(dir: string, browser: WebServerHandle): Promise<void> {
     if (this.deckBrowser === browser) this.deckBrowser = undefined;
     await browser.stop();
@@ -285,6 +311,8 @@ export class InboxController {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.deckBrowserGeneration++;
+    this.deckBrowserStarting = false;
     void this.reviewAdapter?.stop();
     const browser = this.deckBrowser;
     this.deckBrowser = undefined;
@@ -398,6 +426,10 @@ export class InboxController {
   }
 
   private leaveDetail(release = true): void {
+    this.deckBrowserGeneration++;
+    // A stale listener will stop itself after its await, but this controller
+    // may immediately claim another ticket and start a fresh browser handoff.
+    this.deckBrowserStarting = false;
     this.adapter?.close();
     this.adapter = undefined;
     this.selectedWatcher?.close();

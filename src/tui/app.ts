@@ -105,6 +105,7 @@ interface PanelInternals {
   rows: number;
   mounted: boolean;
   generateVisual: GenerateVisual | undefined;
+  visualGeneration: number;
   progressPath: string | undefined;
   callbacks: {
     onProgress: MountedPanelOpts['onProgress'];
@@ -126,17 +127,18 @@ function rebindPersist(internals: PanelInternals): void {
 function fireVisuals(internals: PanelInternals, interactions: Interaction[]): void {
   if (internals.generateVisual === undefined) return;
   const gen = internals.generateVisual;
+  const generation = ++internals.visualGeneration;
   for (const interaction of interactions) {
     internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'loading' });
-    gen(interaction).then((r) => {
-      if (!internals.mounted) return;
+    gen(interaction, internals.cols).then((r) => {
+      if (!internals.mounted || generation !== internals.visualGeneration) return;
       if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, r.ok
         ? { questionId: interaction.id, content: r.ansi, status: 'ready' }
         : { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
     }).catch(() => {
-      if (!internals.mounted) return;
+      if (!internals.mounted || generation !== internals.visualGeneration) return;
       if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
@@ -151,6 +153,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     rows: opts.rows,
     mounted: true,
     generateVisual: opts.generateVisual,
+    visualGeneration: 0,
     progressPath: opts.progressPath,
     callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit, onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest },
   };
@@ -215,6 +218,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       if (internals.state.phase === 'item-review') {
         clampItemReviewScroll(internals.state, cols, rows);
       }
+      fireVisuals(internals, internals.state.interactions);
       return renderLines();
     },
 

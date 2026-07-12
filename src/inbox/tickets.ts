@@ -140,6 +140,12 @@ function validateDeckResponses(deck: Deck, raw: DeckTicketResult['responses']): 
     if (response.freetext !== undefined && interaction.allowFreetext !== true) throw new Error(`freetext is not allowed for ${response.id}`);
     if (response.optionComments !== undefined && (interaction.multiSelect !== true || Object.keys(response.optionComments).some((id) => !optionIds.has(id)))) throw new Error(`invalid option comments for ${response.id}`);
   }
+  for (const interaction of deck.interactions.filter((candidate) => candidate.kind === 'notify')) {
+    const response = responses.find((candidate) => candidate.id === interaction.id);
+    if (response === undefined || (response.selectedOptionId === undefined && (response.selectedOptionIds?.length ?? 0) === 0 && (response.freetext?.trim() ?? '') === '')) {
+      throw new Error(`notification requires an explicit acknowledgement: ${interaction.id}`);
+    }
+  }
   return responses;
 }
 function requireClaimOwnership(dir: string, token: string): void {

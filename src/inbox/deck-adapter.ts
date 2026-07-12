@@ -34,7 +34,9 @@ export class DeckAdapter {
       rows: opts.rows,
       onProgress: (responses) => { this.responses = responses; opts.onProgress?.(responses); },
       onComplete: opts.onComplete,
-      onExit: () => opts.onComplete(this.responses),
+      // A partial-deck exit is a valid completion for ordinary asks, but a
+      // notification is resolved only by its explicit acknowledgement.
+      onExit: () => { if (notificationsAcknowledged(opts.deck, this.responses)) opts.onComplete(this.responses); },
       onDirty: opts.onDirty,
       generateVisual: opts.generateVisual,
       onEditorRequest: opts.onEditorRequest,
@@ -66,6 +68,14 @@ export class DeckAdapter {
   }
 
   close(): void { this.panel.unmount(); }
+}
+
+function notificationsAcknowledged(deck: Deck, responses: InteractionResponse[]): boolean {
+  const byId = new Map(responses.map((response) => [response.id, response]));
+  return deck.interactions.filter((interaction) => interaction.kind === 'notify').every((interaction) => {
+    const response = byId.get(interaction.id);
+    return response !== undefined && (response.selectedOptionId !== undefined || (response.selectedOptionIds?.length ?? 0) > 0 || (response.freetext?.trim() ?? '') !== '');
+  });
 }
 
 function initialResponses(deck: Deck, dir: string): InteractionResponse[] {

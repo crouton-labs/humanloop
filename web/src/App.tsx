@@ -67,6 +67,7 @@ function statusTransitionAllowed(prev: SurfaceStatus, next: SurfaceStatus): bool
 export default function App() {
   const [surface, setSurface] = useState<SurfaceKind | null>(null);
   const [deck, setDeck] = useState<Deck | null>(null);
+  const [deckResponses, setDeckResponses] = useState<InteractionResponse[]>([]);
   const [review, setReview] = useState<ReviewPayload | null>(null);
   const [status, setStatus] = useState<SurfaceStatus>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -91,10 +92,11 @@ export default function App() {
           return fetch('/api/interaction')
             .then((r) => {
               if (!r.ok) throw new Error(`interaction load failed: ${r.status}`);
-              return r.json() as Promise<{ deck: Deck }>;
+              return r.json() as Promise<{ deck: Deck; responses?: InteractionResponse[] }>;
             })
             .then((interaction) => {
               setDeck(interaction.deck);
+              setDeckResponses(Array.isArray(interaction.responses) ? interaction.responses : []);
               // The fetch chain and the WS effect run independently — a
               // taken-back/taking-back/disconnected status can already have
               // landed (via WS onmessage/onclose) while this request was
@@ -243,7 +245,7 @@ export default function App() {
       <StatusBanner status={status} error={error} />
 
       {surface === 'deck' && deck && (
-        <DeckSurface deck={deck} onSubmit={submitDeck} disabled={status !== 'ready'} />
+        <DeckSurface deck={deck} initialResponses={deckResponses} onSubmit={submitDeck} disabled={status !== 'ready'} />
       )}
       {surface === 'review' && review && (
         <ReviewSurface

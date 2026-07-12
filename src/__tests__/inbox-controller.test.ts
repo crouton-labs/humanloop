@@ -7,7 +7,8 @@ import { inboxLayout } from '../inbox/layout.js';
 import { InboxController } from '../inbox/controller.js';
 import { buildInboxLines } from '../inbox/tui.js';
 import { registerInboxRoot } from '../inbox/registry.js';
-import { submitDeck, cancelTicketResult } from '../inbox/tickets.js';
+import { claimTicket } from '../inbox/claim.js';
+import { submitDeck, cancelTicketResult, finalizeDeck } from '../inbox/tickets.js';
 import { scanInbox } from '../inbox/scan.js';
 
 const key = (part: Partial<import('../tui/terminal.js').Key> = {}) => ({ ctrl: false, meta: false, upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, wordLeft: false, wordRight: false, home: false, end: false, pageUp: false, pageDown: false, del: false, return: false, newline: false, escape: false, tab: false, backspace: false, ...part });
@@ -105,7 +106,15 @@ notifyController.handleKey('a', key());
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(notifyController.snapshot().screen, 'detail', 'activation opens a notification in its deck');
 assert.equal(acknowledgement, undefined, 'activation does not acknowledge a notification');
+notifyController.handleKey('q', key());
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(acknowledgement, undefined, 'generic partial exit cannot acknowledge a notification');
 notifyController.close();
+const notificationClaim = claimTicket(notification.dir);
+assert.ok(notificationClaim !== null);
+assert.throws(() => finalizeDeck(notification.dir, [], notificationClaim.token), /explicit acknowledgement/, 'canonical finalization rejects a notification without its acknowledgement response');
+assert.throws(() => finalizeDeck(notification.dir, [{ id: 'notify' }], notificationClaim.token), /explicit acknowledgement/, 'an empty response object is not an acknowledgement');
+assert.equal(finalizeDeck(notification.dir, [{ id: 'notify', selectedOptionId: 'ok' }], notificationClaim.token).won, true, 'an explicit acknowledgement response finalizes the notification');
 
 const replacement = submitDeck({ root, id: 'replace', deck: { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'drop', title: 'Drop', options: [{ id: 'no', label: 'No', shortcut: 'n' }] }] } });
 const live = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined });
@@ -147,6 +156,54 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.equal(browserStopped, true, 'w takes the inbox deck back from the browser');
 assert.equal(browserController.snapshot().screen, 'detail');
 browserController.close();
+
+const browserIntegration = submitDeck({ root, id: 'browser-integration', deck: { title: 'browser integration', interactions: [{ id: 'pick', title: 'Pick', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'note', title: 'Note', options: [], allowFreetext: true }] } });
+let integrationUrl = '';
+const integrationController = new InboxController({
+  roots: [root], cols: 100, rows: 24,
+  completeDeck: async (dir, responses, token) => { finalizeDeck(dir, responses, token); },
+  openBrowser: (url) => { integrationUrl = url; },
+});
+while (integrationController.snapshot().selectedDir !== browserIntegration.dir) integrationController.handleKey('j', key());
+integrationController.activate();
+integrationController.handleKey('y', key());
+integrationController.handleKey('w', key());
+await new Promise((resolve) => setImmediate(resolve));
+const bootstrap = await fetch(`${integrationUrl}api/interaction`);
+assert.equal(bootstrap.status, 200, 'controller browser handoff serves a real API');
+const bootstrapBody = await bootstrap.json() as { responses: import('../types.js').InteractionResponse[] };
+assert.deepEqual(bootstrapBody.responses, [{ id: 'pick', selectedOptionId: 'yes' }], 'browser bootstrap carries the terminal-owned progress snapshot');
+const submitted = await fetch(`${integrationUrl}api/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ responses: [{ id: 'pick', selectedOptionId: 'yes' }] }) });
+assert.equal(submitted.status, 200, 'real browser submit finalizes through the controller');
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(JSON.parse((await import('node:fs')).readFileSync(join(browserIntegration.dir, 'response.json'), 'utf8')).responses, [{ id: 'pick', selectedOptionId: 'yes' }], 'controller finalization preserves a valid partial answer rather than replacing it');
+integrationController.close();
+
+const startRace = submitDeck({ root, id: 'browser-start-race', deck: deck('browser start race') });
+let releaseStart!: (handle: typeof browserHandle) => void;
+const delayedStart = new Promise<typeof browserHandle>((resolve) => { releaseStart = resolve; });
+let raceOpened = false;
+const raceController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, startDeckBrowser: async () => delayedStart, openBrowser: () => { raceOpened = true; } });
+while (raceController.snapshot().selectedDir !== startRace.dir) raceController.handleKey('j', key());
+raceController.activate();
+raceController.handleKey('w', key());
+raceController.close();
+browserStopped = false;
+releaseStart(browserHandle);
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(browserStopped, true, 'closing during async browser startup stops the stale listener');
+assert.equal(raceOpened, false, 'closing during async browser startup never opens a browser');
+
+const widthTicket = submitDeck({ root, id: 'visual-width', deck: { ...deck('visual width'), source: { originatingConversationSessionId: 'width-session' } } });
+const visualWidths: number[] = [];
+const widthController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, visualGeneratorForSession: () => async (_interaction, cols) => { visualWidths.push(cols); return { ok: true, ansi: 'x'.repeat(cols), markdown: 'context' }; } });
+while (widthController.snapshot().selectedDir !== widthTicket.dir) widthController.handleKey('j', key());
+widthController.activate();
+await new Promise((resolve) => setImmediate(resolve));
+widthController.resize(120, 24);
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(visualWidths, [64, 77], 'embedded visuals use and regenerate at the detail-pane width on resize');
+widthController.close();
 
 rmSync(temp, { recursive: true, force: true });
 console.log('inbox controller tests passed');

@@ -46,17 +46,15 @@ async function callHaiku(prompt: string, systemPrompt: string): Promise<string |
   }
 }
 
-// defaultGenerateVisual matches the GenerateVisual contract for use with
-// mountPanel. Width is read from process.stdout.columns so callers that
-// embed humanloop in a sub-region should supply their own closure that bakes
-// in the correct width.
+// The mounting surface supplies its actual render width; generated ANSI must
+// fit an embedded panel just as it fits a standalone terminal.
 // Cap on how much conversation we hand the generator. Recency is what grounds
 // the decision in front of the human, so when history is long we keep the tail
 // (most recent messages) rather than the head.
 const MAX_CONTEXT_CHARS = 24000;
 
-export async function defaultGenerateVisual(interaction: Interaction, conversationContext: string): Promise<{ ok: true; ansi: string; markdown: string } | { ok: false; error: string }> {
-  const width = Math.max(40, Math.min((process.stdout.columns || 80) - 4, 76));
+export async function defaultGenerateVisual(interaction: Interaction, conversationContext: string, cols = (process.stdout.columns || 80)): Promise<{ ok: true; ansi: string; markdown: string } | { ok: false; error: string }> {
+  const width = Math.max(1, Math.min(cols - 4, 76));
 
   const optionsSummary = interaction.options.length > 0
     ? `\nOptions: ${interaction.options.map((o) => o.label).join(' | ')}`

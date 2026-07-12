@@ -12,6 +12,8 @@ import { HelpOverlay } from '@/components/HelpOverlay';
 
 export interface DeckSurfaceProps {
   deck: Deck;
+  /** Terminal-owned progress snapshot captured at browser handoff. */
+  initialResponses?: InteractionResponse[];
   onSubmit: (responses: InteractionResponse[]) => void;
   /** True once the deck has converged (submitted / taken-back / erroring on
    *  the initial load) — detaches the keymap and dims the UI; there's
@@ -27,13 +29,13 @@ export interface DeckSurfaceProps {
  * phase2-deck-ui-notes.md); re-mount this component (change its `key`) to
  * pick up a fresh deck.
  */
-export function DeckSurface({ deck, onSubmit, disabled }: DeckSurfaceProps) {
+export function DeckSurface({ deck, initialResponses = [], onSubmit, disabled }: DeckSurfaceProps) {
   // Mutates deck.interactions in place, filling in option.shortcut — see
   // lib/assignShortcuts.ts for why the browser must compute these itself
   // rather than trusting deck.json (the terminal never persists them).
   assignShortcuts(deck.interactions);
 
-  const [state, dispatch] = useReducer(deckReducer, deck, buildInitialState);
+  const [state, dispatch] = useReducer(deckReducer, { deck, initialResponses }, ({ deck: initialDeck, initialResponses: restored }) => buildInitialState(initialDeck, restored));
   const scrollRef = useRef<HTMLDivElement>(null);
   const [helpOpen, setHelpOpen] = useState(false);
 

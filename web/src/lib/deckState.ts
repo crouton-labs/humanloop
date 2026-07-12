@@ -42,7 +42,7 @@ export interface DeckState {
   autoSubmit: boolean;
 }
 
-export function buildInitialState(deck: Deck): DeckState {
+export function buildInitialState(deck: Deck, initialResponses: InteractionResponse[] = []): DeckState {
   // Single-interaction decks skip the overview list, same as the terminal —
   // there's nothing to overview, and overview hides option shortcuts.
   const initialPhase: Phase = deck.interactions.length === 1 ? 'item-review' : 'overview';
@@ -57,6 +57,12 @@ export function buildInitialState(deck: Deck): DeckState {
     if (pa.freetext !== undefined) response.freetext = pa.freetext;
     responses.set(interaction.id, response);
     preAnsweredIds.add(interaction.id);
+  }
+  for (const response of initialResponses) {
+    if (deck.interactions.some((interaction) => interaction.id === response.id)) {
+      responses.set(response.id, response);
+      preAnsweredIds.delete(response.id);
+    }
   }
   const firstUnanswered = deck.interactions.findIndex((i) => !responses.has(i.id));
   return {

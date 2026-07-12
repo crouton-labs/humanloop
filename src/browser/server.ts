@@ -6,7 +6,7 @@ import { join, extname, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Deck, FeedbackResult, InteractionResponse } from '../types.js';
-import { deckPath, readJson, writeResponse, clearProgress } from '../inbox/convention.js';
+import { deckPath, progressPath, readJson, writeResponse, clearProgress } from '../inbox/convention.js';
 import {
   buildDraftFeedbackResult,
   buildFinalFeedbackResult,
@@ -58,6 +58,9 @@ export interface WebServerOpts {
    * open sockets) without racing the ack the browser is waiting on.
    */
   onSubmit?: (responses: InteractionResponse[], completedAt: string, responsePath: string) => void;
+  /** Controller-owned finalization for a claimed inbox ticket. When supplied,
+   * this server never writes response.json itself. */
+  finalize?: (responses: InteractionResponse[]) => Promise<{ completedAt: string; responsePath: string }>;
 }
 
 export interface ReviewWebServerOpts {
@@ -212,7 +215,9 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
       // Best-effort — falls back to the in-memory deck if the read fails.
       const onDisk = readJson<Deck>(deckPath(dir));
       if (onDisk !== null) deck = onDisk;
-      sendJson(res, 200, { dir, deck });
+      const progress = readJson<{ responses?: InteractionResponse[] }>(progressPath(dir));
+      const responses = Array.isArray(progress?.responses) ? progress.responses : [];
+      sendJson(res, 200, { dir, deck, responses });
       return;
     }
     if (url === '/api/submit' && req.method === 'POST') {
@@ -236,12 +241,22 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
         return;
       }
       const responses = parsed.responses as InteractionResponse[];
-      const completedAt = new Date().toISOString();
-      // Canonical write — the exact helper the terminal path uses, so nothing
-      // downstream of response.json can tell which surface produced it.
-      const responsePath = writeResponse(dir, responses, completedAt, deck);
+      let completedAt: string;
+      let responsePath: string;
+      try {
+        if (opts.finalize !== undefined) {
+          ({ completedAt, responsePath } = await opts.finalize(responses));
+        } else {
+          // Standalone browser handoff retains its direct local persistence.
+          completedAt = new Date().toISOString();
+          responsePath = writeResponse(dir, responses, completedAt, deck);
+          clearProgress(dir);
+        }
+      } catch (error) {
+        sendJson(res, 400, { error: 'invalid_submit', message: error instanceof Error ? error.message : String(error) });
+        return;
+      }
       submitted = { responsePath, completedAt };
-      clearProgress(dir);
       // Await the flush BEFORE registering the finish callback that can
       // trigger caller-side stop() — that ordering is what closes the race
       // between a lost WS frame and the teardown it precedes.
