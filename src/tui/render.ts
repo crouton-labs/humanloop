@@ -88,7 +88,7 @@ export function renderOverview(state: TuiState, cols: number, rows: number): str
   }
 
   lines.push(`  ${DIM}${hline(Math.min(cols - 4, 60))}${RESET}`);
-  lines.push(`  ${DIM}enter${RESET} review  ${DIM}j/k${RESET} navigate  ${DIM}q${RESET} finish`);
+  lines.push(`  ${DIM}enter${RESET} review  ${DIM}j/k${RESET} navigate  ${DIM}w${RESET} browser  ${DIM}q${RESET} finish`);
 
   while (lines.length < rows) lines.push('');
   // Overview content extends roughly cols-16 wide for option labels; center
@@ -309,6 +309,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   if (overflows) {
     footerParts.unshift(state.inputMode ? `${DIM}pgup/pgdn${RESET} scroll` : `${DIM}u/d${RESET} scroll`);
   }
+  if (state.inputMode === null) footerParts.push(`${DIM}w${RESET} browser`);
   const footer = `  ${footerParts.join('  ')}`;
 
   // Assemble — pad to fill rows so post-body sits at the bottom

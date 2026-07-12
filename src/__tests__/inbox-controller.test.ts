@@ -87,5 +87,35 @@ live.reloadSelectedDeck();
 assert.ok(live.render().join('\n').includes('Current: Yes'), 'deck replacement keeps surviving answer');
 live.close();
 
+const browserDeck = submitDeck({ root, id: 'browser', deck: deck('browser') });
+let openedUrl: string | undefined;
+let browserStopped = false;
+const browserHandle = {
+  url: 'http://127.0.0.1:9999/',
+  port: 9999,
+  activate: () => {},
+  requestTakeBack: async () => {},
+  stop: async () => { browserStopped = true; },
+};
+const browserController = new InboxController({
+  roots: [root],
+  cols: 100,
+  rows: 24,
+  completeDeck: async () => undefined,
+  startDeckBrowser: async () => browserHandle,
+  openBrowser: (url) => { openedUrl = url; },
+});
+while (browserController.snapshot().selectedDir !== browserDeck.dir) browserController.handleKey('j', key());
+browserController.activate();
+browserController.handleKey('w', key());
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(openedUrl, browserHandle.url, 'w hands an active inbox deck to the browser');
+assert.ok(browserController.render().join('\n').includes('Handed off to the browser'));
+browserController.handleKey('w', key());
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(browserStopped, true, 'w takes the inbox deck back from the browser');
+assert.equal(browserController.snapshot().screen, 'detail');
+browserController.close();
+
 rmSync(temp, { recursive: true, force: true });
 console.log('inbox controller tests passed');

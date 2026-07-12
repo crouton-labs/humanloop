@@ -4,6 +4,9 @@ import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
 import { renderMarkdown } from '../render/termrender.js';
+import { startWebServer, type WebServerHandle } from '../browser/server.js';
+import { openBrowser } from '../browser/open.js';
+import { renderHandoff } from '../tui/render.js';
 import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW, clipLine } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
@@ -22,6 +25,8 @@ export interface InboxControllerOptions {
   rows?: number;
   scan?: (roots?: string[]) => TicketSummary[];
   completeDeck?: (dir: string, responses: InteractionResponse[], token: string) => Promise<unknown>;
+  startDeckBrowser?: typeof startWebServer;
+  openBrowser?: (url: string) => void;
 }
 
 type Screen = 'list' | 'detail';
@@ -37,6 +42,8 @@ export class InboxController {
   private screen: Screen = 'list';
   private adapter: DeckAdapter | undefined;
   private reviewAdapter: ReviewAdapter | undefined;
+  private deckBrowser: WebServerHandle | undefined;
+  private deckBrowserStarting = false;
   private claim: { dir: string; token: string } | undefined;
   private reconciling = false;
   private suspended = false;
@@ -133,7 +140,15 @@ export class InboxController {
     // so the close-from-open path must live here — checked before adapter
     // forwarding so it works in active deck freetext as well as the list.
     if ((key.ctrl && input === 'c') || isToggleCloseChord(input)) { this.close(); return; }
+    if (this.deckBrowser !== undefined) {
+      if (input === 'w' || input === 'W') void this.takeBackDeckBrowser();
+      return;
+    }
     if (this.screen === 'detail' && this.adapter !== undefined) {
+      if ((input === 'w' || input === 'W') && this.adapter.canAcceptHostKeys()) {
+        void this.openDeckBrowser();
+        return;
+      }
       this.adapter.handleKey(input, key);
       this.repaint();
       return;
@@ -205,10 +220,62 @@ export class InboxController {
 
   reloadSelectedDeck(): void { this.adapter?.reload(); this.repaint(); }
 
+  /** Hand the selected deck to its browser surface while retaining this ticket's claim. */
+  private async openDeckBrowser(): Promise<void> {
+    if (this.deckBrowser !== undefined || this.deckBrowserStarting || this.adapter === undefined || this.claim === undefined) return;
+    const item = this.items[this.selectedIndex];
+    if (item?.kind !== 'deck' || item.dir !== this.claim.dir) return;
+    const deck = readJson<Deck>(deckPath(item.dir));
+    if (deck === null) return;
+    this.deckBrowserStarting = true;
+    try {
+      const start = this.options.startDeckBrowser ?? startWebServer;
+      let browser: WebServerHandle;
+      browser = await start({
+        dir: item.dir,
+        deck,
+        onSubmit: () => { void this.finishDeckBrowser(item.dir, browser); },
+      });
+      this.deckBrowser = browser;
+      (this.options.openBrowser ?? openBrowser)(browser.url);
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.deckBrowserStarting = false;
+      this.repaint();
+    }
+  }
+
+  /** The browser has atomically published the response; reconcile its owner delivery. */
+  private async finishDeckBrowser(dir: string, browser: WebServerHandle): Promise<void> {
+    if (this.deckBrowser === browser) this.deckBrowser = undefined;
+    await browser.stop();
+    if (this.claim?.dir === dir) this.leaveDetail();
+    this.rescan();
+    this.reconcileRoots();
+    this.repaint();
+  }
+
+  /** Return browser authority to the terminal deck without changing its draft. */
+  private async takeBackDeckBrowser(): Promise<void> {
+    const browser = this.deckBrowser;
+    if (browser === undefined) return;
+    this.deckBrowser = undefined;
+    try {
+      await browser.requestTakeBack();
+      await browser.stop();
+    } finally {
+      this.repaint(true);
+    }
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
     void this.reviewAdapter?.stop();
+    const browser = this.deckBrowser;
+    this.deckBrowser = undefined;
+    void browser?.stop();
     this.leaveDetail();
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
@@ -322,6 +389,8 @@ export class InboxController {
   }
 
   private detailLines(width: number, rows: number): string[] {
+    if (this.deckBrowser !== undefined) return renderHandoff(this.deckBrowser.url, width, rows);
+    if (this.deckBrowserStarting) return [`  ${DIM}Opening browser review…${RESET}`];
     if (this.adapter !== undefined) return this.adapter.render();
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
