@@ -18,6 +18,8 @@ import { reconcileCompletions } from './completion.js';
 import { clearProgress, deckPath, progressPath, readJson, reviewPath } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { ReviewAdapter } from './review-adapter.js';
+import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
+import { editBufferInEditor } from '../editor/roundtrip.js';
 
 export interface InboxControllerOptions {
   roots?: string[];
@@ -27,6 +29,8 @@ export interface InboxControllerOptions {
   completeDeck?: (dir: string, responses: InteractionResponse[], token: string) => Promise<unknown>;
   startDeckBrowser?: typeof startWebServer;
   openBrowser?: (url: string) => void;
+  /** Test seam; production uses the standard conversation-backed visual generator. */
+  visualGeneratorForSession?: typeof visualGeneratorForConversationSession;
 }
 
 type Screen = 'list' | 'detail';
@@ -188,6 +192,8 @@ export class InboxController {
       cols: this.detailSize().cols,
       rows: this.detailSize().rows,
       onDirty: () => this.repaint(),
+      generateVisual: deck.source?.originatingConversationSessionId === undefined ? undefined : (this.options.visualGeneratorForSession ?? visualGeneratorForConversationSession)(deck.source.originatingConversationSessionId),
+      onEditorRequest: () => this.editActiveDeckInput(),
       onBack: () => { this.leaveDetail(); this.repaint(); },
       onComplete: (responses) => { void this.complete(responses); },
     });
@@ -342,7 +348,24 @@ export class InboxController {
     this.repaint();
   }
 
-  /** Give the raw TTY to a child process (native review editor). */
+  /** The controller owns the terminal handoff and repaint around $EDITOR. */
+  private editActiveDeckInput(): void {
+    const buffer = this.adapter?.inputBuffer();
+    if (buffer === undefined) return;
+    this.suspendForChild();
+    let result: ReturnType<typeof editBufferInEditor> = { text: buffer };
+    try {
+      result = editBufferInEditor(buffer);
+    } finally {
+      this.resumeAfterChild();
+      this.adapter?.setInputBuffer(result.text);
+      this.resize();
+      if (result.error !== undefined) this.status = result.error;
+      this.repaint(true);
+    }
+  }
+
+  /** Give the raw TTY to a child process (native review editor or $EDITOR). */
   private suspendForChild(): void {
     this.suspended = true;
     if (this.stdinListener !== undefined) process.stdin.removeListener('data', this.stdinListener);

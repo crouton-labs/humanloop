@@ -53,6 +53,20 @@ assert.equal(active.snapshot().screen, 'list', 'cancellation invalidation return
 assert.equal(active.snapshot().selectedDir !== first.dir, true);
 active.close();
 
+const visualTicket = submitDeck({ root, id: 'visual-session', deck: { ...deck('visual-session'), source: { blockedSince: new Date().toISOString(), originatingConversationSessionId: 'origin-session-42' } } });
+let visualSession: string | undefined;
+const visualController = new InboxController({
+  roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined,
+  visualGeneratorForSession: (sessionId) => {
+    visualSession = sessionId;
+    return async () => ({ ok: true, ansi: 'context', markdown: 'context' });
+  },
+});
+while (visualController.snapshot().selectedDir !== visualTicket.dir) visualController.handleKey('j', key());
+visualController.activate();
+assert.equal(visualSession, 'origin-session-42', 'centralized activation uses only explicit originating conversation session metadata');
+visualController.close();
+
 const navigation = submitDeck({ root, id: 'navigation', deck: { title: 'navigation', interactions: [
   { id: 'one', title: 'One', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
   { id: 'two', title: 'Two', options: [{ id: 'no', label: 'No', shortcut: 'n' }] },

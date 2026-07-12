@@ -80,6 +80,9 @@ export interface DeckSource {
    *  a crouter canvas node. Lets per-node attention scoping attribute the ask
    *  to the node that raised it rather than every sibling sharing the cwd. */
   nodeId?: string;
+  /** Durable identifier of the conversation session that originated this ask.
+   *  It is explicit metadata, never inferred from node identity or labels. */
+  originatingConversationSessionId?: string;
 }
 
 export interface Deck {
@@ -149,6 +152,8 @@ export interface TuiState {
   selectedAction: number;
   detailExpanded: boolean;
   scrollOffset: number;
+  /** The mounting host provided an active Ctrl+O editor callback. */
+  editorAvailable: boolean;
   /** Transient one-line notice shown in item-review (e.g. an empty multi-select
    *  Enter that was rejected). Cleared on the next keypress. */
   hint?: string;
@@ -276,6 +281,8 @@ export interface MountedPanelOpts {
   deck: Deck;
   progressPath?: string;
   generateVisual?: GenerateVisual;
+  /** Host callback for Ctrl+O while a comment/freetext buffer is active. */
+  onEditorRequest?: () => void;
   cols: number;
   rows: number;
   onProgress?: (responses: InteractionResponse[]) => void;

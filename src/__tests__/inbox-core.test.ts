@@ -35,6 +35,8 @@ assert.equal(registerInboxRoot({ root, owner: 'test-owner' }).root, registration
 assert.throws(() => registerInboxRoot({ root, owner: 'other' }), /already owned/, 'owner collision is rejected');
 assert.equal(listInboxRoots()[0]?.available, true);
 
+const sessionDeck = submitDeck({ root, id: 'session-metadata', deck: { ...deck('2025-01-01T00:00:00.000Z'), source: { blockedSince: '2025-01-01T00:00:00.000Z', originatingConversationSessionId: 'session-abc' } } });
+assert.equal(JSON.parse(readFileSync(join(sessionDeck.dir, 'deck.json'), 'utf8')).source.originatingConversationSessionId, 'session-abc', 'deck submission durably preserves explicit originating conversation session metadata');
 const oldDeck = submitDeck({ root, id: 'z-last', deck: deck('2025-01-01T00:00:00.000Z') });
 const newDeck = submitDeck({ root, id: 'a-first', deck: deck('2025-01-02T00:00:00.000Z') });
 const review = submitReview({ root, id: 'review', review: { file: source, title: 'Review source', source: { nodeId: 'node-1' }, blockedSince: '2025-01-02T00:00:00.000Z' } });
@@ -50,7 +52,7 @@ assert.equal(preparedTicket.dir, realpathSync(prepared), 'submission accepts a c
 // Same timestamp is stable by id; progress is resumable work, never a hidden lease.
 atomicWriteJson(progressPath(newDeck.dir), { kind: 'deck', responses: [], savedAt: new Date().toISOString() });
 const scanned = scanInbox([root]);
-assert.deepEqual(scanned.map((item) => item.id), ['a-first', 'prepared', 'review', 'z-last']);
+assert.deepEqual(scanned.map((item) => item.id), ['a-first', 'prepared', 'review', 'session-metadata', 'z-last']);
 assert.equal(scanned.find((item) => item.id === 'a-first')?.claim, undefined);
 assert.equal(scanned.find((item) => item.id === 'review')?.kind, 'review');
 

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { Deck, InteractionResponse, MountedPanel } from '../types.js';
+import type { Deck, GenerateVisual, InteractionResponse, MountedPanel } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { deckPath, progressPath, readJson } from './convention.js';
 import { validateDeck } from './deck-schema.js';
@@ -14,6 +14,8 @@ export interface DeckAdapterOptions {
   onComplete: (responses: InteractionResponse[]) => void;
   onBack: () => void;
   onDirty: () => void;
+  generateVisual?: GenerateVisual;
+  onEditorRequest?: () => void;
 }
 
 /** Embeds the single deck renderer in a controller-owned rectangle. */
@@ -34,12 +36,15 @@ export class DeckAdapter {
       onComplete: opts.onComplete,
       onExit: () => opts.onComplete(this.responses),
       onDirty: opts.onDirty,
+      generateVisual: opts.generateVisual,
+      onEditorRequest: opts.onEditorRequest,
     });
   }
 
   render(): string[] { return this.panel.render(); }
   resize(cols: number, rows: number): string[] { return this.panel.handleResize(cols, rows); }
   inputBuffer(): string | undefined { return this.panel.getInputBuffer(); }
+  setInputBuffer(text: string): void { this.panel.setInputBuffer(text); }
   canAcceptHostKeys(): boolean { return this.panel.canAcceptHostKeys(); }
 
   handleKey(input: string, key: Key): void {

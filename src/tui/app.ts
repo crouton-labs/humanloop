@@ -1,8 +1,5 @@
 import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync, statSync } from 'fs';
-import { dirname, resolve as resolvePath, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { dirname, resolve as resolvePath } from 'node:path';
 import type {
   Deck, TuiState, Interaction, InteractionResponse,
   MountedPanel, MountedPanelOpts, GenerateVisual,
@@ -10,8 +7,8 @@ import type {
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
 import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
-import { readConversation } from '../conversation/reader.js';
-import { defaultGenerateVisual } from '../visuals/generate.js';
+import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
+import { editBufferInEditor } from '../editor/roundtrip.js';
 import { validateDeck } from '../inbox/deck-schema.js';
 import { progressPath as progressPathFor, deckPath as deckPathFor, writeResponse, clearProgress } from '../inbox/convention.js';
 import { startWebServer } from '../browser/server.js';
@@ -27,7 +24,7 @@ export function validateInput(parsed: unknown): Deck {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-function buildInitialState(deck: Deck): TuiState {
+function buildInitialState(deck: Deck, editorAvailable = false): TuiState {
   // Single-question decks skip the overview list — there's nothing to overview,
   // and overview hides the option hotkeys so users press 'y' and nothing happens.
   const initialPhase = deck.interactions.length === 1 ? 'item-review' : 'overview';
@@ -61,6 +58,7 @@ function buildInitialState(deck: Deck): TuiState {
     selectedAction: 0,
     detailExpanded: false,
     scrollOffset: 0,
+    editorAvailable,
   };
 }
 
@@ -113,6 +111,7 @@ interface PanelInternals {
     onComplete: MountedPanelOpts['onComplete'];
     onExit: MountedPanelOpts['onExit'];
     onDirty: MountedPanelOpts['onDirty'];
+    onEditorRequest: MountedPanelOpts['onEditorRequest'];
   };
 }
 
@@ -147,13 +146,13 @@ function fireVisuals(internals: PanelInternals, interactions: Interaction[]): vo
 
 export function mountPanel(opts: MountedPanelOpts): MountedPanel {
   const internals: PanelInternals = {
-    state: buildInitialState(opts.deck),
+    state: buildInitialState(opts.deck, opts.onEditorRequest !== undefined),
     cols: opts.cols,
     rows: opts.rows,
     mounted: true,
     generateVisual: opts.generateVisual,
     progressPath: opts.progressPath,
-    callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit, onDirty: opts.onDirty },
+    callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit, onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest },
   };
 
   assignShortcuts(internals.state.interactions);
@@ -174,6 +173,11 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
   return {
     handleKey(input, key) {
       if (!internals.mounted) return;
+
+      if (key.ctrl && input === 'o' && internals.state.inputMode !== null && internals.callbacks.onEditorRequest !== undefined) {
+        internals.callbacks.onEditorRequest();
+        return;
+      }
 
       const onAutoComplete = () => {
         const responses = collectResponses(internals.state);
@@ -223,7 +227,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     loadDeck(deck, loadOpts) {
       if (!internals.mounted) return;
       const prior = collectResponses(internals.state);
-      internals.state = buildInitialState(deck);
+      internals.state = buildInitialState(deck, internals.callbacks.onEditorRequest !== undefined);
       if (loadOpts !== undefined && loadOpts.progressPath !== undefined) {
         internals.progressPath = loadOpts.progressPath;
       }
@@ -298,26 +302,13 @@ export async function resolveInteractionDir(
   deck: Deck,
   opts: ResolveDirOpts = {},
 ): Promise<{ responses: InteractionResponse[]; completedAt: string; responsePath: string; deck: Deck }> {
-  let conversationContext = '';
-  if (opts.sessionId !== undefined) {
-    try {
-      const conv = readConversation(opts.sessionId);
-      conversationContext = conv.map((m) => `${m.role}: ${m.content}`).join('\n\n');
-    } catch {
-      // empty context — proceed without visuals context
-    }
-  }
-
   setupTerminal();
   const term = getTerminalSize();
   const cols = opts.cols ?? term.cols;
   const rows = opts.rows ?? term.rows;
 
   const generateVisual: GenerateVisual | undefined =
-    opts.generateVisual ??
-    (opts.sessionId !== undefined
-      ? (interaction) => defaultGenerateVisual(interaction, conversationContext)
-      : undefined);
+    opts.generateVisual ?? (opts.sessionId === undefined ? undefined : visualGeneratorForConversationSession(opts.sessionId));
 
   return new Promise<{ responses: InteractionResponse[]; completedAt: string; responsePath: string; deck: Deck }>((resolve) => {
     let panel: MountedPanel | null = null;
@@ -403,6 +394,10 @@ export async function resolveInteractionDir(
       cols,
       rows,
       generateVisual,
+      onEditorRequest: () => {
+        const buffer = panel?.getInputBuffer();
+        if (buffer !== undefined) runEditorEscapeHatch(buffer);
+      },
       onProgress: (responses) => {
         lastResponses = responses;
         if (panel !== null) flushHost(panel.render());
@@ -468,61 +463,20 @@ export async function resolveInteractionDir(
       if (panel === null) return;
       process.stdin.removeListener('data', onData);
       process.stdout.removeListener('resize', onResize);
-
-      const tmpFile = join(tmpdir(), `hl-input-${randomUUID()}.txt`);
-      const editor = process.env.EDITOR || 'vi';
-      let next = buffer;
-      let errorMessage: string | null = null;
-
-      // Everything from suspending the TUI through the editor round-trip can
-      // throw (tmpfile write, spawn, readback) — a tmpdir write failure alone
-      // (e.g. /tmp full) used to escape with the listeners detached and the
-      // real terminal never restored. The try/finally below guarantees the
-      // finally branch — tmpfile cleanup, TUI restore, listener re-attach,
-      // resize-aware redraw — runs on every path, success or failure.
+      let result: ReturnType<typeof editBufferInEditor> = { text: buffer };
       try {
         restoreTerminal();
-        writeFileSync(tmpFile, buffer);
-        // $EDITOR is conventionally a shell fragment, not a bare binary —
-        // "code --wait", "emacsclient -t" — so run it through the shell (as
-        // git does) with the filename passed safely as a positional arg.
-        const result = spawnSync('/bin/sh', ['-c', `${editor} "$1"`, 'sh', tmpFile], { stdio: 'inherit' });
-        if (result.error) {
-          errorMessage = `$EDITOR ("${editor}") failed to launch: ${result.error.message}`;
-        } else if (result.signal !== null) {
-          errorMessage = `$EDITOR ("${editor}") was killed by signal ${result.signal}`;
-        } else if (result.status === 127 || result.status === 126) {
-          // Shell couldn't exec the editor: 127 = not found, 126 = not executable.
-          errorMessage = `$EDITOR ("${editor}") failed to launch (shell exit ${result.status})`;
-        } else if (result.status !== 0) {
-          errorMessage = `$EDITOR ("${editor}") exited with status ${result.status}`;
-        } else {
-          let read = readFileSync(tmpFile, 'utf8');
-          // Editors conventionally append a trailing newline on save; strip
-          // exactly one so a round-trip that added nothing doesn't grow the
-          // buffer by a blank line.
-          if (read.endsWith('\n') && !buffer.endsWith('\n')) read = read.slice(0, -1);
-          next = read;
-        }
-      } catch (err) {
-        errorMessage = `$EDITOR round-trip failed: ${err instanceof Error ? err.message : String(err)}`;
+        result = editBufferInEditor(buffer);
       } finally {
-        try { unlinkSync(tmpFile); } catch { /* best-effort cleanup — may never have been created */ }
-
         setupTerminal();
         process.stdin.on('data', onData);
         process.stdout.on('resize', onResize);
-
-        // On any failure the original buffer is kept untouched. Re-sample the
-        // terminal size (it may have changed while the editor had it) so the
-        // post-editor redraw lays out for the CURRENT dimensions rather than
-        // the panel's stale cols/rows, same as the live resize listener does.
-        panel.setInputBuffer(errorMessage === null ? next : buffer);
+        panel.setInputBuffer(result.text);
         const { cols: c, rows: r } = getTerminalSize();
         const lines = panel.handleResize(c, r);
-        if (errorMessage !== null) {
+        if (result.error !== undefined) {
           while (lines.length < r) lines.push('');
-          lines[r - 1] = `  ${errorMessage}`.slice(0, c);
+          lines[r - 1] = `  ${result.error}`.slice(0, c);
         }
         prevFrameLocal = [];
         process.stdout.write('\x1b[2J\x1b[H');
@@ -592,13 +546,6 @@ export async function resolveInteractionDir(
         if (inp === 'w') { takeBack(); return; }
         if (key.ctrl && inp === 'c') { finalize(lastResponses); return; }
         return;
-      }
-      if (key.ctrl && inp === 'o') {
-        const buf = panel!.getInputBuffer();
-        if (buf !== undefined) {
-          runEditorEscapeHatch(buf);
-          return;
-        }
       }
       // 'w' hands the current interaction off to the browser. Gated on
       // canAcceptHostKeys() (not mid comment/freetext) so it never shadows a

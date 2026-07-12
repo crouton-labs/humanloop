@@ -236,7 +236,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
       postLines.push(attachedLine);
     }
     postLines.push('');
-    postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}^J/⌥⏎${RESET} newline  ${DIM}^O${RESET} editor  ${DIM}esc${RESET} cancel`);
+    postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}^J/⌥⏎${RESET} newline${state.editorAvailable ? `  ${DIM}^O${RESET} editor` : ''}  ${DIM}esc${RESET} cancel`);
   } else {
     postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
   }
@@ -303,7 +303,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
       ]
     : [
         `${DIM}n/p${RESET} prev/next`,
-        `${DIM}space${RESET} expand`,
+        ...(state.visuals.get(interaction.id)?.status === 'ready' ? [`${DIM}space${RESET} expand`] : []),
         `${DIM}q${RESET} overview`,
       ];
   if (overflows) {

@@ -967,4 +967,19 @@ assert.deepEqual(
 );
 scrollCommentPanel.unmount();
 
+// ── Test 24: host capability hints are truthful ───────────────────────────────
+const capabilityDeck: Deck = { interactions: [{ id: 'note', title: 'Note', options: [], allowFreetext: true }] };
+const noCapabilityPanel = mountPanel({ deck: capabilityDeck, cols: 80, rows: 20 });
+assert.ok(!noCapabilityPanel.render().join('\n').includes('expand'), 'a deck without a visual generator does not advertise expansion');
+noCapabilityPanel.handleKey('r', mkKey({}));
+assert.ok(!noCapabilityPanel.render().join('\n').includes('^O'), 'a host without an editor callback does not advertise Ctrl+O');
+noCapabilityPanel.unmount();
+let editorRequests = 0;
+const editorCapabilityPanel = mountPanel({ deck: capabilityDeck, cols: 80, rows: 20, onEditorRequest: () => { editorRequests++; } });
+editorCapabilityPanel.handleKey('r', mkKey({}));
+assert.ok(editorCapabilityPanel.render().join('\n').includes('^O'), 'an editor-capable host advertises Ctrl+O');
+editorCapabilityPanel.handleKey('o', mkKey({ ctrl: true }));
+assert.equal(editorRequests, 1, 'Ctrl+O delegates only through the host editor callback');
+editorCapabilityPanel.unmount();
+
 console.log('OK');

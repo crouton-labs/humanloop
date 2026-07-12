@@ -159,7 +159,7 @@ function handleItemReview(
     render();
     return;
   }
-  if (input === ' ') { state.detailExpanded = !state.detailExpanded; render(); return; }
+  if (input === ' ' && state.visuals.get(interaction.id)?.status === 'ready') { state.detailExpanded = !state.detailExpanded; render(); return; }
 
   // Body scroll: u/d, PageUp/PageDown, or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
   // Plain u/d exists because tmux configs commonly bind C-d/C-u for pane scroll
