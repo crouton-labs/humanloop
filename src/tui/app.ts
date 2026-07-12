@@ -280,7 +280,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
 // ── Dir-based resolver (interaction-directory convention) ─────────────────────
 
 export interface ResolveDirOpts {
-  /** Claude session id → per-interaction visual context from history. */
+  /** Originating provider session id → per-interaction visual context from history. */
   sessionId?: string;
   /** Explicit visual generator; overrides the sessionId default. */
   generateVisual?: GenerateVisual;

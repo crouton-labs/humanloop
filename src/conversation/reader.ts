@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -22,9 +22,15 @@ const CLAUDE_DB_PATH = join(homedir(), '.claude', '__store.db');
 const MAX_SESSION_ID_LENGTH = 256;
 const piSessionIndex = new Map<string, Map<string, string[]>>();
 
-/** Legacy Claude-store reader retained for callers that explicitly use Claude sessions. */
-export function readConversation(sessionId: string): ConversationMessage[] {
-  if (!existsSync(CLAUDE_DB_PATH)) throw new Error('Claude conversation store unavailable');
+export interface ConversationReaderOptions {
+  /** Claude SQLite path override for a real-store fixture; production uses Claude's standard store. */
+  claudeDbPath?: string;
+}
+
+/** Read messages from Claude's local conversation store. */
+export function readConversation(sessionId: string, options: ConversationReaderOptions = {}): ConversationMessage[] {
+  const claudeDbPath = options.claudeDbPath ?? CLAUDE_DB_PATH;
+  if (!existsSync(claudeDbPath)) throw new Error('Claude conversation store unavailable');
 
   const query = `
     SELECT bm.message_type,
@@ -32,15 +38,11 @@ export function readConversation(sessionId: string): ConversationMessage[] {
     FROM base_messages bm
     LEFT JOIN user_messages um ON bm.uuid = um.uuid
     LEFT JOIN assistant_messages am ON bm.uuid = am.uuid
-    WHERE bm.session_id = '${sessionId.replace(/'/g, "''")}'
+    WHERE bm.session_id = '${escapeSqlString(sessionId)}'
     ORDER BY bm.timestamp ASC;
   `;
 
-  const raw = execSync(`sqlite3 -json "${CLAUDE_DB_PATH}" "${query.replace(/"/g, '\\"')}"`, {
-    encoding: 'utf8',
-    maxBuffer: 50 * 1024 * 1024,
-  });
-
+  const raw = runSqlite(claudeDbPath, query);
   if (!raw.trim()) return [];
   const rows = JSON.parse(raw) as Array<{ message_type: string; content: string | null }>;
   return rows.flatMap((row) => row.content && (row.message_type === 'user' || row.message_type === 'assistant')
@@ -63,7 +65,9 @@ export async function readPiConversationText(sessionId: string): Promise<string>
   try {
     // parseSessionEntries is the package-root parser. Reading only the SDK-discovered
     // path keeps an untrusted deck id from becoming a filesystem locator.
-    entries = pi.parseSessionEntries(readFileSync(paths[0]!, 'utf8'));
+    const raw = readFileSync(paths[0]!, 'utf8');
+    rejectMalformedCompleteJsonlRecords(raw);
+    entries = pi.parseSessionEntries(raw);
   } catch {
     throw new ConversationReadError('session_unreadable');
   }
@@ -117,6 +121,62 @@ async function buildPiSessionIndex(SessionManager: typeof import('@earendil-work
     else paths.push(session.path);
   }
   return index;
+}
+
+/** Resolve by exact membership across provider stores, never by session-id shape. */
+export async function readConversationText(sessionId: string, options: ConversationReaderOptions = {}): Promise<string> {
+  if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID_LENGTH) throw new ConversationReadError('session_not_found');
+
+  const claudeDbPath = options.claudeDbPath ?? CLAUDE_DB_PATH;
+  const pi = await import('@earendil-works/pi-coding-agent').catch(() => {
+    throw new ConversationReadError('session_unreadable');
+  });
+  const piPaths = await resolvePiSessionPaths(pi.SessionManager, sessionId);
+  const claudeMatches = findClaudeSessionMembership(sessionId, claudeDbPath);
+  const matches = (piPaths.length === 1 ? 1 : 0) + (claudeMatches ? 1 : 0);
+
+  if (piPaths.length > 1 || matches > 1) throw new ConversationReadError('session_ambiguous');
+  if (matches === 0) throw new ConversationReadError('session_not_found');
+  if (claudeMatches) {
+    try {
+      const text = readConversation(sessionId, { claudeDbPath }).map((message) => `${message.role}: ${message.content}`).join('\n\n').trim();
+      if (text === '') throw new ConversationReadError('conversation_empty');
+      return text;
+    } catch (error) {
+      if (error instanceof ConversationReadError) throw error;
+      throw new ConversationReadError('session_unreadable');
+    }
+  }
+  return readPiConversationText(sessionId);
+}
+
+function findClaudeSessionMembership(sessionId: string, claudeDbPath: string): boolean {
+  if (!existsSync(claudeDbPath)) return false;
+  try {
+    return runSqlite(claudeDbPath, `SELECT 1 AS found FROM base_messages WHERE session_id = '${escapeSqlString(sessionId)}' LIMIT 1;`).trim() !== '';
+  } catch {
+    throw new ConversationReadError('session_unreadable');
+  }
+}
+
+function runSqlite(dbPath: string, query: string): string {
+  return execFileSync('sqlite3', ['-json', dbPath, query], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+}
+
+function escapeSqlString(value: string): string { return value.replace(/'/g, "''"); }
+
+/** Reject corrupt committed records, but allow an unterminated tail being concurrently written. */
+function rejectMalformedCompleteJsonlRecords(raw: string): void {
+  const lines = raw.split('\n');
+  const completeLines = lines.slice(0, -1);
+  for (const line of completeLines) {
+    if (line.trim() === '') continue;
+    try {
+      JSON.parse(line);
+    } catch {
+      throw new ConversationReadError('session_unreadable');
+    }
+  }
 }
 
 function isMatchingHeader(entry: FileEntry | undefined, sessionId: string): boolean {
