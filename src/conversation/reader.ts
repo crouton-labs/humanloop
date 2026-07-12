@@ -165,18 +165,99 @@ function runSqlite(dbPath: string, query: string): string {
 
 function escapeSqlString(value: string): string { return value.replace(/'/g, "''"); }
 
-/** Reject corrupt committed records, but allow an unterminated tail being concurrently written. */
+/** Reject corrupt records while allowing only an unterminated JSON-object prefix being concurrently written. */
 function rejectMalformedCompleteJsonlRecords(raw: string): void {
   const lines = raw.split('\n');
-  const completeLines = lines.slice(0, -1);
-  for (const line of completeLines) {
+  for (const line of lines.slice(0, -1)) {
     if (line.trim() === '') continue;
-    try {
-      JSON.parse(line);
-    } catch {
-      throw new ConversationReadError('session_unreadable');
-    }
+    JSON.parse(line);
   }
+  const tail = lines.at(-1)!;
+  if (!raw.endsWith('\n') && tail !== '' && !isIncompleteJsonObjectPrefix(tail)) JSON.parse(tail);
+}
+
+function isIncompleteJsonObjectPrefix(source: string): boolean {
+  let offset = 0;
+  type Result = 'complete' | 'incomplete' | 'malformed';
+  const whitespace = () => { while (/\s/.test(source[offset] ?? '')) offset += 1; };
+  const string = (): Result => {
+    if (source[offset++] !== '"') return 'malformed';
+    while (offset < source.length) {
+      const character = source[offset++]!;
+      if (character === '"') return 'complete';
+      if (character < ' ') return 'malformed';
+      if (character === '\\') {
+        if (offset === source.length) return 'incomplete';
+        const escape = source[offset++]!;
+        if (!'"\\/bfnrtu'.includes(escape)) return 'malformed';
+        if (escape === 'u') {
+          for (let count = 0; count < 4; count += 1) {
+            if (offset === source.length) return 'incomplete';
+            if (!/[0-9a-f]/i.test(source[offset++]!)) return 'malformed';
+          }
+        }
+      }
+    }
+    return 'incomplete';
+  };
+  const value = (): Result => {
+    whitespace();
+    const character = source[offset];
+    if (character === undefined) return 'incomplete';
+    if (character === '"') return string();
+    if (character === '{') return object();
+    if (character === '[') return array();
+    for (const literal of ['true', 'false', 'null']) {
+      if (source.slice(offset, offset + literal.length) === literal) { offset += literal.length; return 'complete'; }
+      if (literal.startsWith(source.slice(offset))) return 'incomplete';
+    }
+    if (character === '-' || /[0-9]/.test(character)) {
+      const match = source.slice(offset).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (match === null) return character === '-' ? 'incomplete' : 'malformed';
+      offset += match[0].length;
+      return 'complete';
+    }
+    return 'malformed';
+  };
+  const object = (): Result => {
+    offset += 1;
+    whitespace();
+    if (source[offset] === '}') { offset += 1; return 'complete'; }
+    while (true) {
+      if (offset === source.length) return 'incomplete';
+      const key = string();
+      if (key !== 'complete') return key;
+      whitespace();
+      if (offset === source.length) return 'incomplete';
+      if (source[offset++] !== ':') return 'malformed';
+      const item = value();
+      if (item !== 'complete') return item;
+      whitespace();
+      if (offset === source.length) return 'incomplete';
+      const separator = source[offset++]!;
+      if (separator === '}') return 'complete';
+      if (separator !== ',') return 'malformed';
+      whitespace();
+    }
+  };
+  const array = (): Result => {
+    offset += 1;
+    whitespace();
+    if (source[offset] === ']') { offset += 1; return 'complete'; }
+    while (true) {
+      const item = value();
+      if (item !== 'complete') return item;
+      whitespace();
+      if (offset === source.length) return 'incomplete';
+      const separator = source[offset++]!;
+      if (separator === ']') return 'complete';
+      if (separator !== ',') return 'malformed';
+      whitespace();
+    }
+  };
+  const result = value();
+  whitespace();
+  return result === 'incomplete' && offset === source.length && source.trimStart().startsWith('{');
 }
 
 function isMatchingHeader(entry: FileEntry | undefined, sessionId: string): boolean {

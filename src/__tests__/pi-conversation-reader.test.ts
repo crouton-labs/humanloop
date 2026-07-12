@@ -25,7 +25,9 @@ writeFileSync(join(sessions, 'empty', 'unrelated.jsonl'), `${JSON.stringify({ ty
 mkdirSync(join(sessions, 'corrupt'), { recursive: true });
 writeFileSync(join(sessions, 'corrupt', 'unrelated.jsonl'), `${JSON.stringify({ type: 'session', version: 3, id: 'corrupt-session', timestamp: '2026-07-12T00:00:00.000Z', cwd: '/corrupt' })}\n${JSON.stringify({ type: 'message', id: 'corrupt-user', parentId: null, timestamp: '2026-07-12T00:00:01.000Z', message: { role: 'user', content: 'usable context must not be used', timestamp: 1 } })}\n{not json}\n`);
 mkdirSync(join(sessions, 'incomplete-tail'), { recursive: true });
-writeFileSync(join(sessions, 'incomplete-tail', 'unrelated.jsonl'), `${JSON.stringify({ type: 'session', version: 3, id: 'incomplete-tail-session', timestamp: '2026-07-12T00:00:00.000Z', cwd: '/tail' })}\n${JSON.stringify({ type: 'message', id: 'tail-user', parentId: null, timestamp: '2026-07-12T00:00:01.000Z', message: { role: 'user', content: 'complete context', timestamp: 1 } })}\n{concurrently-writing`);
+writeFileSync(join(sessions, 'incomplete-tail', 'unrelated.jsonl'), `${JSON.stringify({ type: 'session', version: 3, id: 'incomplete-tail-session', timestamp: '2026-07-12T00:00:00.000Z', cwd: '/tail' })}\n${JSON.stringify({ type: 'message', id: 'tail-user', parentId: null, timestamp: '2026-07-12T00:00:01.000Z', message: { role: 'user', content: 'complete context', timestamp: 1 } })}\n{"type":"message"`);
+mkdirSync(join(sessions, 'malformed-tail'), { recursive: true });
+writeFileSync(join(sessions, 'malformed-tail', 'unrelated.jsonl'), `${JSON.stringify({ type: 'session', version: 3, id: 'malformed-tail-session', timestamp: '2026-07-12T00:00:00.000Z', cwd: '/malformed-tail' })}\n${JSON.stringify({ type: 'message', id: 'malformed-tail-user', parentId: null, timestamp: '2026-07-12T00:00:01.000Z', message: { role: 'user', content: 'usable context', timestamp: 1 } })}\ngarbage`);
 
 const claudeDbPath = join(root, 'claude-store.db');
 execFileSync('sqlite3', [claudeDbPath, `
@@ -51,6 +53,7 @@ await assert.rejects(readPiConversationText('duplicate-session'), (error: unknow
 await assert.rejects(readPiConversationText('empty-session'), (error: unknown) => error instanceof ConversationReadError && error.code === 'conversation_empty');
 await assert.rejects(readPiConversationText('corrupt-session'), (error: unknown) => error instanceof ConversationReadError && error.code === 'session_unreadable');
 assert.match(await readPiConversationText('incomplete-tail-session'), /user: complete context/);
+await assert.rejects(readPiConversationText('malformed-tail-session'), (error: unknown) => error instanceof ConversationReadError && error.code === 'session_unreadable');
 
 const claudeContext = await readConversationText('claude-session-exact-42', { claudeDbPath });
 assert.match(claudeContext, /user: Restore the legacy Claude visual path\./);
