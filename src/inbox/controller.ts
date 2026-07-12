@@ -39,6 +39,8 @@ export class InboxController {
   private items: TicketSummary[] = [];
   private selectedDir: string | undefined;
   private selectedIndex = 0;
+  /** Scroll state belongs to the passive preview, never to an editable deck. */
+  private previewScrollOffset = 0;
   private screen: Screen = 'list';
   private adapter: DeckAdapter | undefined;
   private reviewAdapter: ReviewAdapter | undefined;
@@ -95,10 +97,12 @@ export class InboxController {
     if (this.items.length === 0) {
       this.selectedIndex = 0;
       this.selectedDir = undefined;
+      this.previewScrollOffset = 0;
       return;
     }
     this.selectedIndex = Math.min(priorIndex, this.items.length - 1);
     this.selectedDir = this.items[this.selectedIndex]!.dir;
+    this.previewScrollOffset = 0;
   }
 
   invalidate(): void { this.rescan(); this.repaint(); }
@@ -114,7 +118,7 @@ export class InboxController {
   render(): string[] {
     const geometry = inboxLayout(this.cols, this.rows, this.screen);
     if (geometry.mode === 'minimum') return [`${YELLOW}Resize terminal to at least 60×18 to use inbox.${RESET}`];
-    const list = buildInboxLines(this.items, geometry.listWidth, this.selectedIndex);
+    const list = buildInboxLines(this.items, geometry.listWidth, this.selectedIndex, geometry.height);
     const detail = this.detailLines(geometry.detailWidth, geometry.height);
     if (geometry.mode === 'list') return this.withStatus(list);
     if (geometry.mode === 'detail') return this.withStatus(detail);
@@ -154,7 +158,12 @@ export class InboxController {
       return;
     }
     if (key.escape || input === 'q') { this.close(); return; }
-    if (input === 'j' || key.downArrow) this.select(this.selectedIndex + 1);
+    // Passive previews share the deck's documented scroll bindings without
+    // claiming or mounting an editable panel. Ctrl+E/Y are line-wise aliases;
+    // u/d and Ctrl+U/D/Page keys move a useful chunk.
+    if (input === 'd' || key.pageDown || (key.ctrl && (input === 'd' || input === 'e'))) this.scrollPreview(input === 'e' ? 1 : 10);
+    else if (input === 'u' || key.pageUp || (key.ctrl && (input === 'u' || input === 'y'))) this.scrollPreview(input === 'y' ? -1 : -10);
+    else if (input === 'j' || key.downArrow) this.select(this.selectedIndex + 1);
     else if (input === 'k' || key.upArrow) this.select(this.selectedIndex - 1);
     else if (key.return || input === 'a') this.activate();
     this.repaint();
@@ -170,10 +179,8 @@ export class InboxController {
     this.claim = { dir: item.dir, token: claim.token };
     const deck = readJson<Deck>(deckPath(item.dir));
     if (deck === null) { releaseClaim(item.dir, claim.token); this.claim = undefined; this.invalidate(); return; }
-    if (item.interactionKind === 'notify') {
-      void this.complete([{ id: deck.interactions[0]?.id ?? 'notify', selectedOptionId: deck.interactions[0]?.options[0]?.id }]);
-      return;
-    }
+    // Notifications use the same canonical deck panel as every other deck:
+    // opening is not acknowledgement; panel completion is.
     this.screen = 'detail';
     this.adapter = new DeckAdapter({
       dir: item.dir,
@@ -379,8 +386,14 @@ export class InboxController {
 
   private select(index: number): void {
     if (this.items.length === 0) return;
-    this.selectedIndex = Math.max(0, Math.min(index, this.items.length - 1));
+    const next = Math.max(0, Math.min(index, this.items.length - 1));
+    if (next !== this.selectedIndex) this.previewScrollOffset = 0;
+    this.selectedIndex = next;
     this.selectedDir = this.items[this.selectedIndex]!.dir;
+  }
+
+  private scrollPreview(delta: number): void {
+    this.previewScrollOffset = Math.max(0, this.previewScrollOffset + delta);
   }
 
   private detailSize(): { cols: number; rows: number } {
@@ -393,6 +406,15 @@ export class InboxController {
     if (this.deckBrowserStarting) return [`  ${DIM}Opening browser review…${RESET}`];
     if (this.adapter !== undefined) return this.adapter.render();
     const selected = this.items[this.selectedIndex];
+    if (selected === undefined) return this.previewViewport(this.passiveDetailLines(width), width, rows);
+    const footer = selected.kind === 'deck'
+      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser  ${DIM}q${RESET} close`]
+      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}q${RESET} close`];
+    return [...this.previewViewport(this.passiveDetailLines(width), width, Math.max(0, rows - footer.length)), ...footer.map((line) => clipLine(line, width))];
+  }
+
+  private passiveDetailLines(width: number): string[] {
+    const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
     const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind} · ${sourceLabel(selected.source)}${RESET}`];
     if (selected.kind === 'review') {
@@ -404,27 +426,40 @@ export class InboxController {
       try { md = readFileSync(selected.file, 'utf8'); } catch { md = ''; }
       if (md === '') lines.push(`  ${DIM}(source file unavailable)${RESET}`);
       else for (const rendered of renderMarkdown(md, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
-      lines.push('', `  ${DIM}Enter${RESET} start review  ${DIM}j/k${RESET} select  ${DIM}q${RESET} close`);
-      while (lines.length < rows) lines.push('');
-      // Rendered markdown carries ANSI; slicing by column count would sever
-      // escape sequences, so review preview lines are returned unsliced.
-      return lines;
-    }
-    if (selected.kind === 'deck') {
+    } else {
       const deck = readJson<Deck>(deckPath(selected.dir));
       if (deck !== null) {
         for (const interaction of deck.interactions) {
           lines.push('', `  ${BOLD}${interaction.title}${RESET}`);
+          if (interaction.subtitle) for (const rendered of renderMarkdown(interaction.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+          if (interaction.body) for (const rendered of renderMarkdown(interaction.body, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
           for (const option of interaction.options) lines.push(`    ${DIM}• ${option.label}${RESET}`);
         }
         const saved = readJson<{ responses?: unknown[] }>(progressPath(selected.dir))?.responses;
         lines.push('', `  ${DIM}${Array.isArray(saved) ? saved.length : 0} saved responses${RESET}`);
       }
     }
-    if (selected.subtitle) lines.push('', `  ${selected.subtitle}`);
-    lines.push('', `  ${DIM}Enter${RESET} open  ${DIM}j/k${RESET} select  ${DIM}q${RESET} close`);
-    while (lines.length < rows) lines.push('');
-    return lines.map((line) => line.slice(0, width));
+    return lines.map((line) => clipLine(line, width));
+  }
+
+  private previewViewport(lines: string[], width: number, rows: number): string[] {
+    if (rows < 1) return [];
+    const maxOffset = Math.max(0, lines.length - Math.max(1, rows - 1));
+    this.previewScrollOffset = Math.min(this.previewScrollOffset, maxOffset);
+    const start = this.previewScrollOffset;
+    const hasAbove = start > 0;
+    // Reserve an indicator row before selecting content so a remaining tail is
+    // always signalled instead of silently disappearing below the viewport.
+    let contentRows = rows - (hasAbove ? 1 : 0);
+    let end = Math.min(lines.length, start + contentRows);
+    const hasBelow = end < lines.length;
+    if (hasBelow) { contentRows--; end = Math.min(lines.length, start + Math.max(0, contentRows)); }
+    const out: string[] = [];
+    if (hasAbove) out.push(`  ${DIM}↑ more above${RESET}`);
+    out.push(...lines.slice(start, end));
+    if (hasBelow) out.push(`  ${DIM}↓ more below${RESET}`);
+    while (out.length < rows) out.push('');
+    return out.map((line) => clipLine(line, width));
   }
 
   private withStatus(lines: string[]): string[] {

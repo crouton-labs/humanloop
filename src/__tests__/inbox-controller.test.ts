@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Deck, TicketSummary } from '../types.js';
 import { inboxLayout } from '../inbox/layout.js';
 import { InboxController } from '../inbox/controller.js';
+import { buildInboxLines } from '../inbox/tui.js';
 import { registerInboxRoot } from '../inbox/registry.js';
 import { submitDeck, cancelTicketResult } from '../inbox/tickets.js';
 import { scanInbox } from '../inbox/scan.js';
@@ -16,6 +17,10 @@ assert.deepEqual(inboxLayout(120, 30), { mode: 'two-column', listWidth: 40, deta
 assert.equal(inboxLayout(80, 24).mode, 'list');
 assert.equal(inboxLayout(80, 24, 'detail').mode, 'detail');
 assert.equal(inboxLayout(59, 18).mode, 'minimum');
+const crowded = Array.from({ length: 20 }, (_, index) => item(`ticket-${index}`));
+const visibleRows = buildInboxLines(crowded, 40, 10, 8).join('\n');
+assert.ok(visibleRows.includes('ticket-10'), 'list viewport keeps the selected ticket visible');
+assert.ok(visibleRows.includes('↑') && visibleRows.includes('↓'), 'list viewport signals tickets above and below');
 
 let rows = [item('b'), item('a')];
 const stable = new InboxController({ cols: 100, rows: 24, scan: () => rows });
@@ -67,13 +72,25 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.deepEqual(finished, [{ id: 'one', selectedOptionId: 'yes' }], 'q finishes the current partial deck rather than closing the inbox');
 keys.close();
 
-const notification = submitDeck({ root, id: 'notification', deck: { title: 'notification', interactions: [{ id: 'notify', title: 'Read this', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] } });
+const notificationBody = ['Notification body that must be visible before acknowledgement.', ...Array.from({ length: 30 }, (_, index) => `- Notice detail ${index}`)].join('\n');
+const notification = submitDeck({ root, id: 'notification', deck: { title: 'notification', interactions: [{ id: 'notify', title: 'Read this', kind: 'notify', subtitle: 'Read the complete notice', body: notificationBody, options: [{ id: 'ok', label: 'OK' }] }] } });
 let acknowledgement: import('../types.js').InteractionResponse[] | undefined;
 const notifyController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async (_dir, responses) => { acknowledgement = responses; } });
 while (notifyController.snapshot().selectedDir !== notification.dir) notifyController.handleKey('j', key());
+assert.ok(notifyController.render().join('\n').includes('Notification body'), 'passive deck preview renders notification bodies');
+assert.ok(notifyController.render().join('\n').includes('Enter') && notifyController.render().join('\n').includes('c comment'), 'preview keeps full-ticket controls visible');
+notifyController.handleKey('d', key());
+assert.ok(notifyController.render().join('\n').includes('↑ more above'), 'd scrolls the passive preview');
+const beforeMove = notifyController.snapshot().selectedDir;
+notifyController.handleKey('j', key());
+const returnKey = notifyController.snapshot().selectedDir === beforeMove ? 'j' : 'k';
+if (returnKey === 'j') notifyController.handleKey('k', key());
+while (notifyController.snapshot().selectedDir !== notification.dir) notifyController.handleKey(returnKey, key());
+assert.ok(!notifyController.render().join('\n').includes('↑ more above'), 'selection changes reset passive preview scrolling');
 notifyController.handleKey('a', key());
 await new Promise((resolve) => setImmediate(resolve));
-assert.deepEqual(acknowledgement, [{ id: 'notify', selectedOptionId: 'ok' }], 'a acknowledges a notify deck from the list');
+assert.equal(notifyController.snapshot().screen, 'detail', 'activation opens a notification in its deck');
+assert.equal(acknowledgement, undefined, 'activation does not acknowledge a notification');
 notifyController.close();
 
 const replacement = submitDeck({ root, id: 'replace', deck: { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'drop', title: 'Drop', options: [{ id: 'no', label: 'No', shortcut: 'n' }] }] } });
