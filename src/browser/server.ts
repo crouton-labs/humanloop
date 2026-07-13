@@ -57,7 +57,7 @@ export interface WebServerOpts {
    * safe for this callback to `stop()` the server (which force-closes all
    * open sockets) without racing the ack the browser is waiting on.
    */
-  onSubmit?: (responses: InteractionResponse[], completedAt: string, responsePath: string) => void;
+  onSubmit?: (responses: InteractionResponse[], completedAt: string, responsePath: string) => void | Promise<void>;
   /** Controller-owned finalization for a claimed inbox ticket. When supplied,
    * this server never writes response.json itself. */
   finalize?: (responses: InteractionResponse[]) => Promise<{ completedAt: string; responsePath: string }>;
@@ -95,6 +95,10 @@ export interface WebServerHandle {
    *  acks (closed, network hiccup) can't hang take-back forever. Safe to call
    *  with zero open sockets (e.g. the browser was never opened). */
   requestTakeBack(): Promise<void>;
+  /** The accepted submit currently completing its HTTP ack and owner convergence,
+   * if one has crossed the server boundary. `true` means the normal submit
+   * finish path completed; `false` means finalization was rejected. */
+  pendingSubmitLifecycle?(): Promise<boolean> | undefined;
   /** Stop listening, close all sockets (WS and HTTP), and tear down. */
   stop(): Promise<void>;
 }
@@ -201,6 +205,12 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
   let deck = opts.deck;
   const dir = opts.dir;
   let submitted: { responsePath: string; completedAt: string } | null = null;
+  let submitting = false;
+  // Created synchronously when an accepted request enters its finalizer, then
+  // kept pending through response flush and async owner convergence. A
+  // take-back can therefore serialize with the complete submit lifecycle,
+  // rather than racing only its persistence portion.
+  let pendingSubmitLifecycle: Promise<boolean> | undefined;
   const scaffold = createServerScaffold();
 
   scaffold.setHandler(async (req, res) => {
@@ -240,7 +250,21 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
         sendJson(res, 409, { ok: false, error: 'already_submitted', ...submitted });
         return;
       }
+      if (submitting) {
+        sendJson(res, 409, { ok: false, error: 'submit_in_progress' });
+        return;
+      }
+      submitting = true;
       const responses = parsed.responses as InteractionResponse[];
+      let resolveSubmitLifecycle!: (submitted: boolean) => void;
+      let submitLifecycleSettled = false;
+      const settleSubmitLifecycle = (didSubmit: boolean): void => {
+        if (submitLifecycleSettled) return;
+        submitLifecycleSettled = true;
+        resolveSubmitLifecycle(didSubmit);
+      };
+      pendingSubmitLifecycle = new Promise<boolean>((resolve) => { resolveSubmitLifecycle = resolve; });
+      req.once('aborted', () => settleSubmitLifecycle(false));
       let completedAt: string;
       let responsePath: string;
       try {
@@ -253,6 +277,8 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
           clearProgress(dir);
         }
       } catch (error) {
+        submitting = false;
+        settleSubmitLifecycle(false);
         sendJson(res, 400, { error: 'invalid_submit', message: error instanceof Error ? error.message : String(error) });
         return;
       }
@@ -264,8 +290,17 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
       // Ack-ordering guarantee: the HTTP caller must always receive its 200
       // body before any lifecycle teardown can close its socket.
       res.once('finish', () => {
-        opts.onSubmit?.(responses, completedAt, responsePath);
+        void Promise.resolve(opts.onSubmit?.(responses, completedAt, responsePath)).then(
+          () => settleSubmitLifecycle(true),
+          () => settleSubmitLifecycle(false),
+        );
       });
+      // A disconnected client never emits `finish`; unblock take-back so it
+      // can reclaim authority rather than leaving terminal input frozen.
+      res.once('close', () => {
+        if (!res.writableFinished) settleSubmitLifecycle(false);
+      });
+      res.once('error', () => settleSubmitLifecycle(false));
       sendJson(res, 200, { ok: true, responsePath, completedAt });
       return;
     }
@@ -286,6 +321,9 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
     activate(): void {},
     async requestTakeBack(): Promise<void> {
       await scaffold.broadcast({ type: 'taken-back' });
+    },
+    pendingSubmitLifecycle(): Promise<boolean> | undefined {
+      return pendingSubmitLifecycle;
     },
     stop(): Promise<void> {
       return scaffold.stop();

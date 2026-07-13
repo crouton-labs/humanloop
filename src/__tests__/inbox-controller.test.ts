@@ -10,6 +10,7 @@ import { registerInboxRoot } from '../inbox/registry.js';
 import { claimTicket } from '../inbox/claim.js';
 import { submitDeck, cancelTicketResult, finalizeDeck } from '../inbox/tickets.js';
 import { scanInbox } from '../inbox/scan.js';
+import { startWebServer } from '../browser/server.js';
 
 const key = (part: Partial<import('../tui/terminal.js').Key> = {}) => ({ ctrl: false, meta: false, upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, wordLeft: false, wordRight: false, home: false, end: false, pageUp: false, pageDown: false, del: false, return: false, newline: false, escape: false, tab: false, backspace: false, ...part });
 const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
@@ -195,37 +196,63 @@ assert.equal(browserStopped, true, 'closing during async browser startup stops t
 assert.equal(raceOpened, false, 'closing during async browser startup never opens a browser');
 
 const takeBackRace = submitDeck({ root, id: 'browser-take-back-race', deck: deck('browser take-back race') });
-let raceFinalize: ((responses: import('../types.js').InteractionResponse[]) => Promise<{ completedAt: string; responsePath: string }>) | undefined;
 let releaseFinish!: () => void;
+let signalFinishStarted!: () => void;
+let signalCleanup!: () => void;
 let raceFinishCalls = 0;
+let cleanupCalls = 0;
+let takeBackUrl = '';
 const finishGate = new Promise<void>((resolve) => { releaseFinish = resolve; });
-const takeBackHandle = {
-  url: 'http://127.0.0.1:9998/', port: 9998, activate: () => {}, requestTakeBack: async () => {}, stop: async () => {},
-};
+const finishStarted = new Promise<void>((resolve) => { signalFinishStarted = resolve; });
+const cleanupFinished = new Promise<void>((resolve) => { signalCleanup = resolve; });
 const takeBackController = new InboxController({
   roots: [root], cols: 100, rows: 24,
-  completeDeck: async (dir, responses, token) => { raceFinishCalls++; await finishGate; finalizeDeck(dir, responses, token); },
-  startDeckBrowser: async (opts) => { raceFinalize = opts.finalize; return takeBackHandle; },
-  openBrowser: () => {},
+  completeDeck: async (dir, responses, token) => {
+    raceFinishCalls++;
+    signalFinishStarted();
+    await finishGate;
+    finalizeDeck(dir, responses, token);
+  },
+  startDeckBrowser: async (opts) => {
+    const server = await startWebServer(opts);
+    return {
+      ...server,
+      stop: async () => {
+        cleanupCalls++;
+        await server.stop();
+        signalCleanup();
+      },
+    };
+  },
+  openBrowser: (url) => { takeBackUrl = url; },
 });
 while (takeBackController.snapshot().selectedDir !== takeBackRace.dir) takeBackController.handleKey('j', key());
 takeBackController.activate();
 takeBackController.handleKey('w', key());
 await new Promise((resolve) => setImmediate(resolve));
-assert.ok(raceFinalize !== undefined, 'browser handoff exposes its controller finalizer');
-const delayedBrowserSubmit = raceFinalize!([]);
-const concurrentBrowserSubmit = raceFinalize!([]);
+const submitDuringTakeBack = fetch(`${takeBackUrl}api/submit`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ responses: [] }),
+});
+await finishStarted;
 takeBackController.handleKey('w', key());
 takeBackController.handleKey('r', key());
-assert.equal(takeBackController.snapshot().inputBuffer, undefined, 'terminal input remains blocked while take-back waits for a browser finalizer');
+assert.equal(takeBackController.snapshot().inputBuffer, undefined, 'terminal input remains blocked while take-back waits for the complete browser submit lifecycle');
 releaseFinish();
-await Promise.all([delayedBrowserSubmit, concurrentBrowserSubmit]);
-assert.equal(raceFinishCalls, 1, 'concurrent browser submits share one controller finalizer');
-await new Promise((resolve) => setImmediate(resolve));
-assert.equal(takeBackController.snapshot().screen, 'list', 'take-back waits for the in-flight browser finalizer before terminal control resumes');
+const takeBackSubmit = await submitDuringTakeBack;
+assert.equal(takeBackSubmit.status, 200, 'a submit already in flight when take-back starts receives its canonical HTTP success');
+assert.equal((await takeBackSubmit.json() as { ok: boolean }).ok, true);
+await cleanupFinished;
+assert.equal(raceFinishCalls, 1, 'the winning browser request finalizes exactly once');
+assert.equal(cleanupCalls, 1, 'the winning request performs normal browser cleanup exactly once');
+assert.equal(takeBackController.snapshot().screen, 'list', 'the successful submit, not take-back, converges the controller after its ack');
 takeBackController.close();
 
 const widthTicket = submitDeck({ root, id: 'visual-width', deck: { ...deck('visual width'), source: { originatingConversationSessionId: 'width-session' } } });
+// Drain the ticket creation's fs event before installing the selected-ticket
+// watcher; otherwise that initial event can be mistaken for a live reload.
+await new Promise((resolve) => setImmediate(resolve));
 const visualWidths: number[] = [];
 const widthController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, visualGeneratorForSession: () => async (_interaction, cols) => { visualWidths.push(cols); return { ok: true, ansi: 'x'.repeat(cols), markdown: 'context markdown' }; } });
 while (widthController.snapshot().selectedDir !== widthTicket.dir) widthController.handleKey('j', key());

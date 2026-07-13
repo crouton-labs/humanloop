@@ -263,7 +263,7 @@ export class InboxController {
         dir: item.dir,
         deck,
         finalize: async (responses) => this.finalizeDeckBrowser(item.dir, claim.token, generation, responses),
-        onSubmit: () => { void this.finishDeckBrowser(item.dir, browser); },
+        onSubmit: () => this.finishDeckBrowser(item.dir, browser),
       });
       // Closing, taking back, or losing the claim while listen() was pending
       // retires this start. Stop the fresh listener before it can open a tab.
@@ -331,7 +331,12 @@ export class InboxController {
     this.deckBrowserTakingBack = true;
     this.deckBrowserGeneration++;
     try {
-      await this.deckBrowserFinalizing?.catch(() => undefined);
+      // A request that crossed the server boundary before this ownership change
+      // must own its normal finish path: it includes the HTTP 200 flush and
+      // onSubmit convergence before it stops the listener. Do not force-close
+      // that response after merely observing controller persistence.
+      const lifecycle = browser.pendingSubmitLifecycle?.();
+      if (lifecycle !== undefined && await lifecycle.catch(() => false)) return;
       await browser.requestTakeBack();
       await browser.stop();
     } finally {
