@@ -1,8 +1,7 @@
 ---
 kind: knowledge
 name: humanloop
-when-and-why-to-read: When working in humanloop, this knowledge should be read
-  because it is the project's operating guide.
+when-and-why-to-read: When working in humanloop, this knowledge should be read because its ESM import-extension and yalc-link conventions keep changes from compiling clean yet failing at runtime or shipping a broken package to consumers.
 short-form: Constraints
 system-prompt-visibility: content
 file-read-visibility: content
