@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Deck, TicketSummary } from '../types.js';
@@ -248,6 +249,80 @@ assert.equal(raceFinishCalls, 1, 'the winning browser request finalizes exactly 
 assert.equal(cleanupCalls, 1, 'the winning request performs normal browser cleanup exactly once');
 assert.equal(takeBackController.snapshot().screen, 'list', 'the successful submit, not take-back, converges the controller after its ack');
 takeBackController.close();
+
+const disconnectedTakeBack = submitDeck({ root, id: 'browser-disconnect-take-back', deck: deck('browser disconnect take back') });
+let releaseDisconnectedFinish!: () => void;
+let signalDisconnectedFinishStarted!: () => void;
+let signalDisconnectedCleanup!: () => void;
+let disconnectedFinalizeCalls = 0;
+let disconnectedCleanupCalls = 0;
+let disconnectedUrl = '';
+let disconnectServer: Awaited<ReturnType<typeof startWebServer>> | undefined;
+const disconnectedFinishGate = new Promise<void>((resolve) => { releaseDisconnectedFinish = resolve; });
+const disconnectedFinishStarted = new Promise<void>((resolve) => { signalDisconnectedFinishStarted = resolve; });
+const disconnectedCleanupFinished = new Promise<void>((resolve) => { signalDisconnectedCleanup = resolve; });
+const disconnectedController = new InboxController({
+  roots: [root], cols: 100, rows: 24,
+  completeDeck: async (dir, responses, token) => {
+    disconnectedFinalizeCalls++;
+    signalDisconnectedFinishStarted();
+    await disconnectedFinishGate;
+    finalizeDeck(dir, responses, token);
+  },
+  startDeckBrowser: async (opts) => {
+    const server = await startWebServer(opts);
+    disconnectServer = server;
+    return {
+      ...server,
+      stop: async () => {
+        disconnectedCleanupCalls++;
+        await server.stop();
+        signalDisconnectedCleanup();
+      },
+    };
+  },
+  openBrowser: (url) => { disconnectedUrl = url; },
+});
+while (disconnectedController.snapshot().selectedDir !== disconnectedTakeBack.dir) disconnectedController.handleKey('j', key());
+disconnectedController.activate();
+disconnectedController.handleKey('w', key());
+await new Promise((resolve) => setImmediate(resolve));
+let destroySubmit!: () => void;
+const disconnectedSubmit = new Promise<void>((resolve) => {
+  const request = httpRequest(`${disconnectedUrl}api/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  request.once('error', resolve);
+  request.once('close', resolve);
+  request.end(JSON.stringify({ responses: [] }));
+  destroySubmit = () => request.destroy();
+});
+await disconnectedFinishStarted;
+const lifecycle = disconnectServer?.pendingSubmitLifecycle();
+assert.notEqual(lifecycle, undefined, 'accepted request exposes its pending lifecycle before finalization settles');
+destroySubmit();
+await disconnectedSubmit;
+// Let the server observe the close while the finalizer remains gated.
+await new Promise((resolve) => setImmediate(resolve));
+disconnectedController.handleKey('w', key());
+disconnectedController.handleKey('r', key());
+assert.equal(disconnectedController.snapshot().inputBuffer, undefined, 'terminal input remains blocked while take-back waits for a disconnected finalizer');
+releaseDisconnectedFinish();
+let lifecycleTimeout!: ReturnType<typeof setTimeout>;
+const lifecycleDeadline = new Promise<never>((_, reject) => {
+  lifecycleTimeout = setTimeout(() => reject(new Error('disconnected submit lifecycle did not settle')), 200);
+});
+try {
+  assert.equal(await Promise.race([lifecycle, lifecycleDeadline]), true, 'a persisted submit settles its lifecycle true after client disconnect');
+} finally {
+  clearTimeout(lifecycleTimeout);
+}
+await disconnectedCleanupFinished;
+assert.equal(disconnectedFinalizeCalls, 1, 'a disconnected winning request finalizes exactly once');
+assert.equal(disconnectedCleanupCalls, 1, 'a persisted disconnected request converges and cleans up exactly once');
+assert.equal(disconnectedController.snapshot().screen, 'list', 'take-back terminates through the persisted submit convergence after client disconnect');
+disconnectedController.close();
 
 const widthTicket = submitDeck({ root, id: 'visual-width', deck: { ...deck('visual width'), source: { originatingConversationSessionId: 'width-session' } } });
 // Drain the ticket creation's fs event before installing the selected-ticket

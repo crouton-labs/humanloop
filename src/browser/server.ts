@@ -52,10 +52,10 @@ export interface WebServerOpts {
    * exactly once per server instance, only for the first accepted submit
    * (later submits get a 409 and never re-fire this). `responsePath`/
    * `completedAt` are already persisted to disk — the caller converges the
-   * host surface, it must NOT write the result again. Fired only after the
-   * submit's own HTTP 200 has finished flushing to its socket, so it is
-   * safe for this callback to `stop()` the server (which force-closes all
-   * open sockets) without racing the ack the browser is waiting on.
+   * host surface, it must NOT write the result again. For a connected caller,
+   * fires only after its HTTP 200 finishes, so this callback can `stop()` the
+   * server without racing that ack. If the client disconnects after accepted
+   * persistence, it fires without waiting for an impossible finish.
    */
   onSubmit?: (responses: InteractionResponse[], completedAt: string, responsePath: string) => void | Promise<void>;
   /** Controller-owned finalization for a claimed inbox ticket. When supplied,
@@ -264,9 +264,55 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
         resolveSubmitLifecycle(didSubmit);
       };
       pendingSubmitLifecycle = new Promise<boolean>((resolve) => { resolveSubmitLifecycle = resolve; });
-      req.once('aborted', () => settleSubmitLifecycle(false));
       let completedAt: string;
       let responsePath: string;
+      // Convergence (owner onSubmit) must run exactly once for a persisted
+      // success, regardless of whether the client is still connected. The
+      // `finish` gate below only exists to preserve ack-ordering for a live
+      // caller; once the client is gone there is no ordering to protect.
+      let convergenceStarted = false;
+      const runConvergence = (): void => {
+        if (convergenceStarted) return;
+        convergenceStarted = true;
+        void Promise.resolve(opts.onSubmit?.(responses, completedAt, responsePath)).then(
+          () => settleSubmitLifecycle(true),
+          () => settleSubmitLifecycle(false),
+        );
+      };
+      // Observe client disconnect BEFORE awaiting the finalizer. If the
+      // client leaves while finalization is still pending we must NOT declare
+      // the accepted submit lost — the finalizer may still persist, in which
+      // case convergence must run. Defer judgment until the finalizer settles.
+      let finalizePending = true;
+      let successReady = false;
+      let responseFinished = false;
+      let clientGone = false;
+      const onResponseFinished = (): void => {
+        responseFinished = true;
+        if (successReady && submitted !== null) runConvergence();
+      };
+      const onClientGone = (): void => {
+        // `writableFinished` only means end() was called; a peer can vanish
+        // before the `finish` event. Only finish proves the live caller got
+        // through the response boundary.
+        if (responseFinished) return;
+        if (finalizePending || !successReady) {
+          clientGone = true; // decide once finalization and convergence broadcast settle
+          return;
+        }
+        if (submitted !== null) {
+          // Accepted submit persisted but the client left before its body
+          // flushed — converge once; no live caller remains to protect.
+          runConvergence();
+        } else {
+          // The finalizer rejected: the submit was genuinely lost.
+          settleSubmitLifecycle(false);
+        }
+      };
+      req.once('aborted', onClientGone);
+      res.once('finish', onResponseFinished);
+      res.once('close', onClientGone);
+      res.once('error', onClientGone);
       try {
         if (opts.finalize !== undefined) {
           ({ completedAt, responsePath } = await opts.finalize(responses));
@@ -277,30 +323,30 @@ async function startDeckServer(opts: WebServerOpts): Promise<WebServerHandle> {
           clearProgress(dir);
         }
       } catch (error) {
+        finalizePending = false;
         submitting = false;
         settleSubmitLifecycle(false);
         sendJson(res, 400, { error: 'invalid_submit', message: error instanceof Error ? error.message : String(error) });
         return;
       }
+      finalizePending = false;
       submitted = { responsePath, completedAt };
-      // Await the flush BEFORE registering the finish callback that can
-      // trigger caller-side stop() — that ordering is what closes the race
-      // between a lost WS frame and the teardown it precedes.
+      // Broadcast convergence before permitting owner cleanup, so connected
+      // observers receive this state transition before the server can close.
       await scaffold.broadcast({ type: 'converged' });
+      successReady = true;
+      if (clientGone) {
+        // The client disconnected during finalization; converge now rather
+        // than waiting for a `finish` that will never fire. The 200 is
+        // best-effort — the socket may already be closed.
+        runConvergence();
+        sendJson(res, 200, { ok: true, responsePath, completedAt });
+        return;
+      }
       // Ack-ordering guarantee: the HTTP caller must always receive its 200
-      // body before any lifecycle teardown can close its socket.
-      res.once('finish', () => {
-        void Promise.resolve(opts.onSubmit?.(responses, completedAt, responsePath)).then(
-          () => settleSubmitLifecycle(true),
-          () => settleSubmitLifecycle(false),
-        );
-      });
-      // A disconnected client never emits `finish`; unblock take-back so it
-      // can reclaim authority rather than leaving terminal input frozen.
-      res.once('close', () => {
-        if (!res.writableFinished) settleSubmitLifecycle(false);
-      });
-      res.once('error', () => settleSubmitLifecycle(false));
+      // body before any lifecycle teardown can close its socket. The finish
+      // observer registered above converges then; `onClientGone` converges if
+      // the peer disappears before finish.
       sendJson(res, 200, { ok: true, responsePath, completedAt });
       return;
     }
