@@ -49,6 +49,10 @@ export class InboxController {
   private adapter: DeckAdapter | undefined;
   private reviewAdapter: ReviewAdapter | undefined;
   private deckBrowser: WebServerHandle | undefined;
+  /** Blocks terminal input until browser finalization/shutdown is quiescent. */
+  private deckBrowserTakingBack = false;
+  /** The single accepted submit that crossed the browser boundary. */
+  private deckBrowserFinalizing: Promise<{ completedAt: string; responsePath: string }> | undefined;
   private deckBrowserStarting = false;
   private deckBrowserStartingGeneration: number | undefined;
   /** Invalidates an in-flight asynchronous browser start when ownership ends. */
@@ -151,6 +155,10 @@ export class InboxController {
     // so the close-from-open path must live here — checked before adapter
     // forwarding so it works in active deck freetext as well as the list.
     if ((key.ctrl && input === 'c') || isToggleCloseChord(input)) { this.close(); return; }
+    // Take-back is an ownership boundary, not an instantaneous UI toggle:
+    // discard every key until a pre-existing browser finalizer and the listener
+    // have both settled, so terminal edits cannot race browser completion.
+    if (this.deckBrowserTakingBack) return;
     if (this.deckBrowser !== undefined) {
       if (input === 'w' || input === 'W') void this.takeBackDeckBrowser();
       return;
@@ -254,7 +262,7 @@ export class InboxController {
       browser = await start({
         dir: item.dir,
         deck,
-        finalize: async (responses) => this.finalizeDeckBrowser(item.dir, claim.token, responses),
+        finalize: async (responses) => this.finalizeDeckBrowser(item.dir, claim.token, generation, responses),
         onSubmit: () => { void this.finishDeckBrowser(item.dir, browser); },
       });
       // Closing, taking back, or losing the claim while listen() was pending
@@ -277,12 +285,30 @@ export class InboxController {
   }
 
   /** Finalize through this controller's claim-safe lifecycle before HTTP acks. */
-  private async finalizeDeckBrowser(dir: string, token: string, responses: InteractionResponse[]): Promise<{ completedAt: string; responsePath: string }> {
-    if (this.claim?.dir !== dir || this.claim.token !== token) throw new Error('browser handoff no longer owns this ticket');
-    await this.finishDeck(dir, responses, token);
-    const result = readTicketResult(dir);
-    if (result?.kind !== 'deck') throw new Error('ticket did not produce a deck result');
-    return { completedAt: result.completedAt, responsePath: responsePath(dir) };
+  private async finalizeDeckBrowser(dir: string, token: string, generation: number, responses: InteractionResponse[]): Promise<{ completedAt: string; responsePath: string }> {
+    // The generation advances synchronously at take-back's ownership boundary.
+    // A request that reaches the listener after that point must fail before it
+    // can write, even while stop() is still closing HTTP connections.
+    if (this.deckBrowserTakingBack || generation !== this.deckBrowserGeneration || this.claim?.dir !== dir || this.claim.token !== token) {
+      throw new Error('browser handoff no longer owns this ticket');
+    }
+    // The server's HTTP single-assignment marker is published after its
+    // finalizer resolves, so simultaneous tabs can both reach us first. Share
+    // the first finalizer rather than starting another write or replacing the
+    // promise take-back must wait on.
+    if (this.deckBrowserFinalizing !== undefined) return this.deckBrowserFinalizing;
+    const finalizing = (async () => {
+      await this.finishDeck(dir, responses, token);
+      const result = readTicketResult(dir);
+      if (result?.kind !== 'deck') throw new Error('ticket did not produce a deck result');
+      return { completedAt: result.completedAt, responsePath: responsePath(dir) };
+    })();
+    this.deckBrowserFinalizing = finalizing;
+    try {
+      return await finalizing;
+    } finally {
+      if (this.deckBrowserFinalizing === finalizing) this.deckBrowserFinalizing = undefined;
+    }
   }
 
   /** The browser has finalized through the controller; reconcile its owner delivery. */
@@ -298,12 +324,20 @@ export class InboxController {
   /** Return browser authority to the terminal deck without changing its draft. */
   private async takeBackDeckBrowser(): Promise<void> {
     const browser = this.deckBrowser;
-    if (browser === undefined) return;
-    this.deckBrowser = undefined;
+    if (browser === undefined || this.deckBrowserTakingBack) return;
+    // Invalidate newly-arriving browser submits before awaiting anything. Keep
+    // the handoff mounted and terminal input blocked until its running submit
+    // (if any) has conclusively won or failed and the listener is gone.
+    this.deckBrowserTakingBack = true;
+    this.deckBrowserGeneration++;
     try {
+      await this.deckBrowserFinalizing?.catch(() => undefined);
       await browser.requestTakeBack();
       await browser.stop();
     } finally {
+      if (this.deckBrowser === browser) this.deckBrowser = undefined;
+      this.deckBrowserTakingBack = false;
+      this.rescan();
       this.repaint(true);
     }
   }
@@ -312,6 +346,7 @@ export class InboxController {
     if (this.closed) return;
     this.closed = true;
     this.deckBrowserGeneration++;
+    this.deckBrowserTakingBack = false;
     this.deckBrowserStarting = false;
     void this.reviewAdapter?.stop();
     const browser = this.deckBrowser;

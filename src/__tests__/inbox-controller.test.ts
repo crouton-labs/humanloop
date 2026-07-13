@@ -194,15 +194,46 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.equal(browserStopped, true, 'closing during async browser startup stops the stale listener');
 assert.equal(raceOpened, false, 'closing during async browser startup never opens a browser');
 
+const takeBackRace = submitDeck({ root, id: 'browser-take-back-race', deck: deck('browser take-back race') });
+let raceFinalize: ((responses: import('../types.js').InteractionResponse[]) => Promise<{ completedAt: string; responsePath: string }>) | undefined;
+let releaseFinish!: () => void;
+let raceFinishCalls = 0;
+const finishGate = new Promise<void>((resolve) => { releaseFinish = resolve; });
+const takeBackHandle = {
+  url: 'http://127.0.0.1:9998/', port: 9998, activate: () => {}, requestTakeBack: async () => {}, stop: async () => {},
+};
+const takeBackController = new InboxController({
+  roots: [root], cols: 100, rows: 24,
+  completeDeck: async (dir, responses, token) => { raceFinishCalls++; await finishGate; finalizeDeck(dir, responses, token); },
+  startDeckBrowser: async (opts) => { raceFinalize = opts.finalize; return takeBackHandle; },
+  openBrowser: () => {},
+});
+while (takeBackController.snapshot().selectedDir !== takeBackRace.dir) takeBackController.handleKey('j', key());
+takeBackController.activate();
+takeBackController.handleKey('w', key());
+await new Promise((resolve) => setImmediate(resolve));
+assert.ok(raceFinalize !== undefined, 'browser handoff exposes its controller finalizer');
+const delayedBrowserSubmit = raceFinalize!([]);
+const concurrentBrowserSubmit = raceFinalize!([]);
+takeBackController.handleKey('w', key());
+takeBackController.handleKey('r', key());
+assert.equal(takeBackController.snapshot().inputBuffer, undefined, 'terminal input remains blocked while take-back waits for a browser finalizer');
+releaseFinish();
+await Promise.all([delayedBrowserSubmit, concurrentBrowserSubmit]);
+assert.equal(raceFinishCalls, 1, 'concurrent browser submits share one controller finalizer');
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(takeBackController.snapshot().screen, 'list', 'take-back waits for the in-flight browser finalizer before terminal control resumes');
+takeBackController.close();
+
 const widthTicket = submitDeck({ root, id: 'visual-width', deck: { ...deck('visual width'), source: { originatingConversationSessionId: 'width-session' } } });
 const visualWidths: number[] = [];
-const widthController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, visualGeneratorForSession: () => async (_interaction, cols) => { visualWidths.push(cols); return { ok: true, ansi: 'x'.repeat(cols), markdown: 'context' }; } });
+const widthController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, visualGeneratorForSession: () => async (_interaction, cols) => { visualWidths.push(cols); return { ok: true, ansi: 'x'.repeat(cols), markdown: 'context markdown' }; } });
 while (widthController.snapshot().selectedDir !== widthTicket.dir) widthController.handleKey('j', key());
 widthController.activate();
 await new Promise((resolve) => setImmediate(resolve));
 widthController.resize(120, 24);
 await new Promise((resolve) => setImmediate(resolve));
-assert.deepEqual(visualWidths, [64, 77], 'embedded visuals use and regenerate at the detail-pane width on resize');
+assert.deepEqual(visualWidths, [64], 'embedded visual generation runs once; resize only re-renders locally');
 widthController.close();
 
 rmSync(temp, { recursive: true, force: true });

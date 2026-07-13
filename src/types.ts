@@ -126,6 +126,8 @@ export interface FeedbackResult {
 export interface VisualBlock {
   questionId: string;   // carries Interaction.id
   content: string;
+  /** Original model output, retained so resize can re-render locally. */
+  markdown?: string;
   status: 'loading' | 'ready' | 'error';
 }
 

@@ -53,8 +53,13 @@ async function callHaiku(prompt: string, systemPrompt: string): Promise<string |
 // (most recent messages) rather than the head.
 const MAX_CONTEXT_CHARS = 24000;
 
+/** Width shared by model-time and local resize-time visual rendering. */
+export function visualRenderWidth(cols: number): number {
+  return Math.max(1, Math.min(cols - 4, 76));
+}
+
 export async function defaultGenerateVisual(interaction: Interaction, conversationContext: string, cols = (process.stdout.columns || 80)): Promise<{ ok: true; ansi: string; markdown: string } | { ok: false; error: string }> {
-  const width = Math.max(1, Math.min(cols - 4, 76));
+  const width = visualRenderWidth(cols);
 
   const optionsSummary = interaction.options.length > 0
     ? `\nOptions: ${interaction.options.map((o) => o.label).join(' | ')}`

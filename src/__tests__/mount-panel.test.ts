@@ -2,6 +2,8 @@ import { mountPanel } from '../index.js';
 import type { Deck, InteractionResponse } from '../index.js';
 import type { Key } from '../tui/terminal.js';
 import { parseKeypress } from '../tui/terminal.js';
+import { renderMarkdown } from '../render/termrender.js';
+import { visualRenderWidth } from '../visuals/generate.js';
 import assert from 'node:assert/strict';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -93,7 +95,26 @@ assert.notDeepEqual(linesA1, linesB1, 'two panels with different geometry produc
 panelA.unmount();
 panelB.unmount();
 
-// ── Test 4: v2 round-trip ─────────────────────────────────────────────────────
+// ── Test 4: resize reflows saved visual markdown without another model call ───
+const visualMarkdown = 'alpha beta gamma delta epsilon zeta eta theta iota kappa';
+let visualCalls = 0;
+const visualPanel = mountPanel({
+  deck: { interactions: [{ id: 'visual', title: 'Visual context', options: [] }] },
+  cols: 20,
+  rows: 24,
+  generateVisual: async () => { visualCalls++; return { ok: true, ansi: 'stale-width', markdown: visualMarkdown }; },
+});
+await new Promise((resolve) => setImmediate(resolve));
+visualPanel.handleKey(' ', mkKey({}));
+visualPanel.handleResize(40, 24);
+assert.equal(visualCalls, 1, 'pure layout resize does not regenerate visual context');
+assert.ok(
+  visualPanel.render().join('\n').includes(renderMarkdown(visualMarkdown, visualRenderWidth(40))[0]!),
+  'resize re-renders saved visual markdown at the new panel width',
+);
+visualPanel.unmount();
+
+// ── Test 5: v2 round-trip ─────────────────────────────────────────────────────
 
 const roundTripDeck: Deck = {
   interactions: [

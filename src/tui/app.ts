@@ -8,6 +8,8 @@ import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from '
 import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
 import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
+import { visualRenderWidth } from '../visuals/generate.js';
+import { renderMarkdown } from '../render/termrender.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { validateDeck } from '../inbox/deck-schema.js';
 import { progressPath as progressPathFor, deckPath as deckPathFor, writeResponse, clearProgress } from '../inbox/convention.js';
@@ -124,17 +126,30 @@ function rebindPersist(internals: PanelInternals): void {
   };
 }
 
+function renderVisualMarkdown(markdown: string, cols: number): string {
+  return renderMarkdown(markdown, visualRenderWidth(cols)).join('\n');
+}
+
+/** Reflow ready visual context locally; resizing must never invoke the model. */
+function rerenderVisuals(internals: PanelInternals): void {
+  for (const [id, visual] of internals.state.visuals) {
+    if (visual.status !== 'ready' || visual.markdown === undefined) continue;
+    internals.state.visuals.set(id, { ...visual, content: renderVisualMarkdown(visual.markdown, internals.cols) });
+  }
+}
+
 function fireVisuals(internals: PanelInternals, interactions: Interaction[]): void {
   if (internals.generateVisual === undefined) return;
   const gen = internals.generateVisual;
   const generation = ++internals.visualGeneration;
   for (const interaction of interactions) {
+    const generationCols = internals.cols;
     internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'loading' });
-    gen(interaction, internals.cols).then((r) => {
+    gen(interaction, generationCols).then((r) => {
       if (!internals.mounted || generation !== internals.visualGeneration) return;
       if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, r.ok
-        ? { questionId: interaction.id, content: r.ansi, status: 'ready' }
+        ? { questionId: interaction.id, content: internals.cols === generationCols ? r.ansi : renderVisualMarkdown(r.markdown, internals.cols), markdown: r.markdown, status: 'ready' }
         : { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
     }).catch(() => {
@@ -218,7 +233,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       if (internals.state.phase === 'item-review') {
         clampItemReviewScroll(internals.state, cols, rows);
       }
-      fireVisuals(internals, internals.state.interactions);
+      rerenderVisuals(internals);
       return renderLines();
     },
 
