@@ -6,9 +6,9 @@ import type { CompletionEvent } from '../types.js';
 import { atomicWriteJson, readJson, withExclusiveDirectoryLock } from './convention.js';
 
 export interface CompletionHandler { command: string; args: string[]; }
-export interface InboxRootRegistration { schema: 'humanloop.inbox-root/v1'; root: string; owner: string; handler?: CompletionHandler; }
+export interface InboxRootRegistration { schema: 'humanloop.inbox-root/v1'; root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; }
 export interface InboxRootStatus extends InboxRootRegistration { available: boolean; }
-export interface RegisterInboxRootOptions { root: string; owner: string; handler?: CompletionHandler; }
+export interface RegisterInboxRootOptions { root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; }
 
 function stateHome(): string { return process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'); }
 export function inboxRootsDirectory(): string { return join(stateHome(), 'humanloop', 'inbox-roots'); }
@@ -25,7 +25,13 @@ function validateRegistration(raw: unknown): InboxRootRegistration | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const value = raw as Record<string, unknown>;
   if (value.schema !== 'humanloop.inbox-root/v1' || typeof value.root !== 'string' || !value.root || typeof value.owner !== 'string' || !value.owner.trim()) return null;
-  try { return { schema: 'humanloop.inbox-root/v1', root: value.root, owner: value.owner, handler: value.handler === undefined ? undefined : validateHandler(value.handler as CompletionHandler) }; } catch { return null; }
+  try {
+    return {
+      schema: 'humanloop.inbox-root/v1', root: value.root, owner: value.owner,
+      handler: value.handler === undefined ? undefined : validateHandler(value.handler as CompletionHandler),
+      followUpHandler: value.followUpHandler === undefined ? undefined : validateHandler(value.followUpHandler as CompletionHandler),
+    };
+  } catch { return null; }
 }
 
 /** Create/canonicalize a root and claim its user-scoped registration. */
@@ -39,7 +45,7 @@ export function registerInboxRoot(opts: RegisterInboxRootOptions): InboxRootRegi
     const existing = validateRegistration(readJson<unknown>(path));
     if (existing !== null && existing.root === root && existing.owner !== opts.owner) throw new Error(`inbox root is already owned by ${existing.owner}`);
     if (existing !== null && existing.root !== root) throw new Error('inbox root registry hash collision');
-    const registration: InboxRootRegistration = { schema: 'humanloop.inbox-root/v1', root, owner: opts.owner, handler: validateHandler(opts.handler) };
+    const registration: InboxRootRegistration = { schema: 'humanloop.inbox-root/v1', root, owner: opts.owner, handler: validateHandler(opts.handler), followUpHandler: validateHandler(opts.followUpHandler) };
     atomicWriteJson(path, registration);
     chmodSync(path, 0o600);
     return registration;

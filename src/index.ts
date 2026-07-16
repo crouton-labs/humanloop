@@ -18,6 +18,8 @@ export {
 } from './inbox/tickets.js';
 export type { SubmitDeckOptions, SubmitReviewOptions } from './inbox/tickets.js';
 export { dispatchCompletion, reconcileCompletions } from './inbox/completion.js';
+export { requestFollowUp, cancelFollowUp, submitFollowUpResult, readFollowUp } from './inbox/followup.js';
+export type { FollowUpRequestEvent, FollowUpRequest, FollowUpResult } from './inbox/followup.js';
 export { claimTicket, heartbeatClaim, releaseClaim, readTicketClaim } from './inbox/claim.js';
 export type { TicketClaim, ClaimOptions } from './inbox/claim.js';
 
@@ -48,7 +50,7 @@ export type { InteractionState } from './inbox/convention.js';
 export type {
   Interaction, InteractionOption, InteractionResponse, InteractionKind,
   Deck, DeckSource,
-  MountedPanel, MountedPanelOpts, GenerateVisual, VisualBlock,
+  MountedPanel, MountedPanelOpts, GenerateVisual, VisualBlock, FollowUpState,
   FeedbackComment, FeedbackResult,
   ResolutionEnvelope, InboxItem, DisplayOpts,
   ClaimSummary, TicketSummary, DeckTicketSummary, ReviewTicketSummary,

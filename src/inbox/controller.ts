@@ -1,5 +1,5 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
-import type { Deck, DeckSource, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary } from '../types.js';
+import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
@@ -11,15 +11,17 @@ import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW, clipLine } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
 import { scanInbox } from './scan.js';
-import { inboxRootsDirectory, listInboxRoots } from './registry.js';
+import { inboxRootsDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
-import { completeDeck, readTicketResult } from './tickets.js';
+import { completeDeck, readTicketResult, ticketRoot } from './tickets.js';
 import { reconcileCompletions } from './completion.js';
 import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
+import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
 import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
+import { cancelFollowUp, readFollowUp, requestFollowUp } from './followup.js';
 
 export interface InboxControllerOptions {
   roots?: string[];
@@ -47,6 +49,7 @@ export class InboxController {
   private previewScrollOffset = 0;
   private screen: Screen = 'list';
   private adapter: DeckAdapter | undefined;
+  private activeDeck: Deck | undefined;
   private reviewAdapter: ReviewAdapter | undefined;
   private deckBrowser: WebServerHandle | undefined;
   /** Blocks terminal input until browser finalization/shutdown is quiescent. */
@@ -196,6 +199,8 @@ export class InboxController {
     if (deck === null) { releaseClaim(item.dir, claim.token); this.claim = undefined; this.invalidate(); return; }
     // Notifications use the same canonical deck panel as every other deck:
     // opening is not acknowledgement; panel completion is.
+    this.activeDeck = deck;
+    const followUp = this.followUpHandlers(item.dir, deck);
     this.screen = 'detail';
     this.adapter = new DeckAdapter({
       dir: item.dir,
@@ -205,9 +210,13 @@ export class InboxController {
       onDirty: () => this.repaint(),
       generateVisual: deck.source?.originatingConversationSessionId === undefined ? undefined : (this.options.visualGeneratorForSession ?? visualGeneratorForConversationSession)(deck.source.originatingConversationSessionId),
       onEditorRequest: () => this.editActiveDeckInput(),
+      followUpAvailable: followUp.available,
+      onFollowUpRequest: followUp.onRequest,
+      onFollowUpCancel: followUp.onCancel,
       onBack: () => { this.leaveDetail(); this.repaint(); },
       onComplete: (responses) => { void this.complete(responses); },
     });
+    if (followUp.available) this.adapter.setFollowUpState(this.followUpViewState(item.dir));
     this.watchSelected(item.dir);
   }
 
@@ -242,7 +251,59 @@ export class InboxController {
     }
   }
 
-  reloadSelectedDeck(): void { this.adapter?.reload(); this.repaint(); }
+  reloadSelectedDeck(): void {
+    if (this.adapter === undefined || this.claim === undefined) { this.repaint(); return; }
+    const deck = this.readDeck(this.claim.dir);
+    if (deck === undefined) { this.repaint(); return; }
+    this.activeDeck = deck;
+    const followUp = this.followUpHandlers(this.claim.dir, deck);
+    this.adapter.setFollowUpHandlers(followUp.available, followUp.onRequest, followUp.onCancel);
+    this.adapter.reload(deck);
+    if (followUp.available) this.adapter.setFollowUpState(this.followUpViewState(this.claim.dir));
+    this.repaint();
+  }
+
+  private followUpHandlers(dir: string, deck: Deck): { available: boolean; onRequest?: (question: string) => void; onCancel?: () => void } {
+    const root = ticketRoot(dir);
+    const available = root !== null && registeredInboxRoot(root)?.followUpHandler !== undefined && isAnswerBearingDeck(deck);
+    if (!available) return { available: false };
+    return {
+      available: true,
+      onRequest: (question) => {
+        requestFollowUp(root!, dir, { question });
+        this.refreshFollowUp(dir);
+      },
+      onCancel: () => {
+        cancelFollowUp(root!, dir);
+        this.refreshFollowUp(dir);
+      },
+    };
+  }
+
+  private readDeck(dir: string): Deck | undefined {
+    const deck = readJson<Deck>(deckPath(dir));
+    if (deck === null) return undefined;
+    try { return validateDeck(deck); } catch { return undefined; }
+  }
+
+  private followUpViewState(dir: string): FollowUpState {
+    const { request, result } = readFollowUp(dir);
+    if (request === null) return { status: 'idle' };
+    if (result !== null && result.requestId === request.requestId) {
+      return result.status === 'ready'
+        ? { status: 'ready', markdown: result.markdown! }
+        : { status: 'error', error: result.error! };
+    }
+    return request.state === 'running' ? { status: 'running' } : { status: 'idle' };
+  }
+
+  private refreshFollowUp(dir: string): void {
+    if (this.adapter === undefined || this.claim?.dir !== dir || this.activeDeck === undefined) return;
+    const followUp = this.followUpHandlers(dir, this.activeDeck);
+    this.adapter.setFollowUpHandlers(followUp.available, followUp.onRequest, followUp.onCancel);
+    if (followUp.available) this.adapter.setFollowUpState(this.followUpViewState(dir));
+    this.repaint();
+  }
 
   /** Hand the selected deck to its browser surface while retaining this ticket's claim. */
   private async openDeckBrowser(): Promise<void> {
@@ -472,6 +533,7 @@ export class InboxController {
     this.deckBrowserStarting = false;
     this.adapter?.close();
     this.adapter = undefined;
+    this.activeDeck = undefined;
     this.selectedWatcher?.close();
     this.selectedWatcher = undefined;
     if (release && this.claim !== undefined) releaseClaim(this.claim.dir, this.claim.token);
@@ -590,8 +652,9 @@ export class InboxController {
     this.selectedWatcher?.close();
     try {
       this.selectedWatcher = watch(dir, (_event, file) => {
-        if (file === 'deck.json') this.reloadSelectedDeck();
-        else this.invalidate();
+        if (file === 'deck.json') { this.reloadSelectedDeck(); return; }
+        if (file === 'followup-result.json' || file === 'followup-request.json') { this.refreshFollowUp(dir); return; }
+        this.invalidate();
       });
     } catch {
       this.selectedWatcher = undefined;
@@ -603,6 +666,10 @@ function visibleWidth(line: string): number { return line.replace(/\x1b\[[0-9;]*
 
 /** M-i (Option/Alt+I) reaches the controller as the two-byte ESC-i sequence. */
 function isToggleCloseChord(input: string): boolean { return input === '\x1bi' || input === '\x1bI'; }
+
+function isAnswerBearingDeck(deck: Deck): boolean {
+  return deck.interactions.some((interaction) => interaction.kind !== 'notify');
+}
 
 /** Prefer a human-meaningful source label, falling back to the raw node id
  *  before an opaque "unknown source" — a crouter ticket always carries nodeId. */

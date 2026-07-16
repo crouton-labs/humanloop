@@ -14,6 +14,7 @@ const tests = [
   { path: 'src/__tests__/pi-conversation-reader.test.ts' },
   { path: 'src/__tests__/editor-roundtrip.test.ts' },
   { path: 'src/__tests__/inbox-core.test.ts' },
+  { path: 'src/__tests__/followup.test.ts' },
   { path: 'src/__tests__/inbox-controller.test.ts' },
   { path: 'src/__tests__/review-adapter.test.ts' },
   { path: 'src/__tests__/mount-panel.test.ts' },

@@ -7,7 +7,12 @@ export type ExitFn = () => void;
 // 'w' is reserved for the host-level "open in browser" handoff (see
 // tui/app.ts resolveInteractionDir) — never auto-assignable as an option
 // shortcut, or pressing it would race the handoff against picking that option.
-const RESERVED = new Set(['c', 'r', 'n', 'p', 'q', 'j', 'k', 'u', 'd', 'w', ' ']);
+const RESERVED = new Set(['c', 'r', 'n', 'p', 'q', 'j', 'k', 'u', 'd', 'w', ' ', '?']);
+
+export interface FollowUpActions {
+  request(question: string): void;
+  cancel(): void;
+}
 
 export function assignShortcuts(interactions: Interaction[]): void {
   for (const it of interactions) {
@@ -38,7 +43,16 @@ export function handleKeypress(
   state: TuiState,
   render: RenderFn,
   exit: ExitFn,
+  followUp?: FollowUpActions,
 ): void {
+  if (key.backTab) {
+    state.bodyScrollOffsets[state.bodyMode] = state.scrollOffset;
+    state.bodyMode = state.bodyMode === 'question' ? 'visual' : 'question';
+    state.scrollOffset = state.bodyScrollOffsets[state.bodyMode];
+    render();
+    return;
+  }
+
   if (key.ctrl && input === 'c') {
     exit();
     return;
@@ -50,7 +64,7 @@ export function handleKeypress(
   state.hint = undefined;
 
   if (state.inputMode) {
-    handleInputMode(input, key, state, render);
+    handleInputMode(input, key, state, render, followUp);
     checkAutoExit(state, exit);
     return;
   }
@@ -60,7 +74,7 @@ export function handleKeypress(
       handleOverview(input, key, state, render, exit);
       break;
     case 'item-review':
-      handleItemReview(input, key, state, render);
+      handleItemReview(input, key, state, render, followUp);
       checkAutoExit(state, exit);
       break;
     case 'final':
@@ -106,7 +120,8 @@ function handleOverview(
   if (key.return || input === ' ') {
     state.phase = 'item-review';
     state.selectedAction = 0;
-    state.detailExpanded = false;
+    state.bodyMode = 'question';
+    state.scrollOffset = state.bodyScrollOffsets.question;
     render();
     return;
   }
@@ -145,21 +160,33 @@ function handleItemReview(
   key: Key,
   state: TuiState,
   render: RenderFn,
+  followUp?: FollowUpActions,
 ): void {
+  if (input === '?' && state.followUpAvailable) {
+    if (state.followUp?.status === 'running') followUp?.cancel();
+    else state.inputMode = { kind: 'follow-up', buffer: '', cursor: 0 };
+    render();
+    return;
+  }
+
   const interaction = state.interactions[state.currentIndex]!;
 
   if (input === 'n') { advanceItem(state, 1); render(); return; }
   if (input === 'p') { advanceItem(state, -1); render(); return; }
   // q / Esc step back to the deck overview (one level up from a card).
-  if (input === 'q' || key.escape) { state.phase = 'overview'; render(); return; }
-  // Space toggles the focused option for multi-select; otherwise expand context.
+  if (input === 'q' || key.escape) {
+    state.bodyScrollOffsets[state.bodyMode] = state.scrollOffset;
+    state.phase = 'overview';
+    render();
+    return;
+  }
+  // Space toggles the focused option for multi-select.
   if (input === ' ' && interaction.multiSelect
       && state.selectedAction < interaction.options.length) {
     toggleMulti(state, interaction, interaction.options[state.selectedAction]!.id);
     render();
     return;
   }
-  if (input === ' ' && state.visuals.get(interaction.id)?.status === 'ready') { state.detailExpanded = !state.detailExpanded; render(); return; }
 
   // Body scroll: u/d, PageUp/PageDown, or Ctrl+D / Ctrl+U (half-page), Ctrl+E / Ctrl+Y (line).
   // Plain u/d exists because tmux configs commonly bind C-d/C-u for pane scroll
@@ -299,8 +326,22 @@ function handleInputMode(
   key: Key,
   state: TuiState,
   render: RenderFn,
+  followUp?: FollowUpActions,
 ): void {
   const mode = state.inputMode!;
+
+  if (mode.kind === 'follow-up' && key.return) {
+    const question = mode.buffer.trim();
+    if (question.length === 0) {
+      state.hint = 'Enter a question, or esc to cancel';
+      render();
+      return;
+    }
+    followUp?.request(question);
+    state.inputMode = null;
+    render();
+    return;
+  }
 
   if (key.escape) {
     state.inputMode = null;
@@ -598,8 +639,9 @@ function advanceItem(state: TuiState, direction: number): void {
   }
   state.currentIndex = next;
   state.selectedAction = 0;
-  state.detailExpanded = false;
+  state.bodyMode = 'question';
   state.scrollOffset = 0;
+  state.bodyScrollOffsets = { question: 0, visual: 0 };
 }
 
 /**
@@ -620,8 +662,9 @@ function advanceToNextUnanswered(state: TuiState): void {
   }
   state.currentIndex = next;
   state.selectedAction = 0;
-  state.detailExpanded = false;
+  state.bodyMode = 'question';
   state.scrollOffset = 0;
+  state.bodyScrollOffsets = { question: 0, visual: 0 };
 }
 
 function actionCount(interaction: Interaction): number {

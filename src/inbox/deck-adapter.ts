@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs';
-import type { Deck, GenerateVisual, InteractionResponse, MountedPanel } from '../types.js';
+import type { Deck, FollowUpState, GenerateVisual, InteractionResponse, MountedPanel } from '../types.js';
 import type { Key } from '../tui/terminal.js';
-import { deckPath, progressPath, readJson } from './convention.js';
-import { validateDeck } from './deck-schema.js';
+import { progressPath, readJson } from './convention.js';
 import { mountPanel } from '../tui/app.js';
 
 export interface DeckAdapterOptions {
@@ -16,6 +14,9 @@ export interface DeckAdapterOptions {
   onDirty: () => void;
   generateVisual?: GenerateVisual;
   onEditorRequest?: () => void;
+  followUpAvailable?: boolean;
+  onFollowUpRequest?: (question: string) => void;
+  onFollowUpCancel?: () => void;
 }
 
 /** Embeds the single deck renderer in a controller-owned rectangle. */
@@ -40,6 +41,9 @@ export class DeckAdapter {
       onDirty: opts.onDirty,
       generateVisual: opts.generateVisual,
       onEditorRequest: opts.onEditorRequest,
+      followUpAvailable: opts.followUpAvailable,
+      onFollowUpRequest: opts.onFollowUpRequest,
+      onFollowUpCancel: opts.onFollowUpCancel,
     });
   }
 
@@ -47,6 +51,8 @@ export class DeckAdapter {
   resize(cols: number, rows: number): string[] { return this.panel.handleResize(cols, rows); }
   inputBuffer(): string | undefined { return this.panel.getInputBuffer(); }
   setInputBuffer(text: string): void { this.panel.setInputBuffer(text); }
+  setFollowUpHandlers(available: boolean, onRequest?: (question: string) => void, onCancel?: () => void): void { this.panel.setFollowUpHandlers(available, onRequest, onCancel); }
+  setFollowUpState(state: FollowUpState): void { this.panel.setFollowUpState(state); }
   canAcceptHostKeys(): boolean { return this.panel.canAcceptHostKeys(); }
 
   handleKey(input: string, key: Key): void {
@@ -58,13 +64,9 @@ export class DeckAdapter {
   }
 
   /** Fresh descriptor reads preserve mounted answers for interaction ids still present. */
-  reload(): void {
-    try {
-      this.panel.loadDeck(validateDeck(JSON.parse(readFileSync(deckPath(this.opts.dir), 'utf8'))), { progressPath: progressPath(this.opts.dir) });
-      this.opts.onDirty();
-    } catch {
-      // An incomplete external rewrite is not a new deck; retain the current editor.
-    }
+  reload(deck: Deck): void {
+    this.panel.loadDeck(deck, { progressPath: progressPath(this.opts.dir) });
+    this.opts.onDirty();
   }
 
   close(): void { this.panel.unmount(); }

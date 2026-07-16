@@ -165,39 +165,48 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   // and live in the scrollable region so long content never overflows the fixed
   // header — agents put rich prose in either field, so both must render markdown.
   const bodyLines: string[] = [];
-  if (interaction.subtitle) {
-    bodyLines.push('');
-    for (const line of renderMarkdown(interaction.subtitle, maxW)) {
-      bodyLines.push(`  ${line}`);
+  if (state.bodyMode === 'question') {
+    if (interaction.subtitle) {
+      bodyLines.push('');
+      for (const line of renderMarkdown(interaction.subtitle, maxW)) {
+        bodyLines.push(`  ${line}`);
+      }
+    }
+    if (interaction.body) {
+      bodyLines.push('');
+      for (const line of renderMarkdown(interaction.body, maxW)) {
+        bodyLines.push(`  ${line}`);
+      }
     }
   }
-  if (interaction.body) {
-    bodyLines.push('');
-    for (const line of renderMarkdown(interaction.body, maxW)) {
-      bodyLines.push(`  ${line}`);
+  if (state.bodyMode === 'visual') {
+    if (visual?.status === 'ready') {
+      bodyLines.push('');
+      bodyLines.push(`  ${DIM}── context ${hline(maxW - 12)}${RESET}`);
+      for (const vl of visual.content.split('\n')) {
+        bodyLines.push(`  ${vl}`);
+      }
+      bodyLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
     }
-  }
-  if (visual && visual.status === 'ready' && state.detailExpanded) {
-    bodyLines.push('');
-    bodyLines.push(`  ${DIM}── context ${hline(maxW - 12)}${RESET}`);
-    for (const vl of visual.content.split('\n')) {
-      bodyLines.push(`  ${vl}`);
+    if (state.followUp !== undefined && state.followUp.status !== 'idle') {
+      bodyLines.push('');
+      bodyLines.push(`  ${DIM}── follow-up ${hline(Math.max(0, maxW - 14))}${RESET}`);
+      if (state.followUp.status === 'running') bodyLines.push(`  ${DIM}consulting…${RESET}`);
+      else if (state.followUp.status === 'ready') {
+        for (const line of renderMarkdown(state.followUp.markdown, maxW)) bodyLines.push(`  ${line}`);
+      } else bodyLines.push(`  ${YELLOW}${state.followUp.error}${RESET}`);
     }
-    bodyLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
   }
 
   // Post-body: visual status hint, input buffer or actions, footer (always visible)
   const postLines: string[] = [];
   postLines.push('');
-  if (visual) {
+  if (state.bodyMode === 'visual' && visual) {
     if (visual.status === 'loading') {
       postLines.push(`  ${DIM}loading context...${RESET}`);
       postLines.push('');
     } else if (visual.status === 'error') {
       postLines.push(`  ${YELLOW}visual context unavailable${RESET}`);
-      postLines.push('');
-    } else if (!state.detailExpanded) {
-      postLines.push(`  ${DIM}[space] expand context${RESET}`);
       postLines.push('');
     }
   }
@@ -270,6 +279,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
 export function clampItemReviewScroll(state: TuiState, cols: number, rows: number): void {
   const { maxScroll } = buildItemReviewLayout(state, cols, rows);
   state.scrollOffset = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
+  state.bodyScrollOffsets[state.bodyMode] = state.scrollOffset;
 }
 
 export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
@@ -299,17 +309,21 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
         `${DIM}n/p${RESET} prev/next`,
         `${DIM}space${RESET} toggle`,
         `${DIM}enter${RESET} confirm`,
+        `${DIM}shift-tab${RESET} ${state.bodyMode === 'question' ? 'visual' : 'question'}`,
         `${DIM}q${RESET} overview`,
       ]
     : [
         `${DIM}n/p${RESET} prev/next`,
-        ...(state.visuals.get(interaction.id)?.status === 'ready' ? [`${DIM}space${RESET} expand`] : []),
+        `${DIM}shift-tab${RESET} ${state.bodyMode === 'question' ? 'visual' : 'question'}`,
         `${DIM}q${RESET} overview`,
       ];
   if (overflows) {
     footerParts.unshift(state.inputMode ? `${DIM}pgup/pgdn${RESET} scroll` : `${DIM}u/d${RESET} scroll`);
   }
-  if (state.inputMode === null) footerParts.push(`${DIM}w${RESET} browser`);
+  if (state.inputMode === null) {
+    if (state.followUpAvailable) footerParts.push(`${DIM}?${RESET} follow-up`);
+    footerParts.push(`${DIM}w${RESET} browser`);
+  }
   const footer = `  ${footerParts.join('  ')}`;
 
   // Assemble — pad to fill rows so post-body sits at the bottom

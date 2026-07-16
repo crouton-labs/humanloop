@@ -26,7 +26,7 @@ export function validateInput(parsed: unknown): Deck {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-function buildInitialState(deck: Deck, editorAvailable = false): TuiState {
+function buildInitialState(deck: Deck, editorAvailable = false, followUpAvailable = false): TuiState {
   // Single-question decks skip the overview list — there's nothing to overview,
   // and overview hides the option hotkeys so users press 'y' and nothing happens.
   const initialPhase = deck.interactions.length === 1 ? 'item-review' : 'overview';
@@ -58,9 +58,12 @@ function buildInitialState(deck: Deck, editorAvailable = false): TuiState {
     preAnsweredIds,
     inputMode: null,
     selectedAction: 0,
-    detailExpanded: false,
+    bodyMode: 'question',
     scrollOffset: 0,
+    bodyScrollOffsets: { question: 0, visual: 0 },
     editorAvailable,
+    followUpAvailable,
+    followUp: undefined,
   };
 }
 
@@ -109,12 +112,15 @@ interface PanelInternals {
   generateVisual: GenerateVisual | undefined;
   visualGeneration: number;
   progressPath: string | undefined;
+  followUpAvailable: boolean;
   callbacks: {
     onProgress: MountedPanelOpts['onProgress'];
     onComplete: MountedPanelOpts['onComplete'];
     onExit: MountedPanelOpts['onExit'];
     onDirty: MountedPanelOpts['onDirty'];
     onEditorRequest: MountedPanelOpts['onEditorRequest'];
+    onFollowUpRequest: MountedPanelOpts['onFollowUpRequest'];
+    onFollowUpCancel: MountedPanelOpts['onFollowUpCancel'];
   };
 }
 
@@ -162,15 +168,23 @@ function fireVisuals(internals: PanelInternals, interactions: Interaction[]): vo
 }
 
 export function mountPanel(opts: MountedPanelOpts): MountedPanel {
+  const followUpAvailable = opts.followUpAvailable !== false
+    && opts.onFollowUpRequest !== undefined
+    && opts.onFollowUpCancel !== undefined;
   const internals: PanelInternals = {
-    state: buildInitialState(opts.deck, opts.onEditorRequest !== undefined),
+    state: buildInitialState(opts.deck, opts.onEditorRequest !== undefined, followUpAvailable),
     cols: opts.cols,
     rows: opts.rows,
     mounted: true,
     generateVisual: opts.generateVisual,
     visualGeneration: 0,
     progressPath: opts.progressPath,
-    callbacks: { onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit, onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest },
+    followUpAvailable,
+    callbacks: {
+      onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit,
+      onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest,
+      onFollowUpRequest: opts.onFollowUpRequest, onFollowUpCancel: opts.onFollowUpCancel,
+    },
   };
 
   assignShortcuts(internals.state.interactions);
@@ -212,6 +226,9 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
         } else {
           internals.callbacks.onExit?.();
         }
+      }, {
+        request: (question) => internals.callbacks.onFollowUpRequest?.(question),
+        cancel: () => internals.callbacks.onFollowUpCancel?.(),
       });
 
       // Pre-render clamp (input layer): keep scrollOffset within the current
@@ -229,11 +246,12 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     handleResize(cols, rows) {
       internals.cols = cols;
       internals.rows = rows;
-      // New dimensions change the scroll bounds — re-clamp before laying out.
+      // Width changes reflow saved visual markdown, so clamp against the new
+      // content and geometry rather than the stale pre-resize wrapping.
+      rerenderVisuals(internals);
       if (internals.state.phase === 'item-review') {
         clampItemReviewScroll(internals.state, cols, rows);
       }
-      rerenderVisuals(internals);
       return renderLines();
     },
 
@@ -246,7 +264,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     loadDeck(deck, loadOpts) {
       if (!internals.mounted) return;
       const prior = collectResponses(internals.state);
-      internals.state = buildInitialState(deck, internals.callbacks.onEditorRequest !== undefined);
+      internals.state = buildInitialState(deck, internals.callbacks.onEditorRequest !== undefined, internals.followUpAvailable);
       if (loadOpts !== undefined && loadOpts.progressPath !== undefined) {
         internals.progressPath = loadOpts.progressPath;
       }
@@ -267,6 +285,24 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
         internals.state.currentIndex = firstUnanswered >= 0 ? firstUnanswered : 0;
       }
       fireVisuals(internals, deck.interactions);
+    },
+
+    setFollowUpHandlers(available, onRequest, onCancel) {
+      if (!internals.mounted) return;
+      internals.callbacks.onFollowUpRequest = onRequest;
+      internals.callbacks.onFollowUpCancel = onCancel;
+      const enabled = available && onRequest !== undefined && onCancel !== undefined;
+      internals.followUpAvailable = enabled;
+      internals.state.followUpAvailable = enabled;
+      if (!enabled) {
+        internals.state.followUp = undefined;
+        if (internals.state.inputMode?.kind === 'follow-up') internals.state.inputMode = null;
+      }
+    },
+
+    setFollowUpState(state) {
+      if (!internals.mounted || !internals.state.followUpAvailable) return;
+      internals.state.followUp = state;
     },
 
     canAcceptHostKeys() {

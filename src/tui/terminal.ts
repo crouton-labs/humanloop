@@ -19,6 +19,7 @@ export interface Key {
   ctrl: boolean;
   meta: boolean;
   tab: boolean;
+  backTab: boolean;
   backspace: boolean;
 }
 
@@ -43,6 +44,7 @@ function emptyKey(): Key {
     ctrl: false,
     meta: false,
     tab: false,
+    backTab: false,
     backspace: false,
   };
 }
@@ -64,6 +66,7 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
   if (str === '\x1b[5~') { key.pageUp = true; return { input: '', key }; }
   if (str === '\x1b[6~') { key.pageDown = true; return { input: '', key }; }
   if (str === '\x1b[3~') { key.del = true; return { input: '', key }; }
+  if (str === '\x1b[Z') { key.backTab = true; return { input: '', key }; }
   // Alt+Enter inserts a newline in freetext (distinct from Enter=submit). Must
   // precede the bare-ESC and meta-backspace checks so the two-byte sequence
   // isn't swallowed as a lone escape.

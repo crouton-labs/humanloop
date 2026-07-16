@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Deck, InteractionResponse } from '../types.js';
@@ -11,9 +12,37 @@ export function progressPath(dir: string): string { return `${dir}/progress.json
 export function claimPath(dir: string): string { return `${dir}/claim.json`; }
 export function deliveryPath(dir: string): string { return `${dir}/delivery.json`; }
 export function deliveryErrorPath(dir: string): string { return `${dir}/delivery-error.json`; }
+export function followupRequestPath(dir: string): string { return `${dir}/followup-request.json`; }
+export function followupResultPath(dir: string): string { return `${dir}/followup-result.json`; }
 export function visualsDir(dir: string): string { return `${dir}/visuals`; }
 export function visualMdPath(dir: string, id: string): string { return `${dir}/visuals/${id}.md`; }
 export function visualAnsiPath(dir: string, id: string): string { return `${dir}/visuals/${id}.ansi`; }
+
+/** Spawns a handler `{command,args}` with `event` as JSON on stdin. Exit 0
+ *  acknowledges; a nonzero exit, spawn error, or 30s timeout rejects with an
+ *  Error carrying the handler's captured stderr. Shared by completion delivery
+ *  and follow-up dispatch — both invoke a registered handler the same way. */
+export async function runHandler(command: string, args: string[], event: unknown): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    // stdout stays ignored (a handler acknowledges by exit code, never stdout),
+    // but stderr is captured so a nonzero exit surfaces the handler's own
+    // diagnostics in the delivery-error record instead of a bare exit code.
+    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += chunk; if (stderr.length > 8192) stderr = stderr.slice(-8192); });
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30_000);
+    child.once('error', (error) => { clearTimeout(timeout); rejectPromise(error); });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      const detail = stderr.trim() === '' ? '' : `: ${stderr.trim()}`;
+      if (timedOut) rejectPromise(new Error(`handler timed out after 30 seconds${detail}`));
+      else if (code === 0) resolvePromise();
+      else rejectPromise(new Error(`handler failed (${signal ?? code ?? 'unknown'})${detail}`));
+    });
+    child.stdin.end(`${JSON.stringify(event)}\n`);
+  });
+}
 
 export type InteractionState = 'pending' | 'claimed' | 'resolved' | 'missing';
 

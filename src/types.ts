@@ -131,6 +131,12 @@ export interface VisualBlock {
   status: 'loading' | 'ready' | 'error';
 }
 
+export type FollowUpState =
+  | { status: 'idle' }
+  | { status: 'running' }
+  | { status: 'ready'; markdown: string }
+  | { status: 'error'; error: string };
+
 // ── TUI state ─────────────────────────────────────────────────────────────────
 
 export type Phase = 'overview' | 'item-review' | 'final';
@@ -138,7 +144,8 @@ export type Phase = 'overview' | 'item-review' | 'final';
 export type InputMode =
   | null
   | { kind: 'comment'; buffer: string; cursor: number; selectedOptionId?: string }
-  | { kind: 'freetext'; buffer: string; cursor: number };
+  | { kind: 'freetext'; buffer: string; cursor: number }
+  | { kind: 'follow-up'; buffer: string; cursor: number };
 
 export interface TuiState {
   phase: Phase;
@@ -152,10 +159,13 @@ export interface TuiState {
   preAnsweredIds: Set<string>;
   inputMode: InputMode;
   selectedAction: number;
-  detailExpanded: boolean;
+  bodyMode: 'question' | 'visual';
   scrollOffset: number;
+  bodyScrollOffsets: { question: number; visual: number };
   /** The mounting host provided an active Ctrl+O editor callback. */
   editorAvailable: boolean;
+  followUpAvailable: boolean;
+  followUp?: FollowUpState;
   /** Transient one-line notice shown in item-review (e.g. an empty multi-select
    *  Enter that was rejected). Cleared on the next keypress. */
   hint?: string;
@@ -287,6 +297,9 @@ export interface MountedPanelOpts {
   generateVisual?: GenerateVisual;
   /** Host callback for Ctrl+O while a comment/freetext buffer is active. */
   onEditorRequest?: () => void;
+  followUpAvailable?: boolean;
+  onFollowUpRequest?: (question: string) => void;
+  onFollowUpCancel?: () => void;
   cols: number;
   rows: number;
   onProgress?: (responses: InteractionResponse[]) => void;
@@ -305,6 +318,8 @@ export interface MountedPanel {
   handleResize(cols: number, rows: number): string[];
   unmount(): void;
   loadDeck(deck: Deck, opts?: { progressPath?: string }): void;
+  setFollowUpHandlers(available: boolean, onRequest?: (question: string) => void, onCancel?: () => void): void;
+  setFollowUpState(state: FollowUpState): void;
   canAcceptHostKeys(): boolean;
   /**
    * True when the deck is at its top level: overview phase with no active

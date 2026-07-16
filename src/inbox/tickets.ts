@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import type { Deck, DeckTicketResult, FeedbackResult, ReviewDescriptor, ReviewTicketResult, TicketResult } from '../types.js';
 import { buildSummary } from '../summary.js';
-import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, progressPath, responsePath, reviewPath } from './convention.js';
+import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, responsePath, reviewPath } from './convention.js';
 import { validateDeck, validateReviewDescriptor, validateReviewProjection, resolveDeckBodyPaths } from './deck-schema.js';
 import { registeredInboxRoot } from './registry.js';
 import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js';
@@ -59,7 +59,7 @@ function ticketDir(root: string, id: string): { dir: string; created: boolean } 
 }
 function discardCreatedTicket(dir: string, created: boolean): void { if (created) rmSync(dir, { recursive: true, force: true }); }
 function hasTicketProtocolState(dir: string): boolean {
-  return [deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir)].some(existsSync);
+  return [deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir), followupRequestPath(dir), followupResultPath(dir)].some(existsSync);
 }
 function requireRegisteredTicket(dir: string): { root: string; dir: string } {
   const canonical = realpathSync(dir);

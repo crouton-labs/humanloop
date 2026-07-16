@@ -27,6 +27,7 @@ function mkKey(partial: Partial<Key>): Key {
     newline: false,
     escape: false,
     tab: false,
+    backTab: false,
     backspace: false,
     ...partial,
   };
@@ -105,7 +106,7 @@ const visualPanel = mountPanel({
   generateVisual: async () => { visualCalls++; return { ok: true, ansi: 'stale-width', markdown: visualMarkdown }; },
 });
 await new Promise((resolve) => setImmediate(resolve));
-visualPanel.handleKey(' ', mkKey({}));
+visualPanel.handleKey('', mkKey({ backTab: true }));
 visualPanel.handleResize(40, 24);
 assert.equal(visualCalls, 1, 'pure layout resize does not regenerate visual context');
 assert.ok(
@@ -113,6 +114,28 @@ assert.ok(
   'resize re-renders saved visual markdown at the new panel width',
 );
 visualPanel.unmount();
+
+const scrollPanel = mountPanel({
+  deck: { interactions: [{ id: 'scroll', title: 'Separate scroll positions', body: Array.from({ length: 40 }, (_, i) => `- question ${i}`).join('\n'), options: [] }] },
+  cols: 50,
+  rows: 12,
+  generateVisual: async () => ({ ok: true, ansi: Array.from({ length: 40 }, (_, i) => `visual ${i}`).join('\n') }),
+  onFollowUpRequest: () => {},
+  onFollowUpCancel: () => {},
+});
+await new Promise((resolve) => setImmediate(resolve));
+scrollPanel.handleKey('d', mkKey({}));
+scrollPanel.handleKey('?', mkKey({}));
+scrollPanel.handleKey('x', mkKey({}));
+scrollPanel.handleKey('', mkKey({ backTab: true }));
+scrollPanel.handleKey('', mkKey({ pageDown: true }));
+scrollPanel.handleResize(50, 60);
+scrollPanel.handleResize(50, 12);
+scrollPanel.handleKey('', mkKey({ backTab: true }));
+scrollPanel.handleResize(50, 20);
+assert.equal(scrollPanel.getInputBuffer(), 'x', 'Shift+Tab preserves an active composer buffer');
+assert.match(scrollPanel.render().join('\n'), /more above/, 'Question scroll survives Visual resize and round-trip');
+scrollPanel.unmount();
 
 // ── Test 5: v2 round-trip ─────────────────────────────────────────────────────
 

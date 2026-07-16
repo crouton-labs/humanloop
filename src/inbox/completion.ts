@@ -1,8 +1,7 @@
 import { readdirSync, statSync, unlinkSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { basename, resolve } from 'node:path';
 import type { CompletionEvent, TicketResult } from '../types.js';
-import { atomicWriteJson, deliveryErrorPath, deliveryPath, responsePath, readJson, reviewPath, withExclusiveDirectoryLockAsync } from './convention.js';
+import { atomicWriteJson, deliveryErrorPath, deliveryPath, responsePath, readJson, reviewPath, runHandler, withExclusiveDirectoryLockAsync } from './convention.js';
 import { registeredInboxRoot } from './registry.js';
 import { readTicketResult, ticketRoot } from './tickets.js';
 import { validateReviewProjection } from './deck-schema.js';
@@ -14,28 +13,6 @@ function receiptMatches(dir: string): boolean {
 }
 function eventFor(root: string, dir: string, result: TicketResult): CompletionEvent {
   return { schema: 'humanloop.completion/v1', root, dir, ticketId: basename(dir), kind: result.kind, outcome: result.kind === 'canceled' ? 'canceled' : 'resolved', responsePath: responsePath(dir) };
-}
-
-async function runHandler(command: string, args: string[], event: CompletionEvent): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    // stdout stays ignored (a handler acknowledges by exit code, never stdout),
-    // but stderr is captured so a nonzero exit surfaces the handler's own
-    // diagnostics in the delivery-error record instead of a bare exit code.
-    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr?.on('data', (chunk) => { stderr += chunk; if (stderr.length > 8192) stderr = stderr.slice(-8192); });
-    let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30_000);
-    child.once('error', (error) => { clearTimeout(timeout); rejectPromise(error); });
-    child.once('exit', (code, signal) => {
-      clearTimeout(timeout);
-      const detail = stderr.trim() === '' ? '' : `: ${stderr.trim()}`;
-      if (timedOut) rejectPromise(new Error(`completion handler timed out after 30 seconds${detail}`));
-      else if (code === 0) resolvePromise();
-      else rejectPromise(new Error(`completion handler failed (${signal ?? code ?? 'unknown'})${detail}`));
-    });
-    child.stdin.end(`${JSON.stringify(event)}\n`);
-  });
 }
 
 function projectReview(dir: string, result: TicketResult): void {
