@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "build": "tsc && npm run build --workspace=web",
+    "postbuild": "chmod +x dist/cli.js",
     "dev": "tsx src/cli.ts",
     "link": "npm link",
     "postinstall": "node dist/scripts/install-renderer.js || true",
