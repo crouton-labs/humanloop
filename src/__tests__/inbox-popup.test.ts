@@ -39,6 +39,20 @@ function toggle(extra: string[]): Promise<string> {
 const bindingSocket = join(temp, 'tmux.sock');
 const inner = join(temp, 'inner.sock');
 const outer = join(temp, 'outer.sock');
+let cleanedUp = false;
+function cleanup(): void {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  for (const socket of [bindingSocket, inner, outer]) { try { execFileSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* server already gone */ } }
+  rmSync(temp, { recursive: true, force: true });
+  rmSync(runtime, { recursive: true, force: true });
+}
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+  process.once(signal, () => {
+    cleanup();
+    process.exit(exitCode);
+  });
+}
 
 execFileSync('tmux', ['-S', bindingSocket, '-f', '/dev/null', 'new-session', '-d', '-s', 'popup-test', 'sleep 600']);
 try {
@@ -115,8 +129,6 @@ try {
   await poll(() => (tmuxTry(outer, ['capture-pane', '-p', '-t', 'host']).includes('humanloop · inbox') ? undefined : true), 'popup dismisses promptly despite the hung handler child');
   await poll(() => (existsSync(control) ? undefined : true), 'control socket removed after quit with a hung handler');
 } finally {
-  for (const socket of [bindingSocket, inner, outer]) { try { execFileSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* server already gone */ } }
-  rmSync(temp, { recursive: true, force: true });
-  rmSync(runtime, { recursive: true, force: true });
+  cleanup();
 }
 console.log('inbox popup tests passed');
