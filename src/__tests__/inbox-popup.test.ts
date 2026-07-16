@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { popupPaths, inboxToggleTmuxCommand, inboxPopupFlags } from '../tui/tmux.js';
+import { popupLogPath } from '../tui/log.js';
 import { registerInboxRoot } from '../inbox/registry.js';
 import { submitDeck } from '../inbox/tickets.js';
 
@@ -13,6 +14,7 @@ const temp = mkdtempSync(join(tmpdir(), 'humanloop-popup-'));
 // unix-socket path stays under the macOS 104-char limit (a nested temp path overflows it).
 const runtime = mkdtempSync('/tmp/hlr-');
 process.env.XDG_RUNTIME_DIR = runtime;
+process.env.XDG_STATE_HOME = join(temp, 'state');
 
 const cli = fileURLToPath(new URL('../../dist/cli.js', import.meta.url));
 if (!existsSync(cli)) throw new Error(`built CLI missing at ${cli}; run \`npm run build\` before this test`);
@@ -87,6 +89,10 @@ try {
 
   // (a) first toggle from closed → opened
   assert.equal(await toggle(['--tmux-socket', inner, '--tmux-client', clientName]), 'opened', 'first toggle opens the popup');
+  const popupLog = readFileSync(popupLogPath(), 'utf8');
+  assert.match(popupLog, /"event":"toggle.requested"/);
+  assert.match(popupLog, /"event":"popup.opened"/);
+  assert.match(popupLog, new RegExp(`"client":"${clientName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
   // (b) the popup's real title border renders through to the outer capture
   await poll(() => tmuxTry(outer, ['capture-pane', '-p', '-t', 'host']).includes('humanloop · inbox') || undefined, 'popup title renders in the outer capture');
   // (c) a popup is an overlay, not a pane — inner pane ids are unchanged
