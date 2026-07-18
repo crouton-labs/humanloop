@@ -1,9 +1,9 @@
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import type { Deck, DeckTicketResult, FeedbackResult, ReviewDescriptor, ReviewTicketResult, TicketResult } from '../types.js';
 import { buildSummary } from '../summary.js';
-import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, responsePath, reviewPath } from './convention.js';
+import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, publishJsonExclusive, responsePath, reviewPath, visualsDir } from './convention.js';
 import { validateDeck, validateReviewDescriptor, validateReviewProjection, resolveDeckBodyPaths } from './deck-schema.js';
 import { registeredInboxRoot } from './registry.js';
 import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js';
@@ -59,7 +59,7 @@ function ticketDir(root: string, id: string): { dir: string; created: boolean } 
 }
 function discardCreatedTicket(dir: string, created: boolean): void { if (created) rmSync(dir, { recursive: true, force: true }); }
 function hasTicketProtocolState(dir: string): boolean {
-  return [deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir), followupRequestPath(dir), followupResultPath(dir)].some(existsSync);
+  return [deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir), followupRequestPath(dir), followupResultPath(dir), visualsDir(dir)].some(existsSync);
 }
 function requireRegisteredTicket(dir: string): { root: string; dir: string } {
   const canonical = realpathSync(dir);
@@ -70,14 +70,16 @@ function requireRegisteredTicket(dir: string): { root: string; dir: string } {
   return { root, dir: canonical };
 }
 
+/** Canonical registered-root/direct-child containment shared by host protocols. */
+export function requireCanonicalTicket(root: string, dir: string): { root: string; dir: string } {
+  const registration = registeredInboxRoot(root);
+  const ticket = requireRegisteredTicket(dir);
+  if (registration === null || ticket.root !== registration.root) throw new Error('ticket is not a canonical direct child of the registered root');
+  return ticket;
+}
+
 function publishRequest(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  try { linkSync(temp, path); } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`ticket request already exists: ${path}`);
-    throw error;
-  } finally { unlinkSync(temp); }
+  if (!publishJsonExclusive(path, value)) throw new Error(`ticket request already exists: ${path}`);
 }
 
 export interface SubmitDeckOptions { root: string; id: string; deck: Deck; }
@@ -115,13 +117,7 @@ export function submitReview(opts: SubmitReviewOptions): { id: string; dir: stri
 }
 
 function exclusiveResult(dir: string, result: TicketResult): boolean {
-  const path = responsePath(dir);
-  const temp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
-  try { linkSync(temp, path); return true; } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw error;
-  } finally { unlinkSync(temp); }
+  return publishJsonExclusive(responsePath(dir), result);
 }
 
 function requireDeck(dir: string): Deck { return validateDeck(JSON.parse(readFileSync(deckPath(dir), 'utf8'))); }

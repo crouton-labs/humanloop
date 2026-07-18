@@ -80,6 +80,8 @@ export interface DeckSource {
    *  a crouter canvas node. Lets per-node attention scoping attribute the ask
    *  to the node that raised it rather than every sibling sharing the cwd. */
   nodeId?: string;
+  /** Host-owned durable Visual capability marker. A registered handler is also required. */
+  visual?: 'humanloop.visual/v1';
 }
 
 export interface Deck {
@@ -279,10 +281,30 @@ export interface DisplayOpts {
 
 // ── Public panel API ──────────────────────────────────────────────────────────
 
+/** Width-free Interaction snapshot shared by the panel and durable Visual protocol. */
+export interface CanonicalInteractionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface CanonicalInteraction {
+  id: string;
+  title: string;
+  subtitle?: string;
+  body?: string;
+  options: CanonicalInteractionOption[];
+  multiSelect?: boolean;
+  allowFreetext?: boolean;
+  freetextLabel?: string;
+  kind?: InteractionKind;
+  preAnswered?: InteractionPreAnswer;
+}
+
 export interface VisualRequest {
   requestId: string;
   generationId: string;
-  interaction: Interaction;
+  interaction: CanonicalInteraction;
 }
 
 export type VisualResult =

@@ -19,6 +19,34 @@ export type { SubmitDeckOptions, SubmitReviewOptions } from './inbox/tickets.js'
 export { dispatchCompletion, reconcileCompletions } from './inbox/completion.js';
 export { requestFollowUp, cancelFollowUp, submitFollowUpResult, readFollowUp } from './inbox/followup.js';
 export type { FollowUpRequestEvent, FollowUpRequest, FollowUpResult } from './inbox/followup.js';
+export {
+  VISUAL_CAPABILITY,
+  canonicalizeInteraction,
+  canonicalInteractionJson,
+  parseVisualRequestEvent,
+  readVisualRequest,
+  readVisualResult,
+  readVisualRequestForEvent,
+  startVisualRequest,
+  submitVisualResult,
+  cancelVisualRequest,
+  cancelVisualRequestsForTicket,
+  dispatchVisualCleanup,
+  listVisualCleanupObligations,
+} from './inbox/visual.js';
+export type {
+  VisualClaimIdentity,
+  VisualCleanupObligation,
+  VisualProtocolRequest,
+  VisualRequestEvent,
+  VisualProtocolResult,
+  VisualResultSubmission,
+  StartVisualRequestOptions,
+  StartedVisualRequest,
+  VisualStartDeliveryResult,
+  VisualCleanupDeliveryResult,
+  VisualCleanupTask,
+} from './inbox/visual.js';
 export { claimTicket, heartbeatClaim, releaseClaim, readTicketClaim } from './inbox/claim.js';
 export type { TicketClaim, ClaimOptions } from './inbox/claim.js';
 
@@ -49,6 +77,7 @@ export type { InteractionState } from './inbox/convention.js';
 export type {
   Interaction, InteractionOption, InteractionResponse, InteractionKind,
   Deck, DeckSource,
+  CanonicalInteractionOption, CanonicalInteraction,
   MountedPanel, MountedPanelOpts, VisualProvider, VisualRequest, VisualHandle, VisualResult, VisualBlock, FollowUpState,
   FeedbackComment, FeedbackResult,
   ResolutionEnvelope, InboxItem, DisplayOpts,

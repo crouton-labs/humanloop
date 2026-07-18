@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve as resolvePath } from 'node:path';
 import type {
   Deck, TuiState, Interaction, InteractionResponse,
-  MountedPanel, MountedPanelOpts, VisualHandle, VisualProvider,
+  MountedPanel, MountedPanelOpts, VisualHandle, VisualProvider, CanonicalInteraction,
 } from '../types.js';
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
 import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
@@ -11,6 +11,7 @@ import { handleKeypress, assignShortcuts } from './input.js';
 import { renderMarkdown } from '../render/termrender.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { validateDeck } from '../inbox/deck-schema.js';
+import { canonicalizeInteraction } from '../inbox/visual.js';
 import { progressPath as progressPathFor, deckPath as deckPathFor, writeResponse, clearProgress } from '../inbox/convention.js';
 import { startWebServer } from '../browser/server.js';
 import type { WebServerHandle } from '../browser/server.js';
@@ -148,17 +149,8 @@ function rerenderVisuals(internals: PanelInternals): void {
   }
 }
 
-function visualRequestInteraction(interaction: Interaction): Interaction {
-  return {
-    ...interaction,
-    options: interaction.options.map(({ shortcut: _shortcut, ...option }) => ({ ...option })),
-    ...(interaction.preAnswered === undefined ? {} : {
-      preAnswered: {
-        ...interaction.preAnswered,
-        ...(interaction.preAnswered.selectedOptionIds === undefined ? {} : { selectedOptionIds: [...interaction.preAnswered.selectedOptionIds] }),
-      },
-    }),
-  };
+function visualRequestInteraction(interaction: Interaction): CanonicalInteraction {
+  return canonicalizeInteraction(interaction);
 }
 
 function retireVisuals(internals: PanelInternals): void {

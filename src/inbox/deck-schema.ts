@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
-import { claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, responsePath, reviewPath } from './convention.js';
+import { claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, responsePath, reviewPath, visualsDir } from './convention.js';
 import { z } from 'zod';
 import { INTERACTION_KINDS } from '../types.js';
 import type { Deck, ReviewDescriptor } from '../types.js';
@@ -13,7 +13,7 @@ const interactionSchema = z.object({
   title: z.string().min(1), subtitle: z.string().min(1).optional(), body: z.string().optional(), bodyPath: z.string().optional(),
   options: z.array(interactionOptionSchema), multiSelect: z.boolean().optional(), allowFreetext: z.boolean().optional(), freetextLabel: z.string().optional(), kind: z.enum(INTERACTION_KINDS).optional(), preAnswered: preAnswerSchema.optional(),
 });
-const deckSourceSchema = z.object({ sessionName: z.string().optional(), askedBy: z.string().optional(), blockedSince: z.string().optional(), nodeId: z.string().optional() });
+const deckSourceSchema = z.object({ sessionName: z.string().optional(), askedBy: z.string().optional(), blockedSince: z.string().optional(), nodeId: z.string().optional(), visual: z.literal('humanloop.visual/v1').optional() });
 export const deckSchema = z.object({ title: z.string().optional(), source: deckSourceSchema.optional(), interactions: z.array(interactionSchema).min(1) }).superRefine((input, ctx) => {
   const seen = new Set<string>();
   input.interactions.forEach((interaction, index) => {
@@ -71,8 +71,8 @@ export function validateReviewProjection(dir: string, parsed: unknown): ReviewDe
   if (!/\.md(?:own)?$/i.test(descriptor.file) || !existsSync(descriptor.file)) throw new Error('review file must be an existing absolute markdown file');
   const file = realpathSync(descriptor.file);
   const output = resolve(realpathSync(dirname(descriptor.output)), basename(descriptor.output));
-  const reserved = new Set(['deck.json', 'review.json', 'response.json', 'progress.json', 'claim.json', 'delivery.json', 'delivery-error.json', 'followup-request.json', 'followup-result.json']);
-  const ownProtocolPaths = new Set([deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir), followupRequestPath(dir), followupResultPath(dir)]);
+  const reserved = new Set(['deck.json', 'review.json', 'response.json', 'progress.json', 'claim.json', 'delivery.json', 'delivery-error.json', 'followup-request.json', 'followup-result.json', 'visuals']);
+  const ownProtocolPaths = new Set([deckPath(dir), reviewPath(dir), responsePath(dir), progressPath(dir), claimPath(dir), deliveryPath(dir), deliveryErrorPath(dir), followupRequestPath(dir), followupResultPath(dir), visualsDir(dir)]);
   if (output === file || reserved.has(basename(output)) || ownProtocolPaths.has(output)) throw new Error('review output must not alias the source or ticket protocol files');
   return { ...descriptor, file, output };
 }

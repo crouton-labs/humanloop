@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -15,8 +15,6 @@ export function deliveryErrorPath(dir: string): string { return `${dir}/delivery
 export function followupRequestPath(dir: string): string { return `${dir}/followup-request.json`; }
 export function followupResultPath(dir: string): string { return `${dir}/followup-result.json`; }
 export function visualsDir(dir: string): string { return `${dir}/visuals`; }
-export function visualMdPath(dir: string, id: string): string { return `${dir}/visuals/${id}.md`; }
-export function visualAnsiPath(dir: string, id: string): string { return `${dir}/visuals/${id}.ansi`; }
 
 /** Spawns a handler `{command,args}` with `event` as JSON on stdin. Exit 0
  *  acknowledges; a nonzero exit, spawn error, or 30s timeout rejects with an
@@ -66,6 +64,22 @@ export function atomicWriteJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+/** Publish one immutable JSON record without replacing an existing winner. */
+export function publishJsonExclusive(path: string, value: unknown): boolean {
+  const tmp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  try {
+    linkSync(tmp, path);
+    return true;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    unlinkSync(tmp);
+  }
 }
 
 export function readJson<T>(path: string): T | null {

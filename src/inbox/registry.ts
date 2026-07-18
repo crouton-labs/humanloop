@@ -6,9 +6,9 @@ import type { CompletionEvent } from '../types.js';
 import { atomicWriteJson, readJson, withExclusiveDirectoryLock } from './convention.js';
 
 export interface CompletionHandler { command: string; args: string[]; }
-export interface InboxRootRegistration { schema: 'humanloop.inbox-root/v1'; root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; }
+export interface InboxRootRegistration { schema: 'humanloop.inbox-root/v1'; root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; visualHandler?: CompletionHandler; }
 export interface InboxRootStatus extends InboxRootRegistration { available: boolean; }
-export interface RegisterInboxRootOptions { root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; }
+export interface RegisterInboxRootOptions { root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; visualHandler?: CompletionHandler; }
 
 function stateHome(): string { return process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'); }
 export function inboxRootsDirectory(): string { return join(stateHome(), 'humanloop', 'inbox-roots'); }
@@ -17,7 +17,7 @@ function canonicalRoot(root: string): string { try { return realpathSync(root); 
 
 function validateHandler(handler: CompletionHandler | undefined): CompletionHandler | undefined {
   if (handler === undefined) return undefined;
-  if (!handler.command || !Array.isArray(handler.args) || !handler.args.every((arg) => typeof arg === 'string')) throw new Error('completion handler requires a command and string args');
+  if (typeof handler.command !== 'string' || handler.command.trim() === '' || !Array.isArray(handler.args) || !handler.args.every((arg) => typeof arg === 'string')) throw new Error('handler requires a non-empty command and string args');
   return { command: handler.command, args: [...handler.args] };
 }
 
@@ -30,6 +30,7 @@ function validateRegistration(raw: unknown): InboxRootRegistration | null {
       schema: 'humanloop.inbox-root/v1', root: value.root, owner: value.owner,
       handler: value.handler === undefined ? undefined : validateHandler(value.handler as CompletionHandler),
       followUpHandler: value.followUpHandler === undefined ? undefined : validateHandler(value.followUpHandler as CompletionHandler),
+      visualHandler: value.visualHandler === undefined ? undefined : validateHandler(value.visualHandler as CompletionHandler),
     };
   } catch { return null; }
 }
@@ -45,7 +46,7 @@ export function registerInboxRoot(opts: RegisterInboxRootOptions): InboxRootRegi
     const existing = validateRegistration(readJson<unknown>(path));
     if (existing !== null && existing.root === root && existing.owner !== opts.owner) throw new Error(`inbox root is already owned by ${existing.owner}`);
     if (existing !== null && existing.root !== root) throw new Error('inbox root registry hash collision');
-    const registration: InboxRootRegistration = { schema: 'humanloop.inbox-root/v1', root, owner: opts.owner, handler: validateHandler(opts.handler), followUpHandler: validateHandler(opts.followUpHandler) };
+    const registration: InboxRootRegistration = { schema: 'humanloop.inbox-root/v1', root, owner: opts.owner, handler: validateHandler(opts.handler), followUpHandler: validateHandler(opts.followUpHandler), visualHandler: validateHandler(opts.visualHandler) };
     atomicWriteJson(path, registration);
     chmodSync(path, 0o600);
     return registration;
