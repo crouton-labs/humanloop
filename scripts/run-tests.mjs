@@ -12,6 +12,7 @@ const SUITE_TIMEOUT_MS = 45_000;
 
 const tests = [
   { path: 'src/__tests__/visual.test.ts' },
+  { path: 'src/__tests__/visual-controller.test.ts' },
   { path: 'src/__tests__/editor-roundtrip.test.ts' },
   { path: 'src/__tests__/inbox-core.test.ts' },
   { path: 'src/__tests__/followup.test.ts' },

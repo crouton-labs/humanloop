@@ -301,7 +301,10 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     loadDeck(deck, loadOpts) {
       if (!internals.mounted) return;
       const prior = collectResponses(internals.state);
+      // Retire before replacing capability: old handles become non-current,
+      // then the next generation uses only the freshly derived provider.
       retireVisuals(internals);
+      if (loadOpts !== undefined && 'visualProvider' in loadOpts) internals.visualProvider = loadOpts.visualProvider;
       internals.state = buildInitialState(deck, internals.callbacks.onEditorRequest !== undefined, internals.followUpAvailable);
       if (loadOpts !== undefined && loadOpts.progressPath !== undefined) {
         internals.progressPath = loadOpts.progressPath;

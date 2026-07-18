@@ -15,7 +15,7 @@ import {
   withExclusiveDirectoryLockAsync,
 } from './convention.js';
 import { parseDeck } from './deck-schema.js';
-import { readTicketClaim, withTicketLock } from './claim.js';
+import { isStaleClaim, readTicketClaim, withTicketLock } from './claim.js';
 import { registeredInboxRoot, type CompletionHandler } from './registry.js';
 import { requireCanonicalTicket } from './tickets.js';
 
@@ -729,4 +729,75 @@ export function listVisualCleanupObligations(root: string, dir: string): VisualC
     if (request?.cleanup !== undefined && cleanupOwed(requestDir, request)) tasks.push({ root: ticket.root, dir: ticket.dir, requestId, reason: request.cleanup.reason, nextAttemptAt: request.cleanup.nextAttemptAt });
   }
   return tasks.sort((left, right) => left.nextAttemptAt.localeCompare(right.nextAttemptAt) || left.requestId.localeCompare(right.requestId));
+}
+
+export interface VisualRequestReconciliation {
+  retired: number;
+  cleanupOwed: number;
+  /** Cleanup delivery only; reconciliation never redelivers a start. */
+  delivery: Promise<VisualCleanupDeliveryResult[]>;
+}
+
+/** Retire abandoned generations under the ticket claim boundary. A live claim is
+ * authoritative; a newly acquired claim retires every older generation first. */
+export function reconcileVisualRequestsForTicket(root: string, dir: string, currentClaimToken?: string): VisualRequestReconciliation {
+  const ticket = requireCanonicalTicket(root, dir);
+  const reconciled = withTicketLock(ticket.dir, () => {
+    const claim = readTicketClaim(ticket.dir);
+    if (currentClaimToken !== undefined) {
+      uuid.parse(currentClaimToken);
+      if (claim?.token !== currentClaimToken) return { retired: 0, owed: [] as string[] };
+    } else if (claim !== null && !isStaleClaim(claim)) {
+      return { retired: 0, owed: [] as string[] };
+    }
+
+    const entries = requestIdsForTicket(ticket.root, ticket.dir).map((requestId) => {
+      const request = readVisualRequest(ticket.root, ticket.dir, requestId);
+      if (request === null || (currentClaimToken !== undefined && request.claim.token === currentClaimToken)) return { requestId, canceled: null };
+      return { requestId, canceled: stateFirstCancel(ticket.root, ticket.dir, requestId) };
+    });
+    const owed = entries.filter((entry) => entry.canceled?.owed === true).map((entry) => entry.requestId);
+    return { retired: entries.filter((entry) => entry.canceled?.changed === true).length, owed };
+  });
+  return {
+    retired: reconciled.retired,
+    cleanupOwed: reconciled.owed.length,
+    delivery: Promise.all(reconciled.owed.map((requestId) => dispatchVisualCleanup(ticket.root, ticket.dir, requestId))),
+  };
+}
+
+/** Enumerate direct ticket children only, including resolved tickets whose cleanup is still owed. */
+export function listVisualCleanupObligationsForRoot(root: string): VisualCleanupTask[] {
+  const registration = registeredInboxRoot(root);
+  if (registration === null) return [];
+  const tasks: VisualCleanupTask[] = [];
+  for (const entry of readdirSync(registration.root)) {
+    const candidate = resolve(registration.root, entry);
+    let dir: string;
+    try {
+      if (!statSync(candidate).isDirectory()) continue;
+      dir = realpathSync(candidate);
+    } catch { continue; }
+    if (dirname(dir) !== registration.root) continue;
+    try { tasks.push(...listVisualCleanupObligations(registration.root, dir)); } catch { /* unrelated or malformed children are not Visual work */ }
+  }
+  return tasks.sort((left, right) => left.nextAttemptAt.localeCompare(right.nextAttemptAt) || left.dir.localeCompare(right.dir) || left.requestId.localeCompare(right.requestId));
+}
+
+/** Startup reconciliation only retires stale/missing-claim work; live owners stay untouched. */
+export function reconcileStaleVisualRequestsForRoot(root: string): VisualRequestReconciliation[] {
+  const registration = registeredInboxRoot(root);
+  if (registration === null) return [];
+  const reconciled: VisualRequestReconciliation[] = [];
+  for (const entry of readdirSync(registration.root)) {
+    const candidate = resolve(registration.root, entry);
+    let dir: string;
+    try {
+      if (!statSync(candidate).isDirectory()) continue;
+      dir = realpathSync(candidate);
+    } catch { continue; }
+    if (dirname(dir) !== registration.root) continue;
+    try { reconciled.push(reconcileVisualRequestsForTicket(registration.root, dir)); } catch { /* unrelated or malformed children have no protocol obligation */ }
+  }
+  return reconciled;
 }

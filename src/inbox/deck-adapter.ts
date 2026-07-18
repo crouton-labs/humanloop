@@ -64,8 +64,8 @@ export class DeckAdapter {
   }
 
   /** Fresh descriptor reads preserve mounted answers for interaction ids still present. */
-  reload(deck: Deck): void {
-    this.panel.loadDeck(deck, { progressPath: progressPath(this.opts.dir) });
+  reload(deck: Deck, visualProvider: VisualProvider | undefined): void {
+    this.panel.loadDeck(deck, { progressPath: progressPath(this.opts.dir), visualProvider });
     this.opts.onDirty();
   }
 

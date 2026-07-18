@@ -346,7 +346,7 @@ export interface MountedPanel {
   render(): string[];
   handleResize(cols: number, rows: number): string[];
   unmount(): void;
-  loadDeck(deck: Deck, opts?: { progressPath?: string }): void;
+  loadDeck(deck: Deck, opts?: { progressPath?: string; visualProvider?: VisualProvider }): void;
   setFollowUpHandlers(available: boolean, onRequest?: (question: string) => void, onCancel?: () => void): void;
   setFollowUpState(state: FollowUpState): void;
   canAcceptHostKeys(): boolean;

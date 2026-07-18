@@ -1,5 +1,6 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
-import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualProvider } from '../types.js';
+import { join } from 'node:path';
+import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
@@ -15,12 +16,23 @@ import { inboxRootsDirectory, listInboxRoots, registeredInboxRoot } from './regi
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { completeDeck, readTicketResult, ticketRoot } from './tickets.js';
 import { reconcileCompletions } from './completion.js';
-import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath } from './convention.js';
+import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, visualsDir } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { cancelFollowUp, readFollowUp, requestFollowUp } from './followup.js';
+import {
+  cancelVisualRequest,
+  dispatchVisualCleanup,
+  listVisualCleanupObligationsForRoot,
+  readVisualResult,
+  reconcileStaleVisualRequestsForRoot,
+  reconcileVisualRequestsForTicket,
+  startVisualRequest,
+  VISUAL_CAPABILITY,
+  type VisualCleanupTask,
+} from './visual.js';
 
 export interface InboxControllerOptions {
   roots?: string[];
@@ -34,6 +46,56 @@ export interface InboxControllerOptions {
 }
 
 type Screen = 'list' | 'detail';
+
+/** One controller-owned retry loop for durable cancellation only. */
+class VisualCleanupExecutor {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private readonly dispatching = new Set<string>();
+  private stopped = false;
+
+  constructor(private readonly roots: () => string[]) {}
+
+  reconcile(): void {
+    if (this.stopped) return;
+    let tasks: VisualCleanupTask[] = [];
+    for (const root of this.roots()) {
+      try { tasks.push(...listVisualCleanupObligationsForRoot(root)); } catch { /* the next root reconciliation retries durable work */ }
+    }
+    tasks = tasks.filter((task) => !this.dispatching.has(this.key(task)));
+    const now = Date.now();
+    for (const task of tasks.filter((candidate) => Date.parse(candidate.nextAttemptAt) <= now)) this.dispatch(task);
+    this.arm(tasks.filter((task) => !this.dispatching.has(this.key(task))));
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private dispatch(task: VisualCleanupTask): void {
+    const key = this.key(task);
+    if (this.dispatching.has(key)) return;
+    this.dispatching.add(key);
+    void dispatchVisualCleanup(task.root, task.dir, task.requestId).catch(() => undefined).finally(() => {
+      this.dispatching.delete(key);
+      this.reconcile();
+    });
+  }
+
+  private arm(tasks: VisualCleanupTask[]): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+    const earliest = tasks.reduce<number | undefined>((next, task) => {
+      const due = Date.parse(task.nextAttemptAt);
+      return Number.isFinite(due) && (next === undefined || due < next) ? due : next;
+    }, undefined);
+    if (earliest === undefined) return;
+    this.timer = setTimeout(() => { this.timer = undefined; this.reconcile(); }, Math.max(0, earliest - Date.now()));
+  }
+
+  private key(task: VisualCleanupTask): string { return `${task.root}\u0000${task.dir}\u0000${task.requestId}`; }
+}
 
 /** One terminal owner for scanning, stable selection, claims, and frame diffs. */
 export class InboxController {
@@ -60,6 +122,8 @@ export class InboxController {
   private deckBrowserGeneration = 0;
   private claim: { dir: string; token: string } | undefined;
   private reconciling = false;
+  private visualReconciling = false;
+  private readonly visualCleanupExecutor: VisualCleanupExecutor;
   private suspended = false;
   private submittingDir: string | undefined;
   private stdinListener: ((data: Buffer) => void) | undefined;
@@ -80,7 +144,9 @@ export class InboxController {
     const size = getTerminalSize();
     this.cols = options.cols ?? size.cols;
     this.rows = options.rows ?? size.rows;
+    this.visualCleanupExecutor = new VisualCleanupExecutor(() => this.resolvedRoots());
     this.rescan();
+    this.reconcileVisualWork();
   }
 
   snapshot(): { items: TicketSummary[]; selectedDir?: string; screen: Screen; inputBuffer?: string } {
@@ -193,8 +259,15 @@ export class InboxController {
     const claim = claimTicket(item.dir);
     if (claim === null) { this.status = 'ticket is being edited by another inbox'; return; }
     this.claim = { dir: item.dir, token: claim.token };
-    const deck = readJson<Deck>(deckPath(item.dir));
-    if (deck === null) { releaseClaim(item.dir, claim.token); this.claim = undefined; this.invalidate(); return; }
+    const deck = this.readDeck(item.dir);
+    if (deck === undefined) { releaseClaim(item.dir, claim.token); this.claim = undefined; this.invalidate(); return; }
+    const root = ticketRoot(item.dir);
+    if (root !== null) {
+      // A newly acquired claim makes every older running generation stale
+      // before the panel can mint its own work. This only dispatches cleanup.
+      const retirement = reconcileVisualRequestsForTicket(root, item.dir, claim.token);
+      void retirement.delivery.finally(() => this.visualCleanupExecutor.reconcile());
+    }
     // Notifications use the same canonical deck panel as every other deck:
     // opening is not acknowledgement; panel completion is.
     this.activeDeck = deck;
@@ -206,7 +279,7 @@ export class InboxController {
       cols: this.detailSize().cols,
       rows: this.detailSize().rows,
       onDirty: () => this.repaint(),
-      visualProvider: this.options.visualProvider,
+      visualProvider: this.visualProviderFor(item.dir, deck, claim.token),
       onEditorRequest: () => this.editActiveDeckInput(),
       followUpAvailable: followUp.available,
       onFollowUpRequest: followUp.onRequest,
@@ -256,7 +329,8 @@ export class InboxController {
     this.activeDeck = deck;
     const followUp = this.followUpHandlers(this.claim.dir, deck);
     this.adapter.setFollowUpHandlers(followUp.available, followUp.onRequest, followUp.onCancel);
-    this.adapter.reload(deck);
+    // Reload replaces the capability before it mints the next panel generation.
+    this.adapter.reload(deck, this.visualProviderFor(this.claim.dir, deck, this.claim.token));
     if (followUp.available) this.adapter.setFollowUpState(this.followUpViewState(this.claim.dir));
     this.repaint();
   }
@@ -417,6 +491,7 @@ export class InboxController {
     this.deckBrowser = undefined;
     void browser?.stop();
     this.leaveDetail();
+    this.visualCleanupExecutor.stop();
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
     this.selectedWatcher?.close();
@@ -522,6 +597,85 @@ export class InboxController {
       try { for (const root of roots) { try { await reconcileCompletions(root); } catch { /* undelivered stays for the next pass */ } } }
       finally { this.reconciling = false; }
     })();
+    this.reconcileVisualWork();
+  }
+
+  /** Reconciliation owns stale-claim retirement and durable cleanup, never a Visual start. */
+  private reconcileVisualWork(): void {
+    if (this.visualReconciling) return;
+    this.visualReconciling = true;
+    const roots = this.resolvedRoots();
+    void (async () => {
+      try {
+        const deliveries = roots.flatMap((root) => {
+          try { return reconcileStaleVisualRequestsForRoot(root).map((entry) => entry.delivery); } catch { return []; }
+        });
+        await Promise.all(deliveries);
+      } finally {
+        this.visualReconciling = false;
+        this.visualCleanupExecutor.reconcile();
+      }
+    })();
+  }
+
+  /** Automatic ticket capability is deliberately marker + current-root-handler only. */
+  private visualProviderFor(dir: string, deck: Deck, claimToken: string): VisualProvider | undefined {
+    // An inline provider is intentional host injection, independent of ticket capability.
+    if (this.options.visualProvider !== undefined) return this.options.visualProvider;
+    const root = ticketRoot(dir);
+    if (root === null || deck.source?.visual !== VISUAL_CAPABILITY || registeredInboxRoot(root)?.visualHandler === undefined) return undefined;
+    return (request) => this.startTicketVisual(root, dir, claimToken, request);
+  }
+
+  private startTicketVisual(root: string, dir: string, claimToken: string, request: VisualRequest): VisualHandle {
+    let watcher: FSWatcher | undefined;
+    let settled = false;
+    let settle!: (result: VisualResult) => void;
+    const result = new Promise<VisualResult>((resolve) => { settle = resolve; });
+    const finish = (outcome: VisualResult) => {
+      if (settled) return;
+      settled = true;
+      watcher?.close();
+      watcher = undefined;
+      settle(outcome);
+    };
+    let started: ReturnType<typeof startVisualRequest>;
+    try {
+      started = startVisualRequest({ root, dir, claimToken, request });
+    } catch (error) {
+      finish({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+      return { result, cancel: () => {} };
+    }
+    const reread = () => {
+      if (settled) return;
+      try {
+        const outcome = readVisualResult(root, dir, request.requestId);
+        if (outcome === null) return;
+        finish(outcome.status === 'ready'
+          ? { status: 'ready', markdown: outcome.markdown }
+          : { status: 'error', error: outcome.error });
+      } catch (error) {
+        finish({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    try {
+      // Install the watch before the first durable reread so a publication in
+      // the narrow setup window is either observed or found by that reread.
+      watcher = watch(join(visualsDir(dir), request.requestId), () => reread());
+      watcher.once('error', (error) => finish({ status: 'error', error: error.message }));
+      reread();
+    } catch (error) {
+      finish({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+    }
+    void started.delivery.then(reread, (error) => finish({ status: 'error', error: error instanceof Error ? error.message : String(error) }));
+    return {
+      result,
+      cancel: () => {
+        watcher?.close();
+        watcher = undefined;
+        void cancelVisualRequest(root, dir, request.requestId).finally(() => this.visualCleanupExecutor.reconcile());
+      },
+    };
   }
 
   private leaveDetail(release = true): void {
@@ -531,6 +685,7 @@ export class InboxController {
     this.deckBrowserStarting = false;
     this.adapter?.close();
     this.adapter = undefined;
+    this.visualCleanupExecutor.reconcile();
     this.activeDeck = undefined;
     this.selectedWatcher?.close();
     this.selectedWatcher = undefined;
