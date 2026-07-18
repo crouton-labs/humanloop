@@ -1,5 +1,4 @@
 export { mountPanel, validateInput, launchTui } from './tui/app.js';
-export { defaultGenerateVisual } from './visuals/generate.js';
 export { launchReview } from './editor/review.js';
 export { launchReview as review } from './editor/review.js';
 export type { ReviewOptions } from './editor/review.js';
@@ -50,7 +49,7 @@ export type { InteractionState } from './inbox/convention.js';
 export type {
   Interaction, InteractionOption, InteractionResponse, InteractionKind,
   Deck, DeckSource,
-  MountedPanel, MountedPanelOpts, GenerateVisual, VisualBlock, FollowUpState,
+  MountedPanel, MountedPanelOpts, VisualProvider, VisualRequest, VisualHandle, VisualResult, VisualBlock, FollowUpState,
   FeedbackComment, FeedbackResult,
   ResolutionEnvelope, InboxItem, DisplayOpts,
   ClaimSummary, TicketSummary, DeckTicketSummary, ReviewTicketSummary,
@@ -58,4 +57,3 @@ export type {
   CompletionEvent,
 } from './types.js';
 export type { Key } from './tui/terminal.js';
-export type { ConversationMessage } from './conversation/reader.js';

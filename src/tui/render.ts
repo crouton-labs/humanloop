@@ -247,7 +247,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     postLines.push('');
     postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}^J/⌥⏎${RESET} newline${state.editorAvailable ? `  ${DIM}^O${RESET} editor` : ''}  ${DIM}esc${RESET} cancel`);
   } else {
-    postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
+    postLines.push(...renderActions(interaction, state.selectedAction, maxW, response, state.followUp?.status !== 'running'));
   }
 
   // Transient hint (e.g. an empty multi-select Enter that was rejected). Sits
@@ -345,6 +345,7 @@ function renderActions(
   selectedAction: number,
   maxW: number,
   existing?: InteractionResponse,
+  showFocus = true,
 ): string[] {
   const lines: string[] = [];
   const opts = interaction.options;
@@ -360,7 +361,7 @@ function renderActions(
 
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i]!;
-    const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const cursor = showFocus && i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     const sc = o.shortcut === undefined ? ' ' : o.shortcut;
     const keyBadge = `${DIM}[${sc}]${RESET}`;
     const box = multi
@@ -390,7 +391,7 @@ function renderActions(
   }
 
   if (interaction.allowFreetext && opts.length > 0) {
-    const cursor = opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const cursor = showFocus && opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     let label: string;
     if (interaction.freetextLabel !== undefined) label = interaction.freetextLabel;
     else if (multi) label = 'Add overall comment  (c on an option for per-option)';

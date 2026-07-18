@@ -1,4 +1,4 @@
-import type { Deck, FollowUpState, GenerateVisual, InteractionResponse, MountedPanel } from '../types.js';
+import type { Deck, FollowUpState, InteractionResponse, MountedPanel, VisualProvider } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { progressPath, readJson } from './convention.js';
 import { mountPanel } from '../tui/app.js';
@@ -12,7 +12,7 @@ export interface DeckAdapterOptions {
   onComplete: (responses: InteractionResponse[]) => void;
   onBack: () => void;
   onDirty: () => void;
-  generateVisual?: GenerateVisual;
+  visualProvider?: VisualProvider;
   onEditorRequest?: () => void;
   followUpAvailable?: boolean;
   onFollowUpRequest?: (question: string) => void;
@@ -39,7 +39,7 @@ export class DeckAdapter {
       // notification is resolved only by its explicit acknowledgement.
       onExit: () => { if (notificationsAcknowledged(opts.deck, this.responses)) opts.onComplete(this.responses); },
       onDirty: opts.onDirty,
-      generateVisual: opts.generateVisual,
+      visualProvider: opts.visualProvider,
       onEditorRequest: opts.onEditorRequest,
       followUpAvailable: opts.followUpAvailable,
       onFollowUpRequest: opts.onFollowUpRequest,

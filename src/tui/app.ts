@@ -1,14 +1,13 @@
 import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync, statSync } from 'fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, resolve as resolvePath } from 'node:path';
 import type {
   Deck, TuiState, Interaction, InteractionResponse,
-  MountedPanel, MountedPanelOpts, GenerateVisual,
+  MountedPanel, MountedPanelOpts, VisualHandle, VisualProvider,
 } from '../types.js';
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
 import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
-import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
-import { visualRenderWidth } from '../visuals/generate.js';
 import { renderMarkdown } from '../render/termrender.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { validateDeck } from '../inbox/deck-schema.js';
@@ -109,8 +108,9 @@ interface PanelInternals {
   cols: number;
   rows: number;
   mounted: boolean;
-  generateVisual: GenerateVisual | undefined;
+  visualProvider: VisualProvider | undefined;
   visualGeneration: number;
+  visualHandles: Map<string, VisualHandle>;
   progressPath: string | undefined;
   followUpAvailable: boolean;
   callbacks: {
@@ -132,11 +132,15 @@ function rebindPersist(internals: PanelInternals): void {
   };
 }
 
+function visualRenderWidth(cols: number): number {
+  return Math.max(1, Math.min(cols - 4, 76));
+}
+
 function renderVisualMarkdown(markdown: string, cols: number): string {
   return renderMarkdown(markdown, visualRenderWidth(cols)).join('\n');
 }
 
-/** Reflow ready visual context locally; resizing must never invoke the model. */
+/** Reflow ready Visual Markdown locally without issuing another request. */
 function rerenderVisuals(internals: PanelInternals): void {
   for (const [id, visual] of internals.state.visuals) {
     if (visual.status !== 'ready' || visual.markdown === undefined) continue;
@@ -144,23 +148,62 @@ function rerenderVisuals(internals: PanelInternals): void {
   }
 }
 
+function visualRequestInteraction(interaction: Interaction): Interaction {
+  return {
+    ...interaction,
+    options: interaction.options.map(({ shortcut: _shortcut, ...option }) => ({ ...option })),
+    ...(interaction.preAnswered === undefined ? {} : {
+      preAnswered: {
+        ...interaction.preAnswered,
+        ...(interaction.preAnswered.selectedOptionIds === undefined ? {} : { selectedOptionIds: [...interaction.preAnswered.selectedOptionIds] }),
+      },
+    }),
+  };
+}
+
+function retireVisuals(internals: PanelInternals): void {
+  internals.visualGeneration += 1;
+  const handles = [...internals.visualHandles.values()];
+  internals.visualHandles.clear();
+  internals.state.visuals.clear();
+  for (const handle of handles) {
+    try { handle.cancel(); } catch { /* stale UI currency remains authoritative even if a host cancel fails */ }
+  }
+}
+
 function fireVisuals(internals: PanelInternals, interactions: Interaction[]): void {
-  if (internals.generateVisual === undefined) return;
-  const gen = internals.generateVisual;
-  const generation = ++internals.visualGeneration;
+  const provider = internals.visualProvider;
+  if (provider === undefined) return;
+  const generation = internals.visualGeneration;
+  const generationId = randomUUID();
+
   for (const interaction of interactions) {
-    const generationCols = internals.cols;
+    const requestId = randomUUID();
     internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'loading' });
-    gen(interaction, generationCols).then((r) => {
+
+    let handle: VisualHandle;
+    try {
+      handle = provider({ requestId, generationId, interaction: visualRequestInteraction(interaction) });
+    } catch {
+      internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'error' });
+      continue;
+    }
+    internals.visualHandles.set(requestId, handle);
+
+    handle.result.then((result) => {
+      if (internals.visualHandles.get(requestId) !== handle) return;
+      internals.visualHandles.delete(requestId);
       if (!internals.mounted || generation !== internals.visualGeneration) return;
-      if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
-      internals.state.visuals.set(interaction.id, r.ok
-        ? { questionId: interaction.id, content: internals.cols === generationCols ? r.ansi : renderVisualMarkdown(r.markdown, internals.cols), markdown: r.markdown, status: 'ready' }
+      if (!internals.state.interactions.some((candidate) => candidate.id === interaction.id)) return;
+      internals.state.visuals.set(interaction.id, result.status === 'ready' && typeof result.markdown === 'string'
+        ? { questionId: interaction.id, content: renderVisualMarkdown(result.markdown, internals.cols), markdown: result.markdown, status: 'ready' }
         : { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
     }).catch(() => {
+      if (internals.visualHandles.get(requestId) !== handle) return;
+      internals.visualHandles.delete(requestId);
       if (!internals.mounted || generation !== internals.visualGeneration) return;
-      if (!internals.state.interactions.some((x) => x.id === interaction.id)) return;
+      if (!internals.state.interactions.some((candidate) => candidate.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
     });
@@ -176,8 +219,9 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     cols: opts.cols,
     rows: opts.rows,
     mounted: true,
-    generateVisual: opts.generateVisual,
+    visualProvider: opts.visualProvider,
     visualGeneration: 0,
+    visualHandles: new Map(),
     progressPath: opts.progressPath,
     followUpAvailable,
     callbacks: {
@@ -256,14 +300,16 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     },
 
     unmount() {
+      if (!internals.mounted) return;
       internals.mounted = false;
-      internals.state.visuals.clear();
+      retireVisuals(internals);
       internals.state.persist = undefined;
     },
 
     loadDeck(deck, loadOpts) {
       if (!internals.mounted) return;
       const prior = collectResponses(internals.state);
+      retireVisuals(internals);
       internals.state = buildInitialState(deck, internals.callbacks.onEditorRequest !== undefined, internals.followUpAvailable);
       if (loadOpts !== undefined && loadOpts.progressPath !== undefined) {
         internals.progressPath = loadOpts.progressPath;
@@ -331,10 +377,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
 // ── Dir-based resolver (interaction-directory convention) ─────────────────────
 
 export interface ResolveDirOpts {
-  /** Originating provider session id → per-interaction visual context from history. */
-  sessionId?: string;
-  /** Explicit visual generator; overrides the sessionId default. */
-  generateVisual?: GenerateVisual;
+  visualProvider?: VisualProvider;
   cols?: number;
   rows?: number;
 }
@@ -361,9 +404,6 @@ export async function resolveInteractionDir(
   const term = getTerminalSize();
   const cols = opts.cols ?? term.cols;
   const rows = opts.rows ?? term.rows;
-
-  const generateVisual: GenerateVisual | undefined =
-    opts.generateVisual ?? (opts.sessionId === undefined ? undefined : visualGeneratorForConversationSession(opts.sessionId));
 
   return new Promise<{ responses: InteractionResponse[]; completedAt: string; responsePath: string; deck: Deck }>((resolve) => {
     let panel: MountedPanel | null = null;
@@ -448,7 +488,7 @@ export async function resolveInteractionDir(
       progressPath: progressPathFor(dir),
       cols,
       rows,
-      generateVisual,
+      visualProvider: opts.visualProvider,
       onEditorRequest: () => {
         const buffer = panel?.getInputBuffer();
         if (buffer !== undefined) runEditorEscapeHatch(buffer);
@@ -623,7 +663,7 @@ export async function resolveInteractionDir(
 
 export async function launchTui(
   decisionsPath: string,
-  sessionId?: string,
+  opts: ResolveDirOpts = {},
 ): Promise<{ responses: InteractionResponse[]; completedAt: string }> {
   if (!existsSync(decisionsPath)) {
     throw new Error(`Decisions file not found: ${decisionsPath}`);
@@ -635,6 +675,6 @@ export async function launchTui(
   // there per the convention.
   const dir = dirname(resolvePath(decisionsPath));
 
-  const { responses, completedAt } = await resolveInteractionDir(dir, deck, { sessionId });
+  const { responses, completedAt } = await resolveInteractionDir(dir, deck, opts);
   return { responses, completedAt };
 }

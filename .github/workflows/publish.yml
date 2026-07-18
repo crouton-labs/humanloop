@@ -31,10 +31,16 @@ jobs:
       - run: npm test
 
       - name: Bump version
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          npm version patch -m "chore: release v%s"
+          bump=patch
+          if [[ "$COMMIT_MESSAGE" == feat\!:* ]] || grep -q '^BREAKING CHANGE' <<< "$COMMIT_MESSAGE"; then
+            bump=minor
+          fi
+          npm version "$bump" -m "chore: release v%s"
           git push --follow-tags
 
       - run: npm publish --access public

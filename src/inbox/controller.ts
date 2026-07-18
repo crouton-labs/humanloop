@@ -1,5 +1,5 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
-import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary } from '../types.js';
+import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualProvider } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
@@ -19,7 +19,6 @@ import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPa
 import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
-import { visualGeneratorForConversationSession } from '../visuals/conversation.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { cancelFollowUp, readFollowUp, requestFollowUp } from './followup.js';
 
@@ -31,8 +30,7 @@ export interface InboxControllerOptions {
   completeDeck?: (dir: string, responses: InteractionResponse[], token: string) => Promise<unknown>;
   startDeckBrowser?: typeof startWebServer;
   openBrowser?: (url: string) => void;
-  /** Test seam; production uses the standard conversation-backed visual generator. */
-  visualGeneratorForSession?: typeof visualGeneratorForConversationSession;
+  visualProvider?: VisualProvider;
 }
 
 type Screen = 'list' | 'detail';
@@ -208,7 +206,7 @@ export class InboxController {
       cols: this.detailSize().cols,
       rows: this.detailSize().rows,
       onDirty: () => this.repaint(),
-      generateVisual: deck.source?.originatingConversationSessionId === undefined ? undefined : (this.options.visualGeneratorForSession ?? visualGeneratorForConversationSession)(deck.source.originatingConversationSessionId),
+      visualProvider: this.options.visualProvider,
       onEditorRequest: () => this.editActiveDeckInput(),
       followUpAvailable: followUp.available,
       onFollowUpRequest: followUp.onRequest,

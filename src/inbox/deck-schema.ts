@@ -13,7 +13,7 @@ const interactionSchema = z.object({
   title: z.string().min(1), subtitle: z.string().min(1).optional(), body: z.string().optional(), bodyPath: z.string().optional(),
   options: z.array(interactionOptionSchema), multiSelect: z.boolean().optional(), allowFreetext: z.boolean().optional(), freetextLabel: z.string().optional(), kind: z.enum(INTERACTION_KINDS).optional(), preAnswered: preAnswerSchema.optional(),
 });
-const deckSourceSchema = z.object({ sessionName: z.string().optional(), askedBy: z.string().optional(), blockedSince: z.string().optional(), nodeId: z.string().optional(), originatingConversationSessionId: z.string().min(1).optional() });
+const deckSourceSchema = z.object({ sessionName: z.string().optional(), askedBy: z.string().optional(), blockedSince: z.string().optional(), nodeId: z.string().optional() });
 export const deckSchema = z.object({ title: z.string().optional(), source: deckSourceSchema.optional(), interactions: z.array(interactionSchema).min(1) }).superRefine((input, ctx) => {
   const seen = new Set<string>();
   input.interactions.forEach((interaction, index) => {

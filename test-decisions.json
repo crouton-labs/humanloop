@@ -19,12 +19,6 @@
       "type": "freetext",
       "question": "Any constraints on the deployment target we should know about?",
       "rationale": "Affects containerization and CI choices"
-    },
-    {
-      "id": "q4",
-      "type": "validation",
-      "statement": "Visual context generation will use Haiku with full conversation context via prompt caching",
-      "rationale": "First call pays the input cost, subsequent calls hit the cache making them nearly free"
     }
   ]
 }

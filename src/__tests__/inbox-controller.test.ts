@@ -58,20 +58,6 @@ assert.equal(active.snapshot().screen, 'list', 'cancellation invalidation return
 assert.equal(active.snapshot().selectedDir !== first.dir, true);
 active.close();
 
-const visualTicket = submitDeck({ root, id: 'visual-session', deck: { ...deck('visual-session'), source: { blockedSince: new Date().toISOString(), originatingConversationSessionId: 'origin-session-42' } } });
-let visualSession: string | undefined;
-const visualController = new InboxController({
-  roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined,
-  visualGeneratorForSession: (sessionId) => {
-    visualSession = sessionId;
-    return async () => ({ ok: true, ansi: 'context', markdown: 'context' });
-  },
-});
-while (visualController.snapshot().selectedDir !== visualTicket.dir) visualController.handleKey('j', key());
-visualController.activate();
-assert.equal(visualSession, 'origin-session-42', 'centralized activation uses only explicit originating conversation session metadata');
-visualController.close();
-
 const navigation = submitDeck({ root, id: 'navigation', deck: { title: 'navigation', interactions: [
   { id: 'one', title: 'One', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
   { id: 'two', title: 'Two', options: [{ id: 'no', label: 'No', shortcut: 'n' }] },
@@ -366,20 +352,6 @@ assert.equal(disconnectedFinalizeCalls, 1, 'a disconnected winning request final
 assert.equal(disconnectedCleanupCalls, 1, 'a persisted disconnected request converges and cleans up exactly once');
 assert.equal(disconnectedController.snapshot().screen, 'list', 'take-back terminates through the persisted submit convergence after client disconnect');
 disconnectedController.close();
-
-const widthTicket = submitDeck({ root, id: 'visual-width', deck: { ...deck('visual width'), source: { originatingConversationSessionId: 'width-session' } } });
-// Drain the ticket creation's fs event before installing the selected-ticket
-// watcher; otherwise that initial event can be mistaken for a live reload.
-await new Promise((resolve) => setImmediate(resolve));
-const visualWidths: number[] = [];
-const widthController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined, visualGeneratorForSession: () => async (_interaction, cols) => { visualWidths.push(cols); return { ok: true, ansi: 'x'.repeat(cols), markdown: 'context markdown' }; } });
-while (widthController.snapshot().selectedDir !== widthTicket.dir) widthController.handleKey('j', key());
-widthController.activate();
-await new Promise((resolve) => setImmediate(resolve));
-widthController.resize(120, 24);
-await new Promise((resolve) => setImmediate(resolve));
-assert.deepEqual(visualWidths, [64], 'embedded visual generation runs once; resize only re-renders locally');
-widthController.close();
 
 rmSync(temp, { recursive: true, force: true });
 console.log('inbox controller tests passed');

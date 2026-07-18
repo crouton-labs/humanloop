@@ -80,9 +80,6 @@ export interface DeckSource {
    *  a crouter canvas node. Lets per-node attention scoping attribute the ask
    *  to the node that raised it rather than every sibling sharing the cwd. */
   nodeId?: string;
-  /** Durable identifier of the conversation session that originated this ask.
-   *  It is explicit metadata, never inferred from node identity or labels. */
-  originatingConversationSessionId?: string;
 }
 
 export interface Deck {
@@ -282,19 +279,29 @@ export interface DisplayOpts {
 
 // ── Public panel API ──────────────────────────────────────────────────────────
 
-export type GenerateVisual = (
-  interaction: Interaction,
-  /** Render width owned by the mounting surface. */
-  cols: number,
-) => Promise<
-  | { ok: true; ansi: string; markdown: string }
-  | { ok: false; error: string }
->;
+export interface VisualRequest {
+  requestId: string;
+  generationId: string;
+  interaction: Interaction;
+}
+
+export type VisualResult =
+  | { status: 'ready'; markdown: string }
+  | { status: 'error'; error: string };
+
+export interface VisualHandle {
+  result: Promise<VisualResult>;
+  /** Synchronous and idempotent. A canceled handle has no renderable result. */
+  cancel(): void;
+}
+
+/** Host-injected, Markdown-only Visual capability. Rendering width belongs to the panel. */
+export type VisualProvider = (request: VisualRequest) => VisualHandle;
 
 export interface MountedPanelOpts {
   deck: Deck;
   progressPath?: string;
-  generateVisual?: GenerateVisual;
+  visualProvider?: VisualProvider;
   /** Host callback for Ctrl+O while a comment/freetext buffer is active. */
   onEditorRequest?: () => void;
   followUpAvailable?: boolean;

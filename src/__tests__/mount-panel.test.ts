@@ -2,8 +2,6 @@ import { mountPanel } from '../index.js';
 import type { Deck, InteractionResponse } from '../index.js';
 import type { Key } from '../tui/terminal.js';
 import { parseKeypress } from '../tui/terminal.js';
-import { renderMarkdown } from '../render/termrender.js';
-import { visualRenderWidth } from '../visuals/generate.js';
 import assert from 'node:assert/strict';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -96,30 +94,11 @@ assert.notDeepEqual(linesA1, linesB1, 'two panels with different geometry produc
 panelA.unmount();
 panelB.unmount();
 
-// ── Test 4: resize reflows saved visual markdown without another model call ───
-const visualMarkdown = 'alpha beta gamma delta epsilon zeta eta theta iota kappa';
-let visualCalls = 0;
-const visualPanel = mountPanel({
-  deck: { interactions: [{ id: 'visual', title: 'Visual context', options: [] }] },
-  cols: 20,
-  rows: 24,
-  generateVisual: async () => { visualCalls++; return { ok: true, ansi: 'stale-width', markdown: visualMarkdown }; },
-});
-await new Promise((resolve) => setImmediate(resolve));
-visualPanel.handleKey('', mkKey({ backTab: true }));
-visualPanel.handleResize(40, 24);
-assert.equal(visualCalls, 1, 'pure layout resize does not regenerate visual context');
-assert.ok(
-  visualPanel.render().join('\n').includes(renderMarkdown(visualMarkdown, visualRenderWidth(40))[0]!),
-  'resize re-renders saved visual markdown at the new panel width',
-);
-visualPanel.unmount();
-
+// ── Test 4: question and context modes retain independent scroll positions ───
 const scrollPanel = mountPanel({
   deck: { interactions: [{ id: 'scroll', title: 'Separate scroll positions', body: Array.from({ length: 40 }, (_, i) => `- question ${i}`).join('\n'), options: [] }] },
   cols: 50,
   rows: 12,
-  generateVisual: async () => ({ ok: true, ansi: Array.from({ length: 40 }, (_, i) => `visual ${i}`).join('\n') }),
   onFollowUpRequest: () => {},
   onFollowUpCancel: () => {},
 });
@@ -1025,5 +1004,38 @@ assert.ok(editorCapabilityPanel.render().join('\n').includes('^O'), 'an editor-c
 editorCapabilityPanel.handleKey('o', mkKey({ ctrl: true }));
 assert.equal(editorRequests, 1, 'Ctrl+O delegates only through the host editor callback');
 editorCapabilityPanel.unmount();
+
+// ── Test 25: submitted follow-up is presentation-only while pending ──────────
+const followUpDeck: Deck = { interactions: [{ id: 'follow-up', title: 'Choose', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] }] };
+let submittedFollowUp = '';
+let followUpPanel!: ReturnType<typeof mountPanel>;
+followUpPanel = mountPanel({
+  deck: followUpDeck,
+  cols: 80,
+  rows: 20,
+  onFollowUpRequest: (question) => {
+    submittedFollowUp = question;
+    followUpPanel.setFollowUpState({ status: 'running' });
+  },
+  onFollowUpCancel: () => followUpPanel.setFollowUpState({ status: 'idle' }),
+});
+const sendFollowUpKey = (bytes: string) => {
+  const { input, key } = parseKeypress(Buffer.from(bytes));
+  followUpPanel.handleKey(input, key);
+};
+sendFollowUpKey('\x1b[B');
+sendFollowUpKey('?');
+for (const character of 'Why this choice?') sendFollowUpKey(character);
+sendFollowUpKey('\r');
+assert.equal(submittedFollowUp, 'Why this choice?', 'the parsed follow-up submission invokes only the follow-up callback');
+const pendingFrame = followUpPanel.render().join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+assert.ok(!pendingFrame.includes('▸'), 'a pending follow-up suppresses the option-focus cursor');
+followUpPanel.setFollowUpState({ status: 'idle' });
+const restoredFrame = followUpPanel.render().join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+assert.ok(restoredFrame.split('\n').some((line) => line.includes('▸') && line.includes('Reject')), 'focus returns at the retained action index when pending clears');
+sendFollowUpKey('q');
+sendFollowUpKey('q');
+assert.ok(followUpPanel.render().join('\n').includes('0/1 questions answered'), 'follow-up submission leaves the response set empty');
+followUpPanel.unmount();
 
 console.log('OK');

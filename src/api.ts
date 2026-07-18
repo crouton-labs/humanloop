@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
-  Deck, ResolutionEnvelope,
+  Deck, ResolutionEnvelope, VisualProvider,
 } from './types.js';
 import { resolveInteractionDir } from './tui/app.js';
 import { InboxController } from './inbox/controller.js';
@@ -20,7 +20,7 @@ function managedDir(): string {
 export interface AskOpts {
   /** Interaction directory. Defaults to a managed temp dir under os.tmpdir(). */
   dir?: string;
-  sessionId?: string;
+  visualProvider?: VisualProvider;
   cols?: number;
   rows?: number;
 }
@@ -42,7 +42,7 @@ export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnv
   atomicWriteJson(deckPath(dir), deck);
 
   const { responses, completedAt, responsePath, deck: answeredDeck } = await resolveInteractionDir(dir, deck, {
-    sessionId: opts.sessionId,
+    visualProvider: opts.visualProvider,
     cols: opts.cols,
     rows: opts.rows,
   });
@@ -68,10 +68,11 @@ export interface InboxOpts {
   cols?: number;
   rows?: number;
   roots?: string[];
+  visualProvider?: VisualProvider;
 }
 
 /** Open the centralized inbox controller in the current human terminal. */
 export async function openInbox(opts: InboxOpts = {}): Promise<void> {
-  const controller = new InboxController({ roots: opts.roots, cols: opts.cols, rows: opts.rows });
+  const controller = new InboxController({ roots: opts.roots, cols: opts.cols, rows: opts.rows, visualProvider: opts.visualProvider });
   await controller.run();
 }
