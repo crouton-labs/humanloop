@@ -8,6 +8,7 @@ import { validateDeck } from './inbox/deck-schema.js';
 import { managedInboxRoot, registerInboxRoot, registeredInboxRoot, unregisterInboxRoot, listInboxRoots, type InboxRootRegistration } from './inbox/registry.js';
 import { submitDeck, submitReview } from './inbox/tickets.js';
 import { scanInbox } from './inbox/scan.js';
+import { runInboxMaintenance } from './inbox/maintenance.js';
 import { openInboxPopup } from './surfaces/inbox-popup.js';
 import { toggleInboxPopup } from './tui/tmux.js';
 import { ask } from './api.js';
@@ -72,6 +73,9 @@ inbox.command('toggle').description('Toggle the inbox popup for one tmux client.
   process.exit(result === 'failed' || result === 'ambiguous_client' ? 1 : 0);
 });
 inbox.command('list').description('Print pending tickets newest first as JSON.').option('--root <path>', 'filter to a root', (value, prior: string[]) => [...prior, value], [] as string[]).action((options: { root: string[] }) => emit(scanInbox(roots(options.root))));
+inbox.command('_maintain', { hidden: true }).requiredOption('--lease <path>').action(async (options: { lease: string }) => {
+  await runInboxMaintenance(resolve(options.lease));
+});
 
 const root = inbox.command('roots').description('Manage durable interaction roots.');
 root.command('register').description('Register a root owned by a host.').requiredOption('--root <path>').requiredOption('--owner <owner>').option('--handler-command <path>').option('--handler-arg <arg>', 'repeatable direct-exec handler argument', (value, prior: string[]) => [...prior, value], [] as string[]).action((options: { root: string; owner: string; handlerCommand?: string; handlerArg: string[] }) => {

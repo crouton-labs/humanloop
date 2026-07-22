@@ -9,6 +9,7 @@ import { registeredInboxRoot } from './registry.js';
 import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js';
 import { dispatchCompletion } from './completion.js';
 import { cancelVisualRequestsForTicket } from './visual.js';
+import { kickInboxMaintenance } from './maintenance.js';
 
 const ticketId = z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(128);
 const responseSchema = z.object({ id: z.string().min(1), selectedOptionId: z.string().optional(), selectedOptionIds: z.array(z.string()).optional(), freetext: z.string().optional(), optionComments: z.record(z.string(), z.string()).optional() }).strict();
@@ -159,7 +160,7 @@ export function finalizeDeck(dir: string, responses: DeckTicketResult['responses
     // A valid primary result ends its panel generation before the canonical
     // response can cross the owner boundary. The protocol persists cancellation
     // first; its independent cleanup executor owns eventual handler delivery.
-    void cancelVisualRequestsForTicket(ticket.root, ticket.dir);
+    void cancelVisualRequestsForTicket(ticket.root, ticket.dir).finally(kickInboxMaintenance);
     const result: DeckTicketResult = { schema: 'humanloop.response/v2', kind: 'deck', responses: parsedResponses, summary: buildSummary(deck, parsedResponses), completedAt };
     const won = exclusiveResult(ticket.dir, result);
     clearOwnedWork(ticket.dir, claimToken);
