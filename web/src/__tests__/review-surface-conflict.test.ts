@@ -54,6 +54,14 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 (globalThis as any).cancelAnimationFrame = dom.window.cancelAnimationFrame ?? clearTimeout;
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+// This regression verifies which states arm the debounce, not its production
+// duration. Shorten only the component's 700ms autosave timers so the real
+// effect wiring remains covered without spending most of the test budget idle.
+const TEST_AUTOSAVE_DELAY_MS = 20;
+const windowSetTimeout = dom.window.setTimeout.bind(dom.window);
+dom.window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+  windowSetTimeout(handler, timeout === 700 ? TEST_AUTOSAVE_DELAY_MS : timeout, ...args)) as typeof dom.window.setTimeout;
+
 // ── FakeWebSocket ────────────────────────────────────────────────────────────
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -129,11 +137,7 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 async function flushAll(times = 5): Promise<void> {
   for (let i = 0; i < times; i++) await flush();
 }
-// Real (unmocked) delay — the autosave debounce (`AUTOSAVE_DELAY_MS = 700` in
-// ReviewSurface.tsx) is a genuine `window.setTimeout`, not a fake-timer-
-// friendly abstraction, so driving it means actually waiting past it inside
-// `act()` rather than advancing a mock clock.
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const waitPastAutosave = () => new Promise<void>((resolve) => setTimeout(resolve, TEST_AUTOSAVE_DELAY_MS + 30));
 
 async function mountApp(fetchImpl: unknown): Promise<{ container: HTMLDivElement; root: import('react-dom/client').Root }> {
   (globalThis as any).fetch = fetchImpl;
@@ -206,10 +210,10 @@ function findButtonByText(container: HTMLDivElement, matcher: (text: string) => 
   });
   assert.ok(container.textContent?.includes('unsaved'), 'saveState reads "unsaved" (dirty) right after the edit, before the debounce fires');
 
-  // 2. Wait past the 700ms autosave debounce + let the PUT + its 409 handler
+  // 2. Wait past the autosave debounce + let the PUT + its 409 handler
   // resolve. Exactly one PUT should have gone out.
   await act(async () => {
-    await wait(900);
+    await waitPastAutosave();
     await flushAll();
   });
   assert.equal(putCalls.length, 1, 'the debounced autosave issued exactly one PUT /api/review/draft');
@@ -234,7 +238,7 @@ function findButtonByText(container: HTMLDivElement, matcher: (text: string) => 
   // must not — the whole point of MAJOR 1's fix is that only an explicit
   // human action re-arms the save.
   await act(async () => {
-    await wait(900);
+    await waitPastAutosave();
     await flushAll();
   });
   assert.equal(putCalls.length, 1, 'no second PUT was issued while sitting in the conflict state — the autosave guard genuinely excludes "conflict"');
@@ -250,7 +254,7 @@ function findButtonByText(container: HTMLDivElement, matcher: (text: string) => 
   assert.equal(putCalls.length, 1, 'clicking "Save my edits" does not itself PUT synchronously — it re-arms the debounce');
 
   await act(async () => {
-    await wait(900);
+    await waitPastAutosave();
     await flushAll();
   });
   assert.equal(putCalls.length, 2, 'the explicit "Save my edits" click drove a second PUT /api/review/draft after its own debounce');
