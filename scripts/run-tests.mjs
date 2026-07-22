@@ -107,6 +107,10 @@ function runTest(test) {
       clearTimeout(timer);
       abortActive = undefined;
       if (termination) await termination;
+      // tsx can leave compiler-service descendants alive after the test script
+      // exits. Reap the detached test's remaining process group so serial CI
+      // does not progressively slow down as those services accumulate.
+      signalProcessGroup(child, 'SIGTERM');
       const duration = ((performance.now() - started) / 1_000).toFixed(2);
       if (timeoutReason) {
         rejectRun(new Error(timeoutReason));
