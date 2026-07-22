@@ -1,6 +1,6 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
+import type { Deck, DeckSource, FocusEvent, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
@@ -15,7 +15,7 @@ import { scanInbox } from './scan.js';
 import { inboxActivityPath, inboxRootsDirectory, inboxStateDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { completeDeck, readTicketResult, ticketRoot } from './tickets.js';
-import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, visualsDir } from './convention.js';
+import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, runHandler, visualsDir } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
@@ -39,6 +39,9 @@ export interface InboxControllerOptions {
   startDeckBrowser?: typeof startWebServer;
   openBrowser?: (url: string) => void;
   visualProvider?: VisualProvider;
+  /** Pane underneath a tmux popup. Enables a registered focus handler to
+   * reveal the host surface that created the selected ticket. */
+  targetPane?: string;
 }
 
 type Screen = 'list' | 'detail';
@@ -64,6 +67,7 @@ export class InboxController {
   private deckBrowserFinalizing: Promise<{ completedAt: string; responsePath: string }> | undefined;
   private deckBrowserStarting = false;
   private deckBrowserStartingGeneration: number | undefined;
+  private focusingSource = false;
   /** Invalidates an in-flight asynchronous browser start when ownership ends. */
   private deckBrowserGeneration = 0;
   private claim: { dir: string; token: string } | undefined;
@@ -172,6 +176,10 @@ export class InboxController {
       return;
     }
     if (this.screen === 'detail' && this.adapter !== undefined) {
+      if ((input === 'g' || input === 'G') && this.adapter.canAcceptHostKeys()) {
+        void this.focusSelectedSource();
+        return;
+      }
       if ((input === 'w' || input === 'W') && this.adapter.canAcceptHostKeys()) {
         void this.openDeckBrowser();
         return;
@@ -188,6 +196,7 @@ export class InboxController {
     else if (input === 'u' || key.pageUp || (key.ctrl && (input === 'u' || input === 'y'))) this.scrollPreview(input === 'y' ? -1 : -10);
     else if (input === 'j' || key.downArrow) this.select(this.selectedIndex + 1);
     else if (input === 'k' || key.upArrow) this.select(this.selectedIndex - 1);
+    else if (input === 'g' || input === 'G') void this.focusSelectedSource();
     else if (key.return || input === 'a') this.activate();
     this.repaint();
   }
@@ -621,10 +630,39 @@ export class InboxController {
     if (this.adapter !== undefined) return this.adapter.render();
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return this.previewViewport(this.passiveDetailLines(width), width, rows);
+    const focusHint = this.focusAvailable(selected.dir) ? `  ${DIM}g${RESET} chat` : '';
     const footer = selected.kind === 'deck'
-      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser  ${DIM}q${RESET} close`]
-      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}q${RESET} close`];
+      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser${focusHint}  ${DIM}q${RESET} close`]
+      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, ` ${focusHint}  ${DIM}q${RESET} close`];
     return [...this.previewViewport(this.passiveDetailLines(width), width, Math.max(0, rows - footer.length)), ...footer.map((line) => clipLine(line, width))];
+  }
+
+  private focusAvailable(dir: string): boolean {
+    const root = ticketRoot(dir);
+    return this.options.targetPane !== undefined && root !== null && registeredInboxRoot(root)?.focusHandler !== undefined;
+  }
+
+  /** Ask the registered host to reveal this ticket's source beside the pane
+   * underneath the popup. The popup closes only after the host acknowledges
+   * that focus succeeded, so a failure remains visible as status. */
+  private async focusSelectedSource(): Promise<void> {
+    const item = this.items[this.selectedIndex];
+    const targetPane = this.options.targetPane;
+    if (item === undefined || targetPane === undefined || this.focusingSource) return;
+    const root = ticketRoot(item.dir);
+    const registration = root === null ? null : registeredInboxRoot(root);
+    if (root === null || registration?.focusHandler === undefined) return;
+    const event: FocusEvent = { schema: 'humanloop.focus/v1', root, dir: item.dir, ticketId: item.id, targetPane };
+    this.focusingSource = true;
+    try {
+      await runHandler(registration.focusHandler.command, registration.focusHandler.args, event);
+      this.close();
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+      this.repaint();
+    } finally {
+      this.focusingSource = false;
+    }
   }
 
   private passiveDetailLines(width: number): string[] {

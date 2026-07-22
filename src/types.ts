@@ -270,6 +270,17 @@ export interface CompletionEvent {
   responsePath: string;
 }
 
+/** A popup request to reveal the host surface that created a ticket. The root's
+ * trusted focus handler decides what that means; humanloop only supplies the
+ * selected ticket and the tmux pane underneath the popup. */
+export interface FocusEvent {
+  schema: 'humanloop.focus/v1';
+  root: string;
+  dir: string;
+  ticketId: string;
+  targetPane: string;
+}
+
 /** Options for `display()` — the live-watch tmux pane surface. The pane always
  *  watches the file and live-updates on edits; there is no non-watched mode. */
 export interface DisplayOpts {

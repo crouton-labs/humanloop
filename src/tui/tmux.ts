@@ -93,7 +93,8 @@ export async function toggleInboxPopup(target?: Partial<TmuxPopupTarget>): Promi
       return 'closed';
     }
     if (existsSync(paths.controlSocket)) rmSync(paths.controlSocket, { force: true });
-    const command = `${quote(process.execPath)} ${quote(fileURLToPath(new URL('../cli.js', import.meta.url)))} inbox open --control-socket ${quote(paths.controlSocket)}`;
+    const targetPaneArg = resolved.targetPane === undefined ? '' : ` --target-pane ${quote(resolved.targetPane)}`;
+    const command = `${quote(process.execPath)} ${quote(fileURLToPath(new URL('../cli.js', import.meta.url)))} inbox open --control-socket ${quote(paths.controlSocket)}${targetPaneArg}`;
     const result = await launchPopup(socket, resolved, paths.controlSocket, command);
     logPopupEvent('toggle.completed', { ...resolved, controlSocket: paths.controlSocket, result });
     return result;

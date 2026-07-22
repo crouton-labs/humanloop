@@ -87,6 +87,6 @@ export type {
   ResolutionEnvelope, InboxItem, DisplayOpts,
   ClaimSummary, TicketSummary, DeckTicketSummary, ReviewTicketSummary,
   ReviewDescriptor, DeckTicketResult, ReviewTicketResult, CanceledTicketResult, TicketResult,
-  CompletionEvent,
+  CompletionEvent, FocusEvent,
 } from './types.js';
 export type { Key } from './tui/terminal.js';

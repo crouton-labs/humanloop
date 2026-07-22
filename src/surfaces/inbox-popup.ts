@@ -3,8 +3,8 @@ import { rmSync } from 'node:fs';
 import { InboxController } from '../inbox/controller.js';
 
 /** Run the inbox controller in a popup-owned TTY and accept graceful close requests. */
-export async function openInboxPopup(controlSocket?: string, roots?: string[]): Promise<void> {
-  const controller = new InboxController({ roots });
+export async function openInboxPopup(controlSocket?: string, roots?: string[], targetPane?: string): Promise<void> {
+  const controller = new InboxController({ roots, targetPane });
   const server = controlSocket === undefined ? undefined : createServer((connection) => {
     connection.once('data', (data) => {
       if (data.toString('utf8').trim() === 'close') controller.close();

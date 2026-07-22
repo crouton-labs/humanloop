@@ -54,9 +54,9 @@ const program = new Command();
 program.name('hl').description('Humanloop durable inbox and review surface.').helpOption('-h, --help');
 
 const inbox = program.command('inbox').description('Open, inspect, and configure the centralized human inbox.');
-inbox.command('open').description('Open the inbox controller in this human TTY.').option('--root <path>', 'filter to a registered root', (value, prior: string[]) => [...prior, value], [] as string[]).option('--control-socket <path>', 'popup control socket').action(async (options: { root: string[]; controlSocket?: string }) => {
+inbox.command('open').description('Open the inbox controller in this human TTY.').option('--root <path>', 'filter to a registered root', (value, prior: string[]) => [...prior, value], [] as string[]).option('--control-socket <path>', 'popup control socket').option('--target-pane <pane>', 'tmux pane underneath the popup').action(async (options: { root: string[]; controlSocket?: string; targetPane?: string }) => {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail('hl inbox open requires an interactive TTY; use hl inbox list for read-only output');
-  try { await openInboxPopup(options.controlSocket, roots(options.root)); } catch (error) { fail(error); }
+  try { await openInboxPopup(options.controlSocket, roots(options.root), options.targetPane); } catch (error) { fail(error); }
   // This process IS the popup: `tmux display-popup -E` keeps the popup on screen
   // until it exits. Once the controller has closed, exit hard — a stray live
   // handle (e.g. an in-flight completion-handler child that hangs) must never
