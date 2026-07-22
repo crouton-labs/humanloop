@@ -1,5 +1,5 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Deck, DeckSource, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
@@ -12,7 +12,7 @@ import { BOLD, CYAN, DIM, GRAY, RESET, YELLOW, clipLine } from '../tui/ansi.js';
 import { buildInboxLines } from './tui.js';
 import { inboxLayout } from './layout.js';
 import { scanInbox } from './scan.js';
-import { inboxRootsDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
+import { inboxActivityPath, inboxRootsDirectory, inboxStateDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { completeDeck, readTicketResult, ticketRoot } from './tickets.js';
 import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, visualsDir } from './convention.js';
@@ -697,9 +697,14 @@ export class InboxController {
   }
 
   private watchRoots(): void {
-    for (const root of this.resolvedRoots()) {
-      try { this.watchers.push(watch(root, () => { this.invalidate(); kickInboxMaintenance(); })); } catch { /* unavailable roots remain discoverable through later rescans */ }
-    }
+    // A single state-level activity marker replaces one watcher per historical
+    // root. Closing hundreds of fs watchers was itself a multi-second UI path.
+    const activity = basename(inboxActivityPath());
+    try {
+      this.watchers.push(watch(inboxStateDirectory(), (_event, file) => {
+        if (String(file) === activity) { this.invalidate(); kickInboxMaintenance(); }
+      }));
+    } catch { /* the state directory appears when the next ticket is submitted */ }
     if (this.options.roots === undefined) {
       try { this.watchers.push(watch(inboxRootsDirectory(), () => { this.invalidate(); kickInboxMaintenance(); })); } catch { /* registry appears after the next explicit open */ }
     }

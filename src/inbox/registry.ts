@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,7 +11,17 @@ export interface InboxRootStatus extends InboxRootRegistration { available: bool
 export interface RegisterInboxRootOptions { root: string; owner: string; handler?: CompletionHandler; followUpHandler?: CompletionHandler; visualHandler?: CompletionHandler; }
 
 function stateHome(): string { return process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'); }
-export function inboxRootsDirectory(): string { return join(stateHome(), 'humanloop', 'inbox-roots'); }
+export function inboxStateDirectory(): string { return join(stateHome(), 'humanloop'); }
+export function inboxRootsDirectory(): string { return join(inboxStateDirectory(), 'inbox-roots'); }
+export function inboxActivityPath(): string { return join(inboxStateDirectory(), 'inbox-activity'); }
+
+/** Signal one durable ticket mutation to every open inbox without watching every root. */
+export function signalInboxActivity(): void {
+  try {
+    mkdirSync(inboxStateDirectory(), { recursive: true, mode: 0o700 });
+    writeFileSync(inboxActivityPath(), `${Date.now()}\n`, { mode: 0o600 });
+  } catch { /* a later popup scan is still authoritative */ }
+}
 function recordPath(root: string): string { return join(inboxRootsDirectory(), createHash('sha256').update(root).digest('hex')); }
 function canonicalRoot(root: string): string { try { return realpathSync(root); } catch { return resolve(root); } }
 

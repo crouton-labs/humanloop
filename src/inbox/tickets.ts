@@ -5,7 +5,7 @@ import type { Deck, DeckTicketResult, FeedbackResult, ReviewDescriptor, ReviewTi
 import { buildSummary } from '../summary.js';
 import { clearProgress, claimPath, deckPath, deliveryErrorPath, deliveryPath, followupRequestPath, followupResultPath, progressPath, publishJsonExclusive, responsePath, reviewPath, visualsDir } from './convention.js';
 import { validateDeck, validateReviewDescriptor, validateReviewProjection, resolveDeckBodyPaths } from './deck-schema.js';
-import { registeredInboxRoot } from './registry.js';
+import { registeredInboxRoot, signalInboxActivity } from './registry.js';
 import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js';
 import { dispatchCompletion } from './completion.js';
 import { cancelVisualRequestsForTicket } from './visual.js';
@@ -94,6 +94,7 @@ export function submitDeck(opts: SubmitDeckOptions): { id: string; dir: string; 
     const deck = validateDeck(resolveDeckBodyPaths(opts.deck, dir));
     const stamped: Deck = { ...deck, source: { ...(deck.source ?? {}), blockedSince: deck.source?.blockedSince ?? new Date().toISOString() } };
     publishRequest(deckPath(dir), stamped);
+    signalInboxActivity();
     return { id: opts.id, dir, kind: 'deck' };
   } catch (error) {
     discardCreatedTicket(dir, created);
@@ -111,6 +112,7 @@ export function submitReview(opts: SubmitReviewOptions): { id: string; dir: stri
     if (hasTicketProtocolState(dir)) throw new Error(`ticket protocol state already exists: ${dir}`);
     const descriptor = validateReviewProjection(dir, { schema: 'humanloop.review/v1', file: source, output: resolve(opts.review.output ?? `${dir}/feedback.json`), title: opts.review.title, source: opts.review.source, blockedSince: opts.review.blockedSince ?? new Date().toISOString() });
     publishRequest(reviewPath(dir), descriptor);
+    signalInboxActivity();
     return { id: opts.id, dir, kind: 'review' };
   } catch (error) {
     discardCreatedTicket(dir, created);
@@ -153,7 +155,7 @@ function clearOwnedWork(dir: string, claimToken: string): void { clearProgress(d
 
 export function finalizeDeck(dir: string, responses: DeckTicketResult['responses'], claimToken: string, completedAt = new Date().toISOString()): { won: boolean; result: TicketResult } {
   const ticket = requireRegisteredTicket(dir);
-  return withTicketLock(ticket.dir, () => {
+  const finalized = withTicketLock(ticket.dir, () => {
     requireClaimOwnership(ticket.dir, claimToken);
     const deck = requireDeck(ticket.dir);
     const parsedResponses = validateDeckResponses(deck, responses);
@@ -166,11 +168,13 @@ export function finalizeDeck(dir: string, responses: DeckTicketResult['responses
     clearOwnedWork(ticket.dir, claimToken);
     return { won, result: won ? result : readTicketResult(ticket.dir) ?? result };
   });
+  if (finalized.won) signalInboxActivity();
+  return finalized;
 }
 
 export function finalizeReview(dir: string, feedback: FeedbackResult, claimToken: string, completedAt = new Date().toISOString()): { won: boolean; result: TicketResult; descriptor: ReviewDescriptor } {
   const ticket = requireRegisteredTicket(dir);
-  return withTicketLock(ticket.dir, () => {
+  const finalized = withTicketLock(ticket.dir, () => {
     requireClaimOwnership(ticket.dir, claimToken);
     const descriptor = requireReview(ticket.dir);
     const parsed = feedbackSchema.parse(feedback) as FeedbackResult;
@@ -180,15 +184,19 @@ export function finalizeReview(dir: string, feedback: FeedbackResult, claimToken
     clearOwnedWork(ticket.dir, claimToken);
     return { won, result: won ? result : readTicketResult(ticket.dir) ?? result, descriptor };
   });
+  if (finalized.won) signalInboxActivity();
+  return finalized;
 }
 
 export function cancelTicketResult(dir: string, opts: { reason?: string; actor?: string } = {}): { status: 'canceled' | 'already_resolved'; result: TicketResult } {
   const ticket = requireRegisteredTicket(dir);
-  return withTicketLock(ticket.dir, () => {
+  const canceled = withTicketLock(ticket.dir, () => {
     const result: TicketResult = { schema: 'humanloop.cancel/v1', kind: 'canceled', canceledAt: new Date().toISOString(), ...(opts.reason === undefined ? {} : { reason: opts.reason }), ...(opts.actor === undefined ? {} : { actor: opts.actor }) };
     const won = exclusiveResult(ticket.dir, result);
-    return { status: won ? 'canceled' : 'already_resolved', result: won ? result : readTicketResult(ticket.dir) ?? result };
+    return { status: won ? ('canceled' as const) : ('already_resolved' as const), result: won ? result : readTicketResult(ticket.dir) ?? result };
   });
+  if (canceled.status === 'canceled') signalInboxActivity();
+  return canceled;
 }
 
 export function ticketRoot(dir: string): string | null {
