@@ -14,6 +14,7 @@ import { VISUAL_CAPABILITY, readVisualRequest, reconcileVisualRequestsForTicket,
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const handler = { command: process.execPath, args: ['-e', ''] };
 const deck = (visual = false): Deck => ({
+  title: 'Visual decisions',
   source: visual ? { visual: VISUAL_CAPABILITY } : {},
   interactions: [
     { id: 'one', title: 'One', options: [] },

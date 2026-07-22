@@ -10,6 +10,7 @@ import { submitDeck, submitReview, finalizeDeck, finalizeReview, completeReview,
 import { claimTicket } from '../inbox/claim.js';
 import { scanInbox } from '../inbox/scan.js';
 import { atomicWriteJson, deliveryPath, progressPath, responsePath, reviewPath } from '../inbox/convention.js';
+import { validateDeck } from '../inbox/deck-schema.js';
 import { dispatchCompletion, reconcileCompletions } from '../inbox/completion.js';
 import type { Deck, FeedbackResult } from '../types.js';
 
@@ -19,6 +20,11 @@ const root = join(temp, 'tickets');
 const source = join(temp, 'source.md');
 writeFileSync(source, '# Source\n');
 const deck = (blockedSince: string): Deck => ({ title: 'A deck', source: { blockedSince, nodeId: 'node-1' }, interactions: [{ id: 'go', title: 'Go?', options: [{ id: 'yes', label: 'Yes' }] }] });
+assert.throws(
+  () => validateDeck({ interactions: [{ id: 'go', title: 'Go?', options: [] }] }),
+  /title/,
+  'a deck must carry its own explicit inbox title',
+);
 async function waitFor(paths: string[]): Promise<void> {
   for (let attempts = 0; !paths.every(existsSync); attempts++) {
     if (attempts > 1_000) throw new Error(`workers did not reach barrier: ${paths.join(', ')}`);

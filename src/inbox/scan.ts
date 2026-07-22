@@ -22,7 +22,7 @@ function deckSummary(dir: string, id: string): TicketSummary | null {
   if (blockedSince === undefined) {
     try { blockedSince = statSync(deckPath(dir)).mtime.toISOString(); } catch { return null; }
   }
-  return { dir, id, kind: 'deck', title: deck.title ?? first.title, subtitle: first.subtitle, interactionKind: first.kind, source: deck.source ?? {}, blockedSince, claim: claimSummary(dir) };
+  return { dir, id, kind: 'deck', title: deck.title, subtitle: first.subtitle, interactionKind: first.kind, source: deck.source ?? {}, blockedSince, claim: claimSummary(dir) };
 }
 
 function reviewSummary(dir: string, id: string): TicketSummary | null {

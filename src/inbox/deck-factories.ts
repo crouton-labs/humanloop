@@ -8,6 +8,7 @@ export interface NotifyDeckOpts {
 /** Build a validated single-option notify deck. id: 'notify', kind: 'notify'. */
 export function notifyDeck(title: string, opts: NotifyDeckOpts = {}): Deck {
   return validateDeck({
+    title,
     interactions: [{
       id: 'notify',
       title,

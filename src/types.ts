@@ -85,7 +85,8 @@ export interface DeckSource {
 }
 
 export interface Deck {
-  title?: string;
+  /** Short inbox topic for the deck as a whole. */
+  title: string;
   source?: DeckSource;
   interactions: Interaction[];
 }

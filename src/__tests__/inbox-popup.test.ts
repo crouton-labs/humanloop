@@ -70,7 +70,7 @@ try {
   const root = join(temp, 'tickets');
   registerInboxRoot({ root, owner: 'test' });
   const before = execFileSync('tmux', ['-S', bindingSocket, 'list-panes', '-a', '-F', '#{pane_id}'], { encoding: 'utf8' });
-  submitDeck({ root, id: 'queued', deck: { interactions: [{ id: 'ok', title: 'Queued', options: [{ id: 'ok', label: 'OK' }] }] } });
+  submitDeck({ root, id: 'queued', deck: { title: 'Queued', interactions: [{ id: 'ok', title: 'Queued', options: [{ id: 'ok', label: 'OK' }] }] } });
   const after = execFileSync('tmux', ['-S', bindingSocket, 'list-panes', '-a', '-F', '#{pane_id}'], { encoding: 'utf8' });
   assert.equal(after, before, 'enqueue does not mutate tmux panes');
 
@@ -126,7 +126,7 @@ try {
   const hangRoot = join(temp, 'hang-tickets');
   const handlerMarker = join(temp, 'handler-started');
   registerInboxRoot({ root: hangRoot, owner: 'hang-test', handler: { command: '/bin/sh', args: ['-c', `touch ${handlerMarker} && sleep 300`] } });
-  const hung = submitDeck({ root: hangRoot, id: 'hung', deck: { interactions: [{ id: 'q1', title: 'Hung delivery', options: [{ id: 'a', label: 'A' }] }] } });
+  const hung = submitDeck({ root: hangRoot, id: 'hung', deck: { title: 'Hung delivery', interactions: [{ id: 'q1', title: 'Hung delivery', options: [{ id: 'a', label: 'A' }] }] } });
   writeFileSync(join(hung.dir, 'response.json'), JSON.stringify({ schema: 'humanloop.response/v2', kind: 'deck', responses: [{ id: 'q1', selectedOptionId: 'a' }], summary: 'picked A', completedAt: new Date().toISOString() }));
   assert.equal(await toggle(['--tmux-socket', inner, '--tmux-client', clientName]), 'opened', 'popup opens with a resolved-but-undelivered ticket present');
   await poll(() => tmuxTry(outer, ['capture-pane', '-p', '-t', 'host']).includes('humanloop · inbox') || undefined, 'popup renders before the quit gesture');
