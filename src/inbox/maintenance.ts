@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { inboxRootsDirectory, listInboxRoots } from './registry.js';
 import { reconcileCompletions } from './completion.js';
 import { dispatchVisualCleanup, listVisualCleanupObligationsForRoot, reconcileStaleVisualRequestsForRoot, type VisualCleanupTask } from './visual.js';
@@ -38,11 +39,13 @@ export function kickInboxMaintenance(): void {
     try { rmSync(lease, { recursive: true, force: true }); mkdirSync(lease, { mode: 0o700 }); } catch { return; }
   }
 
-  const entry = process.argv[1];
-  if (entry === undefined || !existsSync(entry)) { rmSync(lease, { recursive: true, force: true }); return; }
-  // A built CLI needs no parent flags. In particular, forwarding a test
-  // runner's `--input-type` makes Node reject a file entrypoint. Source-mode
-  // launches retain their tsx loader.
+  const builtEntry = fileURLToPath(new URL('../cli.js', import.meta.url));
+  const sourceEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+  const entry = existsSync(builtEntry) ? builtEntry : sourceEntry;
+  if (!existsSync(entry)) { rmSync(lease, { recursive: true, force: true }); return; }
+  // A built CLI needs no parent flags. Source-mode launches retain their tsx
+  // loader, but always execute Humanloop's CLI rather than the caller's
+  // entrypoint (which may be a test or a consuming application).
   const runtimeArgs = entry.endsWith('.ts') ? process.execArgv : [];
   const child = spawn(process.execPath, [...runtimeArgs, entry, 'inbox', '_maintain', '--lease', lease], {
     detached: true,

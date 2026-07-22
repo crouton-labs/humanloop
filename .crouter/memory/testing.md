@@ -12,7 +12,7 @@ Humanloop adds a test only after the user reports that behavior does not work. W
 
 During development, run only existing test scripts covering the changed area with `npm test -- <test-file> [more-test-files]`; keep this targeted feedback under 10 seconds. Bare `npm test` remains the comprehensive selection and belongs at the publish gate after `npm run build`, as configured in the existing publish workflow.
 
-The runner enforces a 10-second limit for each test-script process and a 45-second limit for the comprehensive suite, running up to three process-isolated scripts concurrently.
+The runner enforces a 10-second limit for each test-script process and a 45-second limit for the comprehensive suite. Node-side scripts run serially; web entrypoints are bundled once, then run in up to three process-isolated lanes so TypeScript compilation does not consume each script's runtime budget.
 
 `src/__tests__/inbox-popup.test.ts` is the sole approved 20-second exception because it drives real nested tmux servers and readiness polling across subprocess boundaries. The exception is declared beside that script in `scripts/run-tests.mjs`, not available as a general override.
 

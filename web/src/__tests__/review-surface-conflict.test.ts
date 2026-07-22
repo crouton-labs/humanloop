@@ -57,7 +57,7 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 // This regression verifies which states arm the debounce, not its production
 // duration. Shorten only the component's 700ms autosave timers so the real
 // effect wiring remains covered without spending most of the test budget idle.
-const TEST_AUTOSAVE_DELAY_MS = 20;
+const TEST_AUTOSAVE_DELAY_MS = 100;
 const windowSetTimeout = dom.window.setTimeout.bind(dom.window);
 dom.window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
   windowSetTimeout(handler, timeout === 700 ? TEST_AUTOSAVE_DELAY_MS : timeout, ...args)) as typeof dom.window.setTimeout;
@@ -137,7 +137,7 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 async function flushAll(times = 5): Promise<void> {
   for (let i = 0; i < times; i++) await flush();
 }
-const waitPastAutosave = () => new Promise<void>((resolve) => setTimeout(resolve, TEST_AUTOSAVE_DELAY_MS + 30));
+const waitPastAutosave = () => new Promise<void>((resolve) => setTimeout(resolve, TEST_AUTOSAVE_DELAY_MS + 50));
 
 async function mountApp(fetchImpl: unknown): Promise<{ container: HTMLDivElement; root: import('react-dom/client').Root }> {
   (globalThis as any).fetch = fetchImpl;

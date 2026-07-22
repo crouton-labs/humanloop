@@ -1,15 +1,16 @@
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { build } from 'esbuild';
 
 const repoRoot = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
 const tsxCli = fileURLToPath(import.meta.resolve('tsx/cli'));
 
 const SCRIPT_TIMEOUT_MS = 10_000;
 const SUITE_TIMEOUT_MS = 45_000;
-const TEST_CONCURRENCY = 3;
+const WEB_TEST_CONCURRENCY = 3;
 
 const tests = [
   { path: 'src/__tests__/visual.test.ts' },
@@ -26,12 +27,12 @@ const tests = [
   { path: 'web/src/__tests__/review-reducer.test.ts' },
   { path: 'web/src/__tests__/review-keymap.test.ts' },
   { path: 'web/src/__tests__/review-markdown-instrumentation.test.ts' },
-  { path: 'web/src/__tests__/app-deck-regression.test.ts', tsconfig: 'web/tsconfig.json' },
-  { path: 'web/src/__tests__/review-surface-conflict.test.ts', tsconfig: 'web/tsconfig.json' },
-  { path: 'web/src/__tests__/app-ws-close.test.ts', tsconfig: 'web/tsconfig.json' },
-  { path: 'web/src/__tests__/review-surface-takeback.test.ts', tsconfig: 'web/tsconfig.json' },
-  { path: 'web/src/__tests__/review-surface-submit-race.test.ts', tsconfig: 'web/tsconfig.json' },
-  { path: 'web/src/__tests__/review-surface-stale-submit-failure.test.ts', tsconfig: 'web/tsconfig.json' },
+  { path: 'web/src/__tests__/app-deck-regression.test.ts' },
+  { path: 'web/src/__tests__/review-surface-conflict.test.ts' },
+  { path: 'web/src/__tests__/app-ws-close.test.ts' },
+  { path: 'web/src/__tests__/review-surface-takeback.test.ts' },
+  { path: 'web/src/__tests__/review-surface-submit-race.test.ts' },
+  { path: 'web/src/__tests__/review-surface-stale-submit-failure.test.ts' },
   // Approved slow-test exception: this drives real nested tmux servers and bounded readiness polls.
   { path: 'src/__tests__/inbox-popup.test.ts', timeoutMs: 20_000 },
 ];
@@ -80,11 +81,32 @@ function abortAll(reason) {
   for (const abort of activeAborts) abort(reason);
 }
 
+const bundledTestPaths = new Map();
+async function bundleWebTests(selection) {
+  const webTests = selection.filter((test) => test.path.startsWith('web/'));
+  if (webTests.length === 0) return undefined;
+  const outdir = mkdtempSync(join(repoRoot, '.test-bundles-'));
+  const entryPoints = Object.fromEntries(webTests.map((test, index) => [`test-${index}`, test.path]));
+  await build({
+    absWorkingDir: repoRoot,
+    entryPoints,
+    bundle: true,
+    packages: 'external',
+    platform: 'node',
+    format: 'esm',
+    outdir,
+    outExtension: { '.js': '.mjs' },
+    tsconfig: 'web/tsconfig.json',
+    logLevel: 'silent',
+  });
+  for (const [index, test] of webTests.entries()) bundledTestPaths.set(test.path, join(outdir, `test-${index}.mjs`));
+  return outdir;
+}
+
 function runTest(test) {
   return new Promise((resolveRun, rejectRun) => {
-    const args = [tsxCli];
-    if (test.tsconfig) args.push('--tsconfig', test.tsconfig);
-    args.push(test.path);
+    const bundledPath = bundledTestPaths.get(test.path);
+    const args = bundledPath === undefined ? [tsxCli, test.path] : [bundledPath];
 
     const started = performance.now();
     const child = spawn(process.execPath, args, {
@@ -142,22 +164,32 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+let bundleDirectory;
 try {
   const selection = selectedTests(process.argv.slice(2));
+  bundleDirectory = await bundleWebTests(selection);
+  const serialTests = selection.filter((test) => !test.path.startsWith('web/'));
+  for (const test of serialTests) {
+    if (suiteTimedOut) throw new Error(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
+    if (interruptedSignal) throw new Error(`test runner received ${interruptedSignal}`);
+    await runTest(test);
+  }
+
+  const webTests = selection.filter((test) => test.path.startsWith('web/'));
   let cursor = 0;
   let firstError;
-  const runLane = async () => {
-    while (firstError === undefined && cursor < selection.length) {
-      const test = selection[cursor++];
+  const runWebLane = async () => {
+    while (firstError === undefined && cursor < webTests.length) {
+      const test = webTests[cursor++];
       try {
         await runTest(test);
       } catch (error) {
         firstError ??= error;
-        abortAll('test selection stopped after a peer failed');
+        abortAll('web test selection stopped after a peer failed');
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(TEST_CONCURRENCY, selection.length) }, runLane));
+  await Promise.all(Array.from({ length: Math.min(WEB_TEST_CONCURRENCY, webTests.length) }, runWebLane));
   if (firstError !== undefined) throw firstError;
   if (suiteTimedOut) throw new Error(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
   if (interruptedSignal) throw new Error(`test runner received ${interruptedSignal}`);
@@ -166,4 +198,5 @@ try {
   process.exitCode = 1;
 } finally {
   clearTimeout(suiteTimer);
+  if (bundleDirectory !== undefined) rmSync(bundleDirectory, { recursive: true, force: true });
 }
