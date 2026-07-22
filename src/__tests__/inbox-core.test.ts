@@ -26,7 +26,9 @@ async function waitFor(paths: string[]): Promise<void> {
   }
 }
 
-const registration = registerInboxRoot({ root, owner: 'test-owner' });
+const focusHandler = { command: process.execPath, args: ['focus.cjs'] };
+const registration = registerInboxRoot({ root, owner: 'test-owner', focusHandler });
+assert.deepEqual(listInboxRoots()[0]?.focusHandler, focusHandler, 'registered focus handler survives the registry write/read boundary');
 const rootLink = join(temp, 'tickets-link');
 symlinkSync(root, rootLink);
 assert.equal(unregisterInboxRoot(rootLink, 'test-owner'), true, 'symlink unregister canonicalizes available roots');
