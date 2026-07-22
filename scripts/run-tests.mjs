@@ -9,6 +9,7 @@ const tsxCli = fileURLToPath(import.meta.resolve('tsx/cli'));
 
 const SCRIPT_TIMEOUT_MS = 10_000;
 const SUITE_TIMEOUT_MS = 45_000;
+const TEST_CONCURRENCY = 3;
 
 const tests = [
   { path: 'src/__tests__/visual.test.ts' },
@@ -74,7 +75,11 @@ function terminate(child) {
   });
 }
 
-let abortActive;
+const activeAborts = new Set();
+function abortAll(reason) {
+  for (const abort of activeAborts) abort(reason);
+}
+
 function runTest(test) {
   return new Promise((resolveRun, rejectRun) => {
     const args = [tsxCli];
@@ -94,18 +99,18 @@ function runTest(test) {
       timeoutReason = reason;
       termination = terminate(child);
     };
-    abortActive = abort;
+    activeAborts.add(abort);
     const timeoutMs = test.timeoutMs ?? SCRIPT_TIMEOUT_MS;
     const timer = setTimeout(() => abort(`${test.path} exceeded its ${timeoutMs / 1_000}s process limit`), timeoutMs);
 
     child.once('error', (error) => {
       clearTimeout(timer);
-      abortActive = undefined;
+      activeAborts.delete(abort);
       rejectRun(error);
     });
     child.once('exit', async (code, signal) => {
       clearTimeout(timer);
-      abortActive = undefined;
+      activeAborts.delete(abort);
       if (termination) await termination;
       // tsx can leave compiler-service descendants alive after the test script
       // exits. Reap the detached test's remaining process group so serial CI
@@ -128,21 +133,33 @@ let suiteTimedOut = false;
 let interruptedSignal;
 const suiteTimer = setTimeout(() => {
   suiteTimedOut = true;
-  abortActive?.(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
+  abortAll(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
 }, SUITE_TIMEOUT_MS);
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, () => {
     interruptedSignal = signal;
-    abortActive?.(`test runner received ${signal}`);
+    abortAll(`test runner received ${signal}`);
   });
 }
 
 try {
-  for (const test of selectedTests(process.argv.slice(2))) {
-    if (suiteTimedOut) throw new Error(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
-    if (interruptedSignal) throw new Error(`test runner received ${interruptedSignal}`);
-    await runTest(test);
-  }
+  const selection = selectedTests(process.argv.slice(2));
+  let cursor = 0;
+  let firstError;
+  const runLane = async () => {
+    while (firstError === undefined && cursor < selection.length) {
+      const test = selection[cursor++];
+      try {
+        await runTest(test);
+      } catch (error) {
+        firstError ??= error;
+        abortAll('test selection stopped after a peer failed');
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(TEST_CONCURRENCY, selection.length) }, runLane));
+  if (firstError !== undefined) throw firstError;
+  if (suiteTimedOut) throw new Error(`test selection exceeded the ${SUITE_TIMEOUT_MS / 1_000}s suite limit`);
   if (interruptedSignal) throw new Error(`test runner received ${interruptedSignal}`);
 } catch (error) {
   console.error(`\nFAIL ${error instanceof Error ? error.message : String(error)}`);
