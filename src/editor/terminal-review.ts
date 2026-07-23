@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import stringWidth from 'string-width';
 import type { FeedbackComment, FeedbackResult } from '../types.js';
 import type { ReviewOptions } from './review.js';
+import { waitForParkedReviewSubmit } from './parked.js';
+import { openBrowser } from '../browser/open.js';
+import { startReviewWebServer } from '../browser/server.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
 import { renderMarkdownWithMap, type RenderedDoc } from '../render/termrender.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
@@ -336,7 +340,7 @@ export function reservedRows(state: ReviewState, cols: number): number {
     return header + 3 + bufLines;
   }
   if (state.mode === 'list') return header + Math.max(1, state.comments.length) + 2;
-  return header + 8; // help
+  return header + 9; // help
 }
 
 export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: RenderedDoc, cols: number, rows: number): string[] {
@@ -375,13 +379,14 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
     footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
     footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
+    footer.push(`  ${DIM}space w${RESET}     hand off to browser`);
     footer.push(`  ${DIM}?${RESET}           toggle this help       ${DIM}esc${RESET}         close/cancel`);
     footer.push('');
     footer.push(`  ${DIM}esc / ?${RESET} close`);
   } else {
     footer.push(
       `  ${DIM}j/k${RESET} block  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
-      `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} submit  ${DIM}?${RESET} help  ${DIM}esc${RESET} close`,
+      `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} submit  ${DIM}space w${RESET} browser  ${DIM}?${RESET} help  ${DIM}esc${RESET} close`,
     );
   }
 
@@ -416,25 +421,89 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
 
 // ── Host loop (impure — the only part that touches the real TTY) ───────────
 
+/** How one TUI session ended: a final result, or a request to hand the review
+ *  off to the browser (terminal restored, draft persisted). */
+type SessionOutcome = { type: 'done'; result: FeedbackResult } | { type: 'handoff' };
+
+function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
+  const draft = readReviewDraft(outPath);
+  return buildDraftFeedbackResult(absFile, draft?.comments ?? [], draft?.savedAt);
+}
+
 /**
  * Open a Markdown file in humanloop's own terminal review surface: the
  * document renders via termrender (Mermaid included), the anchor is a
  * highlighted block in the rendered document itself (gutter bar + tint via
  * termrender's row→source map), and the human explicitly submits a proposal.
- * Never edits the source file. Autosaves the comment draft to `opts.output`
- * (the `progress.json` convention). Canonical ticket finalization stays with
- * the caller's `onPropose` (the adapter calls `completeReview`); this function
- * never writes `response.json`.
+ * `space w` hands the review off to the browser surface (same park/take-back
+ * semantics as the Neovim path); the draft round-trips between surfaces via
+ * `opts.output`. Never edits the source file. Autosaves the comment draft to
+ * `opts.output` (the `progress.json` convention). Canonical ticket
+ * finalization stays with the caller's `onPropose` (the adapter calls
+ * `completeReview`); this function never writes `response.json`.
  */
 export async function launchTerminalReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
   const absFile = resolve(file);
   const content = readFileSync(absFile, 'utf8');
-  const sourceLines = content.split('\n');
   const outPath = resolve(opts.output);
-  const draft = readReviewDraft(outPath);
   const fileLabel = basename(absFile);
+  // Created lazily on the first browser handoff, reused across take-backs.
+  let jobDir: string | null = opts.jobDir ?? null;
 
-  if (opts.signal?.aborted) return buildDraftFeedbackResult(absFile, draft?.comments ?? [], draft?.savedAt);
+  while (true) {
+    if (opts.signal?.aborted) return diskDraftResult(absFile, outPath);
+    const outcome = await runTerminalReviewSession(absFile, content, outPath, fileLabel, opts);
+    if (outcome.type === 'done') return outcome.result;
+
+    // Browser handoff: the TUI is parked (terminal already restored, draft
+    // persisted); the browser is the editing authority until it submits, the
+    // human takes back with `w`, or the review is cancelled.
+    if (jobDir === null) jobDir = mkdtempSync(join(tmpdir(), 'hl-review-'));
+    let resolveSubmitted!: (result: FeedbackResult) => void;
+    const submitted = new Promise<FeedbackResult>((resolveSubmittedPromise) => {
+      resolveSubmitted = resolveSubmittedPromise;
+    });
+    const server = await startReviewWebServer({
+      jobDir,
+      file: absFile,
+      output: outPath,
+      onSubmit: (result) => resolveSubmitted(result),
+    });
+    if (opts.signal?.aborted) {
+      await server.stop();
+      return diskDraftResult(absFile, outPath);
+    }
+    server.activate();
+    process.stderr.write(`humanloop: browser review handoff active — ${server.url}\n`);
+    openBrowser(server.url);
+    const action = await waitForParkedReviewSubmit(submitted, opts.signal, 'the terminal review');
+    if (action.type === 'submitted') {
+      await server.stop();
+      // An abort landing during the async stop() must not produce a submitted
+      // result whose canonical onPropose convergence was skipped — fall back
+      // to the disk draft (the browser submit already persisted its comments).
+      if (opts.signal?.aborted) return diskDraftResult(absFile, outPath);
+      await opts.onPropose?.(action.result);
+      return action.result;
+    }
+    if (action.type === 'take-back') {
+      await server.requestTakeBack();
+      await server.stop();
+      process.stderr.write('humanloop: taking review back into the terminal review.\n');
+      continue; // re-enter the TUI; the next session re-reads the draft from disk
+    }
+    await server.stop();
+    return diskDraftResult(absFile, outPath);
+  }
+}
+
+/** One TUI session over the document. Resolves when the review reaches a
+ *  final result (submit/close/cancel) or the human requests browser handoff;
+ *  either way the terminal is restored before resolution. Re-reads the draft
+ *  from disk on entry so browser edits survive a take-back. */
+function runTerminalReviewSession(absFile: string, content: string, outPath: string, fileLabel: string, opts: ReviewOptions): Promise<SessionOutcome> {
+  const sourceLines = content.split('\n');
+  const draft = readReviewDraft(outPath);
 
   setupTerminal();
   let { cols, rows } = getTerminalSize();
@@ -447,7 +516,7 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
   const bodyH = (): number => Math.max(1, rows - reservedRows(state, cols));
   state = ensureAnchorVisible(state, doc, bodyH());
 
-  return new Promise<FeedbackResult>((resolvePromise) => {
+  return new Promise<SessionOutcome>((resolvePromise) => {
     const persist = (): void => {
       state = { ...state, version: state.version + 1 };
       writeReviewDraft(outPath, state.comments, state.version);
@@ -466,15 +535,17 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
       prevFrame = nextPrevFrame;
     };
 
-    const finish = (result: FeedbackResult): void => {
+    const finishWith = (outcome: SessionOutcome): void => {
       if (settled) return;
       settled = true;
       process.stdin.removeListener('data', onData);
       process.stdout.removeListener('resize', onResize);
       opts.signal?.removeEventListener('abort', onAbort);
       restoreTerminal();
-      resolvePromise(result);
+      resolvePromise(outcome);
     };
+
+    const finish = (result: FeedbackResult): void => finishWith({ type: 'done', result });
 
     const onResize = (): void => {
       ({ cols, rows } = getTerminalSize());
@@ -569,6 +640,7 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
         } else if (input === 'l') state = openList(state);
         else if (input === 'u') { state = undoLast(state); persist(); }
         else if (input === 's') { void submit(); return; }
+        else if (input === 'w') { persist(); finishWith({ type: 'handoff' }); return; }
         paint();
         return;
       }

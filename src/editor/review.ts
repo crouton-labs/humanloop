@@ -10,6 +10,7 @@ import {
   readReviewDraft,
 } from './feedback.js';
 import { launchTerminalReview } from './terminal-review.js';
+import { waitForParkedReviewSubmit } from './parked.js';
 
 export interface ReviewOptions {
   /** Where the resumable review draft is written. */
@@ -24,7 +25,8 @@ export interface ReviewOptions {
   onClose?: () => Promise<void> | void;
   /** Controller cancellation closes the editor/browser handoff without proposing a result. */
   signal?: AbortSignal;
-  /** Reuse this controller-owned directory for `review.vim`; an existing script is left untouched. */
+  /** Reuse this controller-owned directory for review artifacts (`review.vim`,
+   *  the browser-handoff job id); an existing script is left untouched. */
   jobDir?: string;
 }
 
@@ -557,11 +559,6 @@ function runInCurrentTerminal(bin: string, args: string[], env: NodeJS.ProcessEn
   });
 }
 
-type ParkedReviewAction =
-  | { type: 'submitted'; result: FeedbackResult }
-  | { type: 'take-back' }
-  | { type: 'cancel' };
-
 function clearFlag(path: string): void {
   rmSync(path, { force: true });
 }
@@ -579,51 +576,6 @@ function draftFeedback(path: string, absFile: string): FeedbackResult {
     comments: draft?.comments ?? [],
     savedAt: draft?.savedAt ?? new Date().toISOString(),
   };
-}
-
-async function waitForParkedReviewSubmit(submitted: Promise<FeedbackResult>, signal?: AbortSignal): Promise<ParkedReviewAction> {
-  process.stderr.write(
-    '\nhumanloop: browser review handoff is active.\n' +
-    '  The terminal editor is parked; the browser is the editing authority.\n' +
-    '  Press w to take back into nvim, or Ctrl+C to exit with an unsubmitted draft.\n\n',
-  );
-
-  return new Promise<ParkedReviewAction>((resolveAction) => {
-    const stdin = process.stdin;
-    const interactive = stdin.isTTY;
-    const wasRaw = stdin.isRaw;
-    let settled = false;
-    const cleanup = () => {
-      signal?.removeEventListener('abort', onAbort);
-      if (!interactive) return;
-      stdin.off('data', onData);
-      if (stdin.setRawMode) stdin.setRawMode(wasRaw);
-      stdin.pause();
-    };
-    const finish = (action: ParkedReviewAction) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolveAction(action);
-    };
-    const onAbort = () => finish({ type: 'cancel' });
-    const onData = (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      if (text === 'w' || text === 'W') finish({ type: 'take-back' });
-      if (text === '\u0003') finish({ type: 'cancel' });
-    };
-    if (interactive) {
-      stdin.setRawMode(true);
-      stdin.resume();
-      stdin.on('data', onData);
-    }
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-    submitted.then(
-      (result) => finish({ type: 'submitted', result }),
-      () => finish({ type: 'cancel' }),
-    );
-  });
 }
 
 async function stopReviewServer(handle: WebServerHandle | null): Promise<void> {
@@ -729,11 +681,15 @@ async function launchNeovimReview(file: string, opts: ReviewOptions): Promise<Fe
         server.activate();
         process.stderr.write(`humanloop: browser review handoff active — ${server.url}\n`);
         openBrowser(server.url);
-        const action = await waitForParkedReviewSubmit(submitted, opts.signal);
+        const action = await waitForParkedReviewSubmit(submitted, opts.signal, 'nvim');
         if (action.type === 'submitted') {
           await stopReviewServer(server);
           clearFlag(handoffFlagPath);
-          if (!opts.signal?.aborted) await opts.onPropose?.(action.result);
+          // An abort landing during the async stop must not produce a submitted
+          // result whose canonical onPropose convergence was skipped — fall
+          // back to the disk draft (the browser submit already persisted it).
+          if (opts.signal?.aborted) return draftFeedback(outPath, absFile);
+          await opts.onPropose?.(action.result);
           return action.result;
         }
         if (action.type === 'take-back') {
@@ -750,8 +706,11 @@ async function launchNeovimReview(file: string, opts: ReviewOptions): Promise<Fe
 
       await stopReviewServer(server);
       if (existsSync(submitFlagPath)) {
+        // Same abort-during-stop race as the parked branch above: an aborted
+        // review must resolve as a draft, never as an unconverged proposal.
+        if (opts.signal?.aborted) return draftFeedback(outPath, absFile);
         const proposal = proposedFeedback(outPath, absFile);
-        if (!opts.signal?.aborted) await opts.onPropose?.(proposal);
+        await opts.onPropose?.(proposal);
         return proposal;
       }
       return draftFeedback(outPath, absFile);
