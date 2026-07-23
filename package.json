@@ -1,6 +1,6 @@
 {
   "name": "@crouton-kit/humanloop",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Human-in-the-loop decision TUI — agents write questions, humans answer them",
   "engines": {
     "node": ">=22.19.0"
