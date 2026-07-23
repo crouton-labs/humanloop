@@ -505,6 +505,10 @@ export interface RenderedDoc {
   lines: string[];
   /** Per-row index into `blocks`; null for the blank separator rows between blocks. */
   rows: (number | null)[];
+  /** Per-row finest 1-indexed inclusive source-line range the renderer knows
+   *  (a bullet, a table row, a code line…); null for separator rows and rows
+   *  of unmapped blocks. Same length as `lines`. */
+  spans: ([number, number] | null)[];
   /** Per top-level block: 1-indexed inclusive source-line bounds. Never empty. */
   blocks: { start: number; end: number }[];
 }
@@ -520,9 +524,9 @@ function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
   } catch {
     return null;
   }
-  const p = parsed as { lines?: unknown; rows?: unknown; blocks?: unknown };
-  if (!Array.isArray(p.lines) || !Array.isArray(p.rows) || !Array.isArray(p.blocks)) return null;
-  if (p.rows.length !== p.lines.length) return null;
+  const p = parsed as { lines?: unknown; rows?: unknown; spans?: unknown; blocks?: unknown };
+  if (!Array.isArray(p.lines) || !Array.isArray(p.rows) || !Array.isArray(p.spans) || !Array.isArray(p.blocks)) return null;
+  if (p.rows.length !== p.lines.length || p.spans.length !== p.lines.length) return null;
   if (!p.lines.every((l) => typeof l === 'string')) return null;
   const blockCount = p.blocks.length;
   if (!p.rows.every((r) => r === null || (typeof r === 'number' && Number.isInteger(r) && r >= 0 && r < blockCount))) return null;
@@ -543,12 +547,38 @@ function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
     prevEnd = e;
   }
   if (blocks.length === 0) blocks.push({ start: 1, end: totalSource });
-  return { lines: p.lines as string[], rows: p.rows as (number | null)[], blocks };
+  const spans: ([number, number] | null)[] = [];
+  for (let r = 0; r < (p.spans as unknown[]).length; r++) {
+    const raw = (p.spans as unknown[])[r];
+    if (raw === null) {
+      spans.push(null);
+      continue;
+    }
+    // Same strictness as rows: a span is [start, end], 1-indexed inclusive
+    // integers in order, inside the source — these values flow straight into
+    // a recorded comment's line/endLine, so an out-of-range endpoint is tool
+    // fault to reject, never something to clamp into the wrong line.
+    if (!Array.isArray(raw) || raw.length !== 2) return null;
+    const [s, e] = raw as [unknown, unknown];
+    if (!Number.isInteger(s) || !Number.isInteger(e)) return null;
+    if ((s as number) < 1 || (e as number) < (s as number) || (e as number) > totalSource) return null;
+    // Relational contract: a separator row (rows[r] === null) carries no
+    // span, and a leaf span stays inside its owning block's source range. A
+    // map that disagrees with its own rows/blocks would let a comment on a
+    // visible row record against unrelated source text.
+    const rowBlock = (p.rows as (number | null)[])[r]!;
+    if (rowBlock === null) return null;
+    const owner = blocks[rowBlock]!;
+    if ((s as number) < owner.start || (e as number) > owner.end) return null;
+    spans.push([s as number, e as number]);
+  }
+  return { lines: p.lines as string[], rows: p.rows as (number | null)[], spans, blocks };
 }
 
 /** Renderer-free mapped render: group consecutive non-blank source lines into
  *  paragraph blocks and word-wrap each — the same shape as the termrender map,
- *  with degraded (plaintext) rendering. */
+ *  with degraded (plaintext) rendering. Each source line is wrapped on its own
+ *  and spans exactly itself, so leaf anchoring degrades to true line-by-line. */
 function fallbackDocWithMap(md: string, width: number): RenderedDoc {
   const src = sanitize(md).split('\n');
   const blocks: { start: number; end: number }[] = [];
@@ -565,17 +595,24 @@ function fallbackDocWithMap(md: string, width: number): RenderedDoc {
   if (blocks.length === 0) blocks.push({ start: 1, end: Math.max(1, src.length) });
   const lines: string[] = [];
   const rows: (number | null)[] = [];
+  const spans: ([number, number] | null)[] = [];
   blocks.forEach((b, bi) => {
     if (bi > 0) {
       lines.push('');
       rows.push(null);
+      spans.push(null);
     }
-    for (const l of wrap(src.slice(b.start - 1, b.end).join('\n'), width)) {
-      lines.push(l);
-      rows.push(bi);
+    // wrap() treats each '\n'-separated line as its own paragraph, so wrapping
+    // line-by-line emits the exact rows the joined-block wrap produced.
+    for (let ln = b.start; ln <= b.end; ln++) {
+      for (const l of wrap(src[ln - 1] ?? '', width)) {
+        lines.push(l);
+        rows.push(bi);
+        spans.push([ln, ln]);
+      }
     }
   });
-  return { lines, rows, blocks };
+  return { lines, rows, spans, blocks };
 }
 
 const _mapCache = new Map<string, RenderedDoc>();

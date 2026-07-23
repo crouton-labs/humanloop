@@ -15,16 +15,66 @@ import { diffFrame, renderInputBuffer } from '../tui/render.js';
 import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, hline, sanitize, truncate } from '../tui/ansi.js';
 
 // ── Pure state ───────────────────────────────────────────────────────────────
-// The document is the cursor: the anchor is a top-level rendered block
-// (paragraph/heading/list/fence/diagram), highlighted in place in the rendered
-// pane via termrender's row→source-line map. Comments still record precise
-// source `line`/`endLine`/`lineText` (from the anchored blocks' source
-// ranges), so the FeedbackComment schema is unchanged.
+// The document is the cursor: the anchor is a leaf unit of the rendered
+// document (a bullet, a table row, a code line, a paragraph, a whole
+// diagram…), highlighted in place via termrender's per-row source spans.
+// Comments still record precise source `line`/`endLine`/`lineText` (from the
+// anchored units' source ranges), so the FeedbackComment schema is unchanged.
 
-/** 1-indexed inclusive source-line bounds of one top-level rendered block. */
-export interface BlockRange {
+/** One leaf anchor unit: the finest step j/k moves by. Consecutive rendered
+ *  rows sharing one source span collapse into a single unit that knows both
+ *  its source-line bounds and its rendered-row bounds. */
+export interface AnchorUnit {
+  /** 1-indexed inclusive source-line bounds. */
   start: number;
   end: number;
+  /** 0-indexed inclusive rendered-row bounds in the mapped doc. */
+  firstRow: number;
+  lastRow: number;
+}
+
+/** The anchorable shape of a rendered doc: ordered leaf units plus the
+ *  per-row owning-unit index the painter keys off. */
+export interface AnchorDoc {
+  units: AnchorUnit[];
+  /** Per rendered row: index into `units`, or null (separator rows). */
+  rowUnits: (number | null)[];
+}
+
+/** Derive leaf anchor units from a mapped render: dedupe runs of consecutive
+ *  rows carrying the identical source span. A mapped row without a leaf span
+ *  (an unmapped block) anchors at its whole block's range, so every content
+ *  row belongs to a unit; separator rows belong to none. */
+export function deriveAnchorUnits(doc: RenderedDoc): AnchorDoc {
+  const units: AnchorUnit[] = [];
+  const rowUnits: (number | null)[] = new Array<number | null>(doc.lines.length).fill(null);
+  for (let r = 0; r < doc.lines.length; r++) {
+    let span = doc.spans[r] ?? null;
+    if (span === null) {
+      const b = doc.rows[r] ?? null;
+      const block = b !== null ? doc.blocks[b] : undefined;
+      if (block === undefined) continue;
+      span = [block.start, block.end];
+    }
+    const prev = units[units.length - 1];
+    if (prev !== undefined && prev.lastRow === r - 1 && prev.start === span[0] && prev.end === span[1]) {
+      prev.lastRow = r;
+    } else {
+      units.push({ start: span[0], end: span[1], firstRow: r, lastRow: r });
+    }
+    rowUnits[r] = units.length - 1;
+  }
+  if (units.length === 0) {
+    // Degenerate map (nothing anchorable) — one whole-doc unit over all rows.
+    units.push({
+      start: doc.blocks[0]?.start ?? 1,
+      end: doc.blocks[doc.blocks.length - 1]?.end ?? 1,
+      firstRow: 0,
+      lastRow: Math.max(0, doc.lines.length - 1),
+    });
+    for (let r = 0; r < rowUnits.length; r++) rowUnits[r] = 0;
+  }
+  return { units, rowUnits };
 }
 
 export interface ComposeState {
@@ -39,13 +89,15 @@ export interface ComposeState {
 
 export interface ReviewState {
   sourceLines: string[];
-  /** Top-level block source ranges, in document order. Never empty. */
-  blocks: BlockRange[];
+  /** Ordered leaf anchor units. Never empty. */
+  units: AnchorUnit[];
+  /** Per rendered row: owning unit index, or null for separator rows. */
+  rowUnits: (number | null)[];
   comments: FeedbackComment[];
   version: number;
-  /** 0-based index of the anchored block. */
-  activeBlock: number;
-  /** Set while a Shift+j/k range is being extended from this block. */
+  /** 0-based index of the anchored unit. */
+  activeUnit: number;
+  /** Set while a Shift+j/k range is being extended from this unit. */
   selectionAnchor: number | null;
   /** Scroll offset into the rendered (termrender) lines. */
   scroll: number;
@@ -54,23 +106,66 @@ export interface ReviewState {
   listIndex: number;
 }
 
-/** Index of the block containing `line`; snaps forward across gaps (blank
- *  separator lines between blocks) and clamps to the last block. */
-export function blockIndexForLine(blocks: BlockRange[], line: number): number {
-  for (let i = 0; i < blocks.length; i++) {
-    if (blocks[i]!.end >= line) return i;
+/** Best unit for a source line: the NARROWEST unit containing it — code/table
+ *  chrome units carry their whole block's range and sit before the per-line
+ *  content units in rendered order, so "first whose end reaches the line"
+ *  would wrongly pick the chrome over the exact code line. A line no unit
+ *  contains (a blank separator) snaps forward to the next unit; past the end
+ *  clamps to the last. */
+export function unitIndexForLine(units: AnchorUnit[], line: number): number {
+  let best = -1;
+  for (let i = 0; i < units.length; i++) {
+    const u = units[i]!;
+    if (u.start <= line && u.end >= line) {
+      if (best === -1 || u.end - u.start < units[best]!.end - units[best]!.start) best = i;
+    }
   }
-  return Math.max(0, blocks.length - 1);
+  if (best !== -1) return best;
+  for (let i = 0; i < units.length; i++) {
+    if (units[i]!.start > line) return i;
+  }
+  return Math.max(0, units.length - 1);
 }
 
-export function initReviewState(sourceLines: string[], blocks: BlockRange[], comments: FeedbackComment[], version: number): ReviewState {
-  const safeBlocks = blocks.length > 0 ? blocks : [{ start: 1, end: Math.max(1, sourceLines.length) }];
+/** Remap a unit from an old unit list into a re-derived one: an exact
+ *  source-range match wins (chrome and leaf units can share source lines),
+ *  else the best unit for its first line. */
+export function remapUnitIndex(units: AnchorUnit[], prev: AnchorUnit): number {
+  for (let i = 0; i < units.length; i++) {
+    if (units[i]!.start === prev.start && units[i]!.end === prev.end) return i;
+  }
+  return unitIndexForLine(units, prev.start);
+}
+
+/** First/last unit indices overlapping the source range `line..endLine`;
+ *  a range touching no unit snaps like unitIndexForLine. */
+export function unitRangeForSpan(units: AnchorUnit[], line: number, endLine: number): { lo: number; hi: number } {
+  let lo = -1;
+  let hi = -1;
+  units.forEach((u, i) => {
+    if (u.start <= endLine && u.end >= line) {
+      if (lo === -1) lo = i;
+      hi = i;
+    }
+  });
+  if (lo === -1) {
+    const snap = unitIndexForLine(units, line);
+    return { lo: snap, hi: snap };
+  }
+  return { lo, hi };
+}
+
+export function initReviewState(sourceLines: string[], anchor: AnchorDoc, comments: FeedbackComment[], version: number): ReviewState {
+  const safe = anchor.units.length > 0
+    ? anchor
+    : { units: [{ start: 1, end: Math.max(1, sourceLines.length), firstRow: 0, lastRow: 0 }], rowUnits: anchor.rowUnits };
   return {
     sourceLines,
-    blocks: safeBlocks,
+    units: safe.units,
+    rowUnits: safe.rowUnits,
     comments: [...comments],
     version,
-    activeBlock: comments.length > 0 ? blockIndexForLine(safeBlocks, comments[0]!.line) : 0,
+    activeUnit: comments.length > 0 ? unitIndexForLine(safe.units, comments[0]!.line) : 0,
     selectionAnchor: null,
     scroll: 0,
     mode: 'view',
@@ -79,59 +174,62 @@ export function initReviewState(sourceLines: string[], blocks: BlockRange[], com
   };
 }
 
-function selectedBlockBounds(state: ReviewState): { lo: number; hi: number } {
-  const sel = state.selectionAnchor ?? state.activeBlock;
-  return { lo: Math.min(state.activeBlock, sel), hi: Math.max(state.activeBlock, sel) };
+function selectedUnitBounds(state: ReviewState): { lo: number; hi: number } {
+  const sel = state.selectionAnchor ?? state.activeUnit;
+  return { lo: Math.min(state.activeUnit, sel), hi: Math.max(state.activeUnit, sel) };
 }
 
-/** Source-line anchor of the current block selection — what a committed
- *  comment records as `line`/`endLine`. */
+/** Source-line anchor of the current unit selection — what a committed
+ *  comment records as `line`/`endLine`. Whole-block chrome units can carry a
+ *  wider range than their neighbors, so take the min/max over the selection
+ *  rather than trusting the endpoints alone. */
 export function currentAnchor(state: ReviewState): { line: number; endLine: number } {
-  const { lo, hi } = selectedBlockBounds(state);
-  const first = state.blocks[lo] ?? { start: 1, end: Math.max(1, state.sourceLines.length) };
-  const last = state.blocks[hi] ?? first;
-  return { line: first.start, endLine: last.end };
+  const { lo, hi } = selectedUnitBounds(state);
+  let line = Number.POSITIVE_INFINITY;
+  let endLine = 0;
+  for (let i = lo; i <= hi; i++) {
+    const u = state.units[i];
+    if (u === undefined) continue;
+    line = Math.min(line, u.start);
+    endLine = Math.max(endLine, u.end);
+  }
+  if (!Number.isFinite(line)) return { line: 1, endLine: Math.max(1, state.sourceLines.length) };
+  return { line, endLine: Math.max(line, endLine) };
 }
 
-export function moveActiveBlock(state: ReviewState, delta: number, extend: boolean): ReviewState {
-  const last = Math.max(0, state.blocks.length - 1);
-  const next = Math.max(0, Math.min(last, state.activeBlock + delta));
-  if (!extend) return { ...state, activeBlock: next, selectionAnchor: null };
-  return { ...state, activeBlock: next, selectionAnchor: state.selectionAnchor ?? state.activeBlock };
+export function moveActiveUnit(state: ReviewState, delta: number, extend: boolean): ReviewState {
+  const last = Math.max(0, state.units.length - 1);
+  const next = Math.max(0, Math.min(last, state.activeUnit + delta));
+  if (!extend) return { ...state, activeUnit: next, selectionAnchor: null };
+  return { ...state, activeUnit: next, selectionAnchor: state.selectionAnchor ?? state.activeUnit };
 }
 
-/** Block indices overlapped by any existing comment's source range. A stale
- *  draft range lying wholly past the last block (the file shrank between draft
- *  save and reopen) still gets a marker on its clamped block, so every comment
+/** Unit indices overlapped by any existing comment's source range. A stale
+ *  draft range lying wholly past the last unit (the file shrank between draft
+ *  save and reopen) still gets a marker on its clamped unit, so every comment
  *  is visible somewhere in the document. */
-export function commentedBlockSet(state: ReviewState): Set<number> {
+export function commentedUnitSet(state: ReviewState): Set<number> {
   const out = new Set<number>();
   for (const c of state.comments) {
     let hit = false;
-    state.blocks.forEach((b, i) => {
-      if (b.start <= c.endLine && b.end >= c.line) {
+    state.units.forEach((u, i) => {
+      if (u.start <= c.endLine && u.end >= c.line) {
         out.add(i);
         hit = true;
       }
     });
-    if (!hit) out.add(blockIndexForLine(state.blocks, c.line));
+    if (!hit) out.add(unitIndexForLine(state.units, c.line));
   }
   return out;
 }
 
-/** First/last rendered-row indices produced by blocks `lo..hi`, or null when
- *  no row maps into that range. */
-export function anchorRowRange(rows: (number | null)[], lo: number, hi: number): { first: number; last: number } | null {
-  let first = -1;
-  let last = -1;
-  for (let r = 0; r < rows.length; r++) {
-    const b = rows[r];
-    if (b !== null && b >= lo && b <= hi) {
-      if (first === -1) first = r;
-      last = r;
-    }
-  }
-  return first === -1 ? null : { first, last };
+/** First/last rendered-row indices spanned by units `lo..hi`, or null when
+ *  the indices fall outside the unit list. */
+export function anchorRowRange(units: AnchorUnit[], lo: number, hi: number): { first: number; last: number } | null {
+  const a = units[lo];
+  const b = units[hi];
+  if (a === undefined || b === undefined) return null;
+  return { first: a.firstRow, last: b.lastRow };
 }
 
 /** Minimal scroll adjustment that keeps rows `first..last` visible with
@@ -149,10 +247,10 @@ export function scrollToReveal(scroll: number, first: number, last: number, body
   return Math.max(0, Math.min(next, maxScroll));
 }
 
-/** Auto-scroll so the active block (the moving edge of a selection) is
+/** Auto-scroll so the active unit (the moving edge of a selection) is
  *  visible. Free-scrolling (`u`/`d`) is untouched until the next anchor move. */
 export function ensureAnchorVisible(state: ReviewState, doc: RenderedDoc, bodyHeight: number): ReviewState {
-  const range = anchorRowRange(doc.rows, state.activeBlock, state.activeBlock);
+  const range = anchorRowRange(state.units, state.activeUnit, state.activeUnit);
   if (range === null) return state;
   const scroll = scrollToReveal(state.scroll, range.first, range.last, bodyHeight, doc.lines.length);
   return scroll === state.scroll ? state : { ...state, scroll };
@@ -171,11 +269,10 @@ export function openComposeEdit(state: ReviewState, index: number): ReviewState 
   const comment = state.comments[index];
   if (comment === undefined) return state;
   const buffer = comment.comment;
-  const lo = blockIndexForLine(state.blocks, comment.line);
-  const hi = blockIndexForLine(state.blocks, comment.endLine);
+  const { lo, hi } = unitRangeForSpan(state.units, comment.line, comment.endLine);
   return {
     ...state,
-    activeBlock: hi,
+    activeUnit: hi,
     selectionAnchor: lo === hi ? null : lo,
     mode: 'compose',
     compose: { buffer, cursor: [...buffer].length, editingId: comment.id, returnMode: 'list', anchor: { line: comment.line, endLine: comment.endLine } },
@@ -375,7 +472,7 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
     footer.push(`  ${DIM}j/k${RESET} move  ${DIM}enter/e${RESET} edit  ${DIM}d${RESET} delete  ${DIM}q/esc${RESET} close`);
   } else if (state.mode === 'help') {
     footer.push('  Keys:');
-    footer.push(`  ${DIM}j/k${RESET}         move anchor block      ${DIM}shift+j/k${RESET}   extend selection`);
+    footer.push(`  ${DIM}j/k${RESET}         move anchor            ${DIM}shift+j/k${RESET}   extend selection`);
     footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
     footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
@@ -385,7 +482,7 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
     footer.push(`  ${DIM}esc / ?${RESET} close`);
   } else {
     footer.push(
-      `  ${DIM}j/k${RESET} block  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
+      `  ${DIM}j/k${RESET} move  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
       `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} submit  ${DIM}space w${RESET} browser  ${DIM}?${RESET} help  ${DIM}esc${RESET} close`,
     );
   }
@@ -394,8 +491,8 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   const bodyHeight = Math.max(1, rows - reserved);
   const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
   const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
-  const { lo, hi } = selectedBlockBounds(state);
-  const commented = commentedBlockSet(state);
+  const { lo, hi } = selectedUnitBounds(state);
+  const commented = commentedUnitSet(state);
   const body: string[] = [];
   for (let i = 0; i < bodyHeight; i++) {
     const abs = scroll + i;
@@ -404,9 +501,9 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
       continue;
     }
     const row = doc.lines[abs]!;
-    const b = doc.rows[abs] ?? null;
-    if (b !== null && b >= lo && b <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, docW)}`);
-    else if (b !== null && commented.has(b)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
+    const u = state.rowUnits[abs] ?? null;
+    if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, docW)}`);
+    else if (u !== null && commented.has(u)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
     else body.push(`    ${row}`);
   }
   if (scroll > 0 && body.length > 0) body[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
@@ -433,8 +530,9 @@ function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
 /**
  * Open a Markdown file in humanloop's own terminal review surface: the
  * document renders via termrender (Mermaid included), the anchor is a
- * highlighted block in the rendered document itself (gutter bar + tint via
- * termrender's row→source map), and the human explicitly submits a proposal.
+ * highlighted leaf unit — a bullet, table row, code line, paragraph — in the
+ * rendered document itself (gutter bar + tint via termrender's per-row source
+ * spans), and the human explicitly submits a proposal.
  * `space w` hands the review off to the browser surface (same park/take-back
  * semantics as the Neovim path); the draft round-trips between surfaces via
  * `opts.output`. Never edits the source file. Autosaves the comment draft to
@@ -508,7 +606,7 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
   setupTerminal();
   let { cols, rows } = getTerminalSize();
   let doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
-  let state = initReviewState(sourceLines, doc.blocks, draft?.comments ?? [], draft?.version ?? 0);
+  let state = initReviewState(sourceLines, deriveAnchorUnits(doc), draft?.comments ?? [], draft?.version ?? 0);
   let prevFrame: string[] = [];
   let spaceArmed = false;
   let settled = false;
@@ -550,17 +648,20 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
     const onResize = (): void => {
       ({ cols, rows } = getTerminalSize());
       doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
-      // Blocks derive from the source, not the width, so a same-renderer
-      // re-render keeps the count — but a mid-session renderer→fallback
-      // transition can reshape the block list, so clamp the indices. Committed
-      // comments are untouched either way (their source lines are frozen).
-      const blocks = doc.blocks;
-      const lastIdx = Math.max(0, blocks.length - 1);
+      // Unit SOURCE ranges are width-independent under the same renderer (only
+      // their rendered-row bounds move), but a mid-session renderer→fallback
+      // transition can reshape the list — so remap the anchor by its source
+      // line rather than trusting the old index. Committed comments are
+      // untouched either way (their source lines are frozen).
+      const prevActive = state.units[state.activeUnit];
+      const prevSel = state.selectionAnchor !== null ? state.units[state.selectionAnchor] : undefined;
+      const { units, rowUnits } = deriveAnchorUnits(doc);
       state = {
         ...state,
-        blocks,
-        activeBlock: Math.min(state.activeBlock, lastIdx),
-        selectionAnchor: state.selectionAnchor === null ? null : Math.min(state.selectionAnchor, lastIdx),
+        units,
+        rowUnits,
+        activeUnit: prevActive !== undefined ? remapUnitIndex(units, prevActive) : 0,
+        selectionAnchor: prevSel !== undefined ? remapUnitIndex(units, prevSel) : null,
       };
       state = ensureAnchorVisible(state, doc, bodyH());
       paint(true);
@@ -650,10 +751,10 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
 
       // view mode
       if (input === ' ') { spaceArmed = true; return; }
-      if (input === 'j' || key.downArrow) { state = moveActiveBlock(state, 1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
-      else if (input === 'k' || key.upArrow) { state = moveActiveBlock(state, -1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
-      else if (input === 'J') { state = moveActiveBlock(state, 1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
-      else if (input === 'K') { state = moveActiveBlock(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
+      if (input === 'j' || key.downArrow) { state = moveActiveUnit(state, 1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'k' || key.upArrow) { state = moveActiveUnit(state, -1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'J') { state = moveActiveUnit(state, 1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'K') { state = moveActiveUnit(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
       else if (input === 'u' || key.pageUp) state = scrollBy(state, -bodyH(), bodyH(), doc.lines.length);
       else if (input === 'd' || key.pageDown) state = scrollBy(state, bodyH(), bodyH(), doc.lines.length);
       else if (input === '?') state = openHelp(state);
