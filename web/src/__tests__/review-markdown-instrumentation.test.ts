@@ -13,6 +13,7 @@ import {
   sourceLineFromByteOffset,
 } from '../lib/sourceMap.ts';
 import type { FeedbackComment } from '../types.ts';
+import { isMermaidClassName } from '../components/MermaidDiagram.tsx';
 
 // This suite proves the M1 fix: source-anchored spans survive INSIDE a fenced
 // code block after `rehype-highlight` has rebuilt the `<pre><code>` subtree.
@@ -286,6 +287,16 @@ const endByteOf = (n: HastNode): number => Number(n.properties!['data-source-end
   const bravoOffset = visibleText.indexOf('bravo');
   const byteAtBravo = byteOffsetWithinRange(range, visibleText, bravoOffset);
   assert.equal(sourceLineFromByteOffset(map, byteAtBravo), 4, 'clicking inside "bravo" resolves line 4, not the span\'s start line');
+}
+
+// Mermaid fences survive the markdown pipeline as code blocks and are handed
+// to the browser diagram renderer rather than shown as source.
+{
+  const tree = render('```mermaid\nflowchart LR\n  Start --> Done\n```\n');
+  const code = findFirst(tree, (node) => node.type === 'element' && node.tagName === 'code');
+  assert.ok(code, 'Mermaid fence produces a code element');
+  assert.equal(isMermaidClassName((code.properties?.className as string[]).join(' ')), true, 'Mermaid code element is recognized for diagram rendering');
+  assert.equal(isMermaidClassName('language-typescript'), false, 'ordinary code remains a code block');
 }
 
 console.log('OK: review markdown instrumentation (M1/C1/M2 real rehype-pipeline anchoring)');

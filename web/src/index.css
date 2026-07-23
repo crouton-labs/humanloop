@@ -122,6 +122,18 @@
   @apply block w-full overflow-x-auto;
 }
 
+.mermaid-diagram {
+  @apply my-4 overflow-x-auto rounded-md border border-border bg-muted p-4 text-center;
+}
+
+.mermaid-diagram svg {
+  @apply mx-auto max-w-none;
+}
+
+.mermaid-error {
+  @apply border-destructive;
+}
+
 /* Syntax highlighting (rehype-highlight → hljs.* classes), tuned to sit on
  * top of --muted instead of shipping a clashing prebuilt hljs theme. */
 .hljs { color: var(--foreground); }
