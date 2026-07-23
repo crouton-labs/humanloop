@@ -22,6 +22,7 @@ const tests = [
   { path: 'src/__tests__/review-adapter.test.ts' },
   { path: 'src/__tests__/mount-panel.test.ts' },
   { path: 'src/__tests__/feedback.test.ts' },
+  { path: 'src/__tests__/terminal-review.test.ts' },
   { path: 'src/__tests__/browser-server.test.ts' },
   { path: 'web/src/__tests__/review-sourcemap.test.ts' },
   { path: 'web/src/__tests__/review-reducer.test.ts' },

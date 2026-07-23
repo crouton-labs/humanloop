@@ -9,6 +9,7 @@ import {
   buildFinalFeedbackResult,
   readReviewDraft,
 } from './feedback.js';
+import { launchTerminalReview } from './terminal-review.js';
 
 export interface ReviewOptions {
   /** Where the resumable review draft is written. */
@@ -630,12 +631,24 @@ async function stopReviewServer(handle: WebServerHandle | null): Promise<void> {
 }
 
 /**
+ * Open a markdown file for review. Humanloop's own terminal surface
+ * (`launchTerminalReview`) is the default: it renders Markdown (including
+ * Mermaid) via termrender and anchors comments to source lines. Passing an
+ * explicit `opts.editor` opts into the legacy read-only Neovim/Vim session
+ * (`launchNeovimReview`), kept only as an explicit compatibility path.
+ */
+export async function launchReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
+  if (opts.editor !== undefined) return launchNeovimReview(file, opts);
+  return launchTerminalReview(file, opts);
+}
+
+/**
  * Open a markdown file in a clean, read-only Neovim/Vim review session. The
  * human anchors comments to source lines/selections with native vim motions
  * and explicitly submits a proposal. Blocks until the editor exits. Autosaved
  * drafts survive exit; canonical ticket finalization belongs to the controller.
  */
-export async function launchReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
+async function launchNeovimReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
   const absFile = resolve(file);
   if (!existsSync(absFile)) {
     throw new Error(`Markdown file not found: ${absFile}`);
