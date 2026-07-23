@@ -1,19 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
+import stringWidth from 'string-width';
 import type { FeedbackComment, FeedbackResult } from '../types.js';
 import type { ReviewOptions } from './review.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
-import { renderMarkdown } from '../render/termrender.js';
+import { renderMarkdownWithMap, type RenderedDoc } from '../render/termrender.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
 import { diffFrame, renderInputBuffer } from '../tui/render.js';
-import { BOLD, CYAN, DIM, RESET, YELLOW, hline, sanitize, truncate } from '../tui/ansi.js';
+import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, hline, sanitize, truncate } from '../tui/ansi.js';
 
 // ── Pure state ───────────────────────────────────────────────────────────────
-// Raw source lines and rendered (termrender) lines are kept strictly separate:
-// termrender wraps/adds rows (tables, Mermaid diagrams) so a rendered row never
-// maps 1:1 to a source line. Anchors are always resolved against `sourceLines`;
-// the rendered pane is a plain scrollable view with no anchor awareness.
+// The document is the cursor: the anchor is a top-level rendered block
+// (paragraph/heading/list/fence/diagram), highlighted in place in the rendered
+// pane via termrender's row→source-line map. Comments still record precise
+// source `line`/`endLine`/`lineText` (from the anchored blocks' source
+// ranges), so the FeedbackComment schema is unchanged.
+
+/** 1-indexed inclusive source-line bounds of one top-level rendered block. */
+export interface BlockRange {
+  start: number;
+  end: number;
+}
 
 export interface ComposeState {
   buffer: string;
@@ -27,11 +35,13 @@ export interface ComposeState {
 
 export interface ReviewState {
   sourceLines: string[];
+  /** Top-level block source ranges, in document order. Never empty. */
+  blocks: BlockRange[];
   comments: FeedbackComment[];
   version: number;
-  /** 1-based active source line. */
-  activeLine: number;
-  /** Set while a Shift+j/k range is being extended from this line. */
+  /** 0-based index of the anchored block. */
+  activeBlock: number;
+  /** Set while a Shift+j/k range is being extended from this block. */
   selectionAnchor: number | null;
   /** Scroll offset into the rendered (termrender) lines. */
   scroll: number;
@@ -40,12 +50,23 @@ export interface ReviewState {
   listIndex: number;
 }
 
-export function initReviewState(sourceLines: string[], comments: FeedbackComment[], version: number): ReviewState {
+/** Index of the block containing `line`; snaps forward across gaps (blank
+ *  separator lines between blocks) and clamps to the last block. */
+export function blockIndexForLine(blocks: BlockRange[], line: number): number {
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i]!.end >= line) return i;
+  }
+  return Math.max(0, blocks.length - 1);
+}
+
+export function initReviewState(sourceLines: string[], blocks: BlockRange[], comments: FeedbackComment[], version: number): ReviewState {
+  const safeBlocks = blocks.length > 0 ? blocks : [{ start: 1, end: Math.max(1, sourceLines.length) }];
   return {
     sourceLines,
+    blocks: safeBlocks,
     comments: [...comments],
     version,
-    activeLine: comments.length > 0 ? comments[0]!.line : 1,
+    activeBlock: comments.length > 0 ? blockIndexForLine(safeBlocks, comments[0]!.line) : 0,
     selectionAnchor: null,
     scroll: 0,
     mode: 'view',
@@ -54,16 +75,83 @@ export function initReviewState(sourceLines: string[], comments: FeedbackComment
   };
 }
 
-export function currentAnchor(state: ReviewState): { line: number; endLine: number } {
-  if (state.selectionAnchor === null) return { line: state.activeLine, endLine: state.activeLine };
-  return { line: Math.min(state.selectionAnchor, state.activeLine), endLine: Math.max(state.selectionAnchor, state.activeLine) };
+function selectedBlockBounds(state: ReviewState): { lo: number; hi: number } {
+  const sel = state.selectionAnchor ?? state.activeBlock;
+  return { lo: Math.min(state.activeBlock, sel), hi: Math.max(state.activeBlock, sel) };
 }
 
-export function moveActiveLine(state: ReviewState, delta: number, extend: boolean): ReviewState {
-  const total = Math.max(1, state.sourceLines.length);
-  const next = Math.max(1, Math.min(total, state.activeLine + delta));
-  if (!extend) return { ...state, activeLine: next, selectionAnchor: null };
-  return { ...state, activeLine: next, selectionAnchor: state.selectionAnchor ?? state.activeLine };
+/** Source-line anchor of the current block selection — what a committed
+ *  comment records as `line`/`endLine`. */
+export function currentAnchor(state: ReviewState): { line: number; endLine: number } {
+  const { lo, hi } = selectedBlockBounds(state);
+  const first = state.blocks[lo] ?? { start: 1, end: Math.max(1, state.sourceLines.length) };
+  const last = state.blocks[hi] ?? first;
+  return { line: first.start, endLine: last.end };
+}
+
+export function moveActiveBlock(state: ReviewState, delta: number, extend: boolean): ReviewState {
+  const last = Math.max(0, state.blocks.length - 1);
+  const next = Math.max(0, Math.min(last, state.activeBlock + delta));
+  if (!extend) return { ...state, activeBlock: next, selectionAnchor: null };
+  return { ...state, activeBlock: next, selectionAnchor: state.selectionAnchor ?? state.activeBlock };
+}
+
+/** Block indices overlapped by any existing comment's source range. A stale
+ *  draft range lying wholly past the last block (the file shrank between draft
+ *  save and reopen) still gets a marker on its clamped block, so every comment
+ *  is visible somewhere in the document. */
+export function commentedBlockSet(state: ReviewState): Set<number> {
+  const out = new Set<number>();
+  for (const c of state.comments) {
+    let hit = false;
+    state.blocks.forEach((b, i) => {
+      if (b.start <= c.endLine && b.end >= c.line) {
+        out.add(i);
+        hit = true;
+      }
+    });
+    if (!hit) out.add(blockIndexForLine(state.blocks, c.line));
+  }
+  return out;
+}
+
+/** First/last rendered-row indices produced by blocks `lo..hi`, or null when
+ *  no row maps into that range. */
+export function anchorRowRange(rows: (number | null)[], lo: number, hi: number): { first: number; last: number } | null {
+  let first = -1;
+  let last = -1;
+  for (let r = 0; r < rows.length; r++) {
+    const b = rows[r];
+    if (b !== null && b >= lo && b <= hi) {
+      if (first === -1) first = r;
+      last = r;
+    }
+  }
+  return first === -1 ? null : { first, last };
+}
+
+/** Minimal scroll adjustment that keeps rows `first..last` visible with
+ *  `margin` rows of context (the margin yields whenever honoring it would push
+ *  either edge of the span out of view); a taller-than-view span pins `first`
+ *  at the top — one row down when scrolled, so the `↑ more above` indicator
+ *  overwrites the preceding row, never the pinned one. Always returns a scroll
+ *  clamped to the document. */
+export function scrollToReveal(scroll: number, first: number, last: number, bodyHeight: number, total: number, margin = 2): number {
+  const maxScroll = Math.max(0, total - bodyHeight);
+  let next = Math.max(0, Math.min(scroll, maxScroll));
+  if (last - first + 1 >= bodyHeight) return Math.max(0, Math.min(Math.max(0, first - 1), maxScroll));
+  if (first - margin < next) next = Math.max(first - margin, last - (bodyHeight - 1));
+  else if (last + margin > next + bodyHeight - 1) next = Math.min(last + margin - (bodyHeight - 1), first);
+  return Math.max(0, Math.min(next, maxScroll));
+}
+
+/** Auto-scroll so the active block (the moving edge of a selection) is
+ *  visible. Free-scrolling (`u`/`d`) is untouched until the next anchor move. */
+export function ensureAnchorVisible(state: ReviewState, doc: RenderedDoc, bodyHeight: number): ReviewState {
+  const range = anchorRowRange(doc.rows, state.activeBlock, state.activeBlock);
+  if (range === null) return state;
+  const scroll = scrollToReveal(state.scroll, range.first, range.last, bodyHeight, doc.lines.length);
+  return scroll === state.scroll ? state : { ...state, scroll };
 }
 
 export function scrollBy(state: ReviewState, delta: number, bodyHeight: number, totalLines: number): ReviewState {
@@ -79,8 +167,12 @@ export function openComposeEdit(state: ReviewState, index: number): ReviewState 
   const comment = state.comments[index];
   if (comment === undefined) return state;
   const buffer = comment.comment;
+  const lo = blockIndexForLine(state.blocks, comment.line);
+  const hi = blockIndexForLine(state.blocks, comment.endLine);
   return {
     ...state,
+    activeBlock: hi,
+    selectionAnchor: lo === hi ? null : lo,
     mode: 'compose',
     compose: { buffer, cursor: [...buffer].length, editingId: comment.id, returnMode: 'list', anchor: { line: comment.line, endLine: comment.endLine } },
   };
@@ -214,22 +306,42 @@ export function textVertical(buffer: string, cursor: number, delta: number): num
 
 // ── Rendering (pure) ─────────────────────────────────────────────────────────
 
+/** Width the document is rendered at for a given terminal width: 2-col left
+ *  margin + 2-col gutter before the content, capped for readability. */
+export function renderWidthForCols(cols: number): number {
+  return Math.min(Math.max(20, cols - 6), 120);
+}
+
+// Single-hue anchor tint (a dark neutral step below the CYAN gutter bar).
+// termrender's only reset is `\x1b[0m`, so re-arming the background after each
+// reset keeps the tint alive across inner styling. Heading rows carry their
+// own background and won't show the tint — the gutter bar still marks them.
+const TINT_BG = `${ESC}48;5;236m`;
+
+function tintRow(row: string, width: number): string {
+  const pad = Math.max(0, width - stringWidth(sanitize(row)));
+  return TINT_BG + row.replaceAll(RESET, RESET + TINT_BG) + ' '.repeat(pad) + RESET;
+}
+
 /** Reserved (non-body) rows for each mode's fixed header/footer chrome. Kept in
- *  sync with renderReviewFrame so scroll math can clamp before a repaint. */
-export function reservedRows(state: ReviewState): number {
+ *  sync with renderReviewFrame so scroll math can clamp before a repaint — the
+ *  compose case counts the same hard-wrapped input lines the frame renders. */
+export function reservedRows(state: ReviewState, cols: number): number {
   const header = 3; // blank, title, divider
-  if (state.mode === 'view') return header + 2;
+  if (state.mode === 'view') return header + 1;
   if (state.mode === 'compose') {
     const c = state.compose;
-    const bufLines = c ? Math.max(1, c.buffer.split('\n').length) : 1;
+    const maxW = Math.min(Math.max(20, cols - 4), 120);
+    const bufLines = c ? renderInputBuffer(c.buffer, c.cursor, Math.max(10, maxW - 2)).length : 1;
     return header + 3 + bufLines;
   }
   if (state.mode === 'list') return header + Math.max(1, state.comments.length) + 2;
   return header + 8; // help
 }
 
-export function renderReviewFrame(state: ReviewState, fileLabel: string, renderedLines: string[], cols: number, rows: number): string[] {
+export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: RenderedDoc, cols: number, rows: number): string[] {
   const maxW = Math.min(Math.max(20, cols - 4), 120);
+  const docW = renderWidthForCols(cols);
   const header: string[] = [
     '',
     `  ${BOLD}${CYAN}Review — ${fileLabel}${RESET}  ${DIM}${state.comments.length} comment${state.comments.length === 1 ? '' : 's'}${RESET}`,
@@ -259,7 +371,7 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, rendere
     footer.push(`  ${DIM}j/k${RESET} move  ${DIM}enter/e${RESET} edit  ${DIM}d${RESET} delete  ${DIM}q/esc${RESET} close`);
   } else if (state.mode === 'help') {
     footer.push('  Keys:');
-    footer.push(`  ${DIM}j/k${RESET}         move anchor line       ${DIM}shift+j/k${RESET}   extend range`);
+    footer.push(`  ${DIM}j/k${RESET}         move anchor block      ${DIM}shift+j/k${RESET}   extend selection`);
     footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
     footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
@@ -267,23 +379,33 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, rendere
     footer.push('');
     footer.push(`  ${DIM}esc / ?${RESET} close`);
   } else {
-    const anchor = currentAnchor(state);
-    const label = anchor.line === anchor.endLine ? `L${anchor.line}` : `L${anchor.line}-${anchor.endLine}`;
-    const preview = truncate(sanitize(state.sourceLines.slice(anchor.line - 1, anchor.endLine).join(' / ')), Math.max(10, maxW - 20));
-    footer.push(`  ${DIM}Anchor:${RESET} ${CYAN}${label}${RESET}  ${DIM}${preview}${RESET}`);
     footer.push(
-      `  ${DIM}j/k${RESET} anchor  ${DIM}shift-j/k${RESET} range  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
+      `  ${DIM}j/k${RESET} block  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
       `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} submit  ${DIM}?${RESET} help  ${DIM}esc${RESET} close`,
     );
   }
 
   const reserved = header.length + footer.length;
   const bodyHeight = Math.max(1, rows - reserved);
-  const maxScroll = Math.max(0, renderedLines.length - bodyHeight);
+  const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
   const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
-  const body = renderedLines.slice(scroll, scroll + bodyHeight).map((l) => `  ${l}`);
+  const { lo, hi } = selectedBlockBounds(state);
+  const commented = commentedBlockSet(state);
+  const body: string[] = [];
+  for (let i = 0; i < bodyHeight; i++) {
+    const abs = scroll + i;
+    if (abs >= doc.lines.length) {
+      body.push('');
+      continue;
+    }
+    const row = doc.lines[abs]!;
+    const b = doc.rows[abs] ?? null;
+    if (b !== null && b >= lo && b <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, docW)}`);
+    else if (b !== null && commented.has(b)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
+    else body.push(`    ${row}`);
+  }
   if (scroll > 0 && body.length > 0) body[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
-  const remaining = renderedLines.length - (scroll + bodyHeight);
+  const remaining = doc.lines.length - (scroll + bodyHeight);
   if (remaining > 0 && body.length > 0) body[body.length - 1] = `  ${DIM}↓ ${remaining} more below${RESET}`;
   while (body.length < bodyHeight) body.push('');
 
@@ -296,12 +418,13 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, rendere
 
 /**
  * Open a Markdown file in humanloop's own terminal review surface: the
- * document renders via termrender (Mermaid included), source-line anchors
- * drive comments independent of rendered scroll position, and the human
- * explicitly submits a proposal. Never edits the source file. Autosaves the
- * comment draft to `opts.output` (the `progress.json` convention). Canonical
- * ticket finalization stays with the caller's `onPropose` (the adapter calls
- * `completeReview`); this function never writes `response.json`.
+ * document renders via termrender (Mermaid included), the anchor is a
+ * highlighted block in the rendered document itself (gutter bar + tint via
+ * termrender's row→source map), and the human explicitly submits a proposal.
+ * Never edits the source file. Autosaves the comment draft to `opts.output`
+ * (the `progress.json` convention). Canonical ticket finalization stays with
+ * the caller's `onPropose` (the adapter calls `completeReview`); this function
+ * never writes `response.json`.
  */
 export async function launchTerminalReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
   const absFile = resolve(file);
@@ -309,18 +432,20 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
   const sourceLines = content.split('\n');
   const outPath = resolve(opts.output);
   const draft = readReviewDraft(outPath);
-  let state = initReviewState(sourceLines, draft?.comments ?? [], draft?.version ?? 0);
   const fileLabel = basename(absFile);
 
-  if (opts.signal?.aborted) return buildDraftFeedbackResult(absFile, state.comments, draft?.savedAt);
+  if (opts.signal?.aborted) return buildDraftFeedbackResult(absFile, draft?.comments ?? [], draft?.savedAt);
 
   setupTerminal();
   let { cols, rows } = getTerminalSize();
-  let renderedWidth = Math.min(Math.max(20, cols - 4), 120);
-  let renderedLines = renderMarkdown(content, renderedWidth);
+  let doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
+  let state = initReviewState(sourceLines, doc.blocks, draft?.comments ?? [], draft?.version ?? 0);
   let prevFrame: string[] = [];
   let spaceArmed = false;
   let settled = false;
+
+  const bodyH = (): number => Math.max(1, rows - reservedRows(state, cols));
+  state = ensureAnchorVisible(state, doc, bodyH());
 
   return new Promise<FeedbackResult>((resolvePromise) => {
     const persist = (): void => {
@@ -329,7 +454,7 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
     };
 
     const paint = (clear = false): void => {
-      const lines = renderReviewFrame(state, fileLabel, renderedLines, cols, rows);
+      const lines = renderReviewFrame(state, fileLabel, doc, cols, rows);
       if (clear) {
         prevFrame = [];
         process.stdout.write('\x1b[2J\x1b[H');
@@ -353,8 +478,20 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
 
     const onResize = (): void => {
       ({ cols, rows } = getTerminalSize());
-      renderedWidth = Math.min(Math.max(20, cols - 4), 120);
-      renderedLines = renderMarkdown(content, renderedWidth);
+      doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
+      // Blocks derive from the source, not the width, so a same-renderer
+      // re-render keeps the count — but a mid-session renderer→fallback
+      // transition can reshape the block list, so clamp the indices. Committed
+      // comments are untouched either way (their source lines are frozen).
+      const blocks = doc.blocks;
+      const lastIdx = Math.max(0, blocks.length - 1);
+      state = {
+        ...state,
+        blocks,
+        activeBlock: Math.min(state.activeBlock, lastIdx),
+        selectionAnchor: state.selectionAnchor === null ? null : Math.min(state.selectionAnchor, lastIdx),
+      };
+      state = ensureAnchorVisible(state, doc, bodyH());
       paint(true);
     };
 
@@ -406,7 +543,13 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
       if (key.escape || input === 'q') { state = closeList(state); return; }
       if (input === 'j' || key.downArrow) { state = moveListIndex(state, 1); return; }
       if (input === 'k' || key.upArrow) { state = moveListIndex(state, -1); return; }
-      if (input === 'e' || key.return) { if (state.comments.length > 0) state = openComposeEdit(state, state.listIndex); return; }
+      if (input === 'e' || key.return) {
+        if (state.comments.length > 0) {
+          state = openComposeEdit(state, state.listIndex);
+          state = ensureAnchorVisible(state, doc, bodyH());
+        }
+        return;
+      }
       if (input === 'd') { if (state.comments.length > 0) { state = deleteAtListIndex(state); persist(); } return; }
     };
 
@@ -420,8 +563,10 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
 
       if (spaceArmed) {
         spaceArmed = false;
-        if (input === 'c') state = openComposeNew(state);
-        else if (input === 'l') state = openList(state);
+        if (input === 'c') {
+          state = openComposeNew(state);
+          state = ensureAnchorVisible(state, doc, bodyH());
+        } else if (input === 'l') state = openList(state);
         else if (input === 'u') { state = undoLast(state); persist(); }
         else if (input === 's') { void submit(); return; }
         paint();
@@ -433,12 +578,12 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
 
       // view mode
       if (input === ' ') { spaceArmed = true; return; }
-      if (input === 'j' || key.downArrow) state = moveActiveLine(state, 1, false);
-      else if (input === 'k' || key.upArrow) state = moveActiveLine(state, -1, false);
-      else if (input === 'J') state = moveActiveLine(state, 1, true);
-      else if (input === 'K') state = moveActiveLine(state, -1, true);
-      else if (input === 'u' || key.pageUp) state = scrollBy(state, -Math.max(1, rows - reservedRows(state)), Math.max(1, rows - reservedRows(state)), renderedLines.length);
-      else if (input === 'd' || key.pageDown) state = scrollBy(state, Math.max(1, rows - reservedRows(state)), Math.max(1, rows - reservedRows(state)), renderedLines.length);
+      if (input === 'j' || key.downArrow) { state = moveActiveBlock(state, 1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'k' || key.upArrow) { state = moveActiveBlock(state, -1, false); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'J') { state = moveActiveBlock(state, 1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'K') { state = moveActiveBlock(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
+      else if (input === 'u' || key.pageUp) state = scrollBy(state, -bodyH(), bodyH(), doc.lines.length);
+      else if (input === 'd' || key.pageDown) state = scrollBy(state, bodyH(), bodyH(), doc.lines.length);
       else if (input === '?') state = openHelp(state);
       else if (key.escape) { finish(buildDraftFeedbackResult(absFile, state.comments)); return; }
       paint();

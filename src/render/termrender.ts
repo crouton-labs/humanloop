@@ -498,6 +498,130 @@ export function renderMarkdown(md: string, width: number): string[] {
   return fallback;
 }
 
+// ── Mapped render surface (row → source-line anchoring) ─────────────────────
+
+export interface RenderedDoc {
+  /** Rendered ANSI rows — byte-identical to the plain `doc render` output. */
+  lines: string[];
+  /** Per-row index into `blocks`; null for the blank separator rows between blocks. */
+  rows: (number | null)[];
+  /** Per top-level block: 1-indexed inclusive source-line bounds. Never empty. */
+  blocks: { start: number; end: number }[];
+}
+
+/** Validate + normalize `doc render --line-map` JSON into a RenderedDoc.
+ *  Null block bounds (a scanner edge case) are filled from neighbors and
+ *  clamped into the source range; an empty block list gets one whole-doc
+ *  block so callers can always anchor. Malformed shape → null (tool fault). */
+function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    return null;
+  }
+  const p = parsed as { lines?: unknown; rows?: unknown; blocks?: unknown };
+  if (!Array.isArray(p.lines) || !Array.isArray(p.rows) || !Array.isArray(p.blocks)) return null;
+  if (p.rows.length !== p.lines.length) return null;
+  if (!p.lines.every((l) => typeof l === 'string')) return null;
+  const blockCount = p.blocks.length;
+  if (!p.rows.every((r) => r === null || (typeof r === 'number' && Number.isInteger(r) && r >= 0 && r < blockCount))) return null;
+  const totalSource = Math.max(1, source.split('\n').length);
+  const blocks: { start: number; end: number }[] = [];
+  let prevEnd = 0;
+  for (const raw of p.blocks as Array<{ start?: number | null; end?: number | null } | null>) {
+    if (typeof raw !== 'object' || raw === null) return null;
+    // Bounds are integers or null — a fractional bound would otherwise flow
+    // into a recorded comment's line/endLine instead of tripping tool-fault.
+    if (raw.start != null && !Number.isInteger(raw.start)) return null;
+    if (raw.end != null && !Number.isInteger(raw.end)) return null;
+    const start = typeof raw.start === 'number' ? raw.start : prevEnd + 1;
+    const end = typeof raw.end === 'number' ? Math.max(raw.end, start) : start;
+    const s = Math.max(1, Math.min(start, totalSource));
+    const e = Math.max(s, Math.min(end, totalSource));
+    blocks.push({ start: s, end: e });
+    prevEnd = e;
+  }
+  if (blocks.length === 0) blocks.push({ start: 1, end: totalSource });
+  return { lines: p.lines as string[], rows: p.rows as (number | null)[], blocks };
+}
+
+/** Renderer-free mapped render: group consecutive non-blank source lines into
+ *  paragraph blocks and word-wrap each — the same shape as the termrender map,
+ *  with degraded (plaintext) rendering. */
+function fallbackDocWithMap(md: string, width: number): RenderedDoc {
+  const src = sanitize(md).split('\n');
+  const blocks: { start: number; end: number }[] = [];
+  let openAt: number | null = null;
+  for (let i = 0; i < src.length; i++) {
+    if (src[i]!.trim() !== '') {
+      if (openAt === null) openAt = i;
+    } else if (openAt !== null) {
+      blocks.push({ start: openAt + 1, end: i });
+      openAt = null;
+    }
+  }
+  if (openAt !== null) blocks.push({ start: openAt + 1, end: src.length });
+  if (blocks.length === 0) blocks.push({ start: 1, end: Math.max(1, src.length) });
+  const lines: string[] = [];
+  const rows: (number | null)[] = [];
+  blocks.forEach((b, bi) => {
+    if (bi > 0) {
+      lines.push('');
+      rows.push(null);
+    }
+    for (const l of wrap(src.slice(b.start - 1, b.end).join('\n'), width)) {
+      lines.push(l);
+      rows.push(bi);
+    }
+  });
+  return { lines, rows, blocks };
+}
+
+const _mapCache = new Map<string, RenderedDoc>();
+
+/** Render markdown with a row→source-line map via the pinned binary
+ *  (`doc render --line-map`); plaintext paragraph-block fallback. */
+export function renderMarkdownWithMap(md: string, width: number): RenderedDoc {
+  const key = `${md}\0${width}`;
+  const cached = _mapCache.get(key);
+  if (cached) return cached;
+
+  ensureRenderer();
+  if (rendererState === 'ready') {
+    try {
+      const out = execFileSync(
+        VENV_BIN,
+        ['doc', 'render', '--width', String(width), '--color', 'on', '--line-map'],
+        {
+          input: md,
+          encoding: 'utf-8',
+          timeout: 5000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          // JSON-escaped ANSI inflates well past execFileSync's 1MB default.
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
+      const doc = parseRenderedDoc(out.trim(), md);
+      if (doc !== null) {
+        _mapCache.set(key, doc);
+        return doc;
+      }
+      // A working renderer never emits a malformed map — tool fault.
+      invalidateRenderer('doc render --line-map (malformed output)');
+    } catch (err) {
+      // Same contract as renderMarkdown: non-timeout failure implicates the
+      // tool; a timeout is a slow/large doc — just fall to the local map.
+      if (!isTimeout(err)) invalidateRenderer('doc render --line-map');
+    }
+  }
+
+  // The fallback is cheap to recompute and deliberately NOT cached: a
+  // transient failure (e.g. a timeout) must not pin degraded block anchoring
+  // for the rest of the session when a later re-render could succeed.
+  return fallbackDocWithMap(md, width);
+}
+
 /** Validate markdown via `termrender doc check`. */
 export function checkMarkdown(md: string): { ok: true } | { ok: false; error: string } {
   ensureRenderer();
