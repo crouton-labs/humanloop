@@ -1,10 +1,10 @@
 import { X } from 'lucide-react';
 
 const ROWS: Array<[string, string]> = [
-  ['j / k / ↓ / ↑', 'move active source line'],
-  ['shift+j/k or shift+↓/↑', 'extend a keyboard range'],
-  ['gg / G', 'first / last source line'],
-  ['space then c', 'comment on the active line or selection'],
+  ['j / k / ↓ / ↑', 'move anchor unit (bullet, row, line, diagram)'],
+  ['shift+j/k or shift+↓/↑', 'extend the selection across units'],
+  ['gg / G', 'first / last anchor unit'],
+  ['space then c', 'comment on the active unit or selection'],
   ['drag text', 'select rendered markdown and open a source-backed comment'],
   ['space then l', 'toggle comment list'],
   ['space then u', 'undo last comment'],

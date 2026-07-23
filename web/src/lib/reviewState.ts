@@ -1,5 +1,6 @@
 import type { FeedbackComment, ReviewPayload } from '@/types';
 import { buildSourceMap, hasValidRangeColumns, sourceSelectionFromLineRange, type SourceMap, type SourceSelection } from './sourceMap';
+import { deriveAnchorUnits, remapUnitIndex, unitBoundsForRange, unitIndexForLine, type AnchorUnit } from './anchorUnits';
 
 export type SaveState = 'clean' | 'dirty' | 'saving' | 'save-error' | 'conflict';
 
@@ -16,9 +17,17 @@ export interface ReviewState {
   jobId: string;
   content: string;
   sourceMap: SourceMap;
+  /** Ordered leaf anchor units (bullet / table row / code line / whole
+   *  paragraph / whole diagram). Never empty. j/k steps through these. */
+  units: AnchorUnit[];
   comments: FeedbackComment[];
   version: number;
-  activeLine: number;
+  /** 0-based index of the anchored unit — the keyboard cursor. */
+  activeUnit: number;
+  /** Fixed origin unit while a Shift+j/k range is extended; null otherwise. */
+  selectionAnchorUnit: number | null;
+  /** A byte-precise MOUSE drag selection (column comments). Keyboard motion
+   *  clears it and works on whole units instead. */
   selection: SourceSelection | null;
   composer: ComposerState | null;
   listOpen: boolean;
@@ -30,22 +39,33 @@ export interface ReviewState {
   readOnly: boolean;
 }
 
-function normalizeLine(line: number, map: SourceMap): number {
-  return Math.max(1, Math.min(line, Math.max(1, map.lines.length)));
+function clampUnit(units: AnchorUnit[], index: number): number {
+  return Math.max(0, Math.min(index, units.length - 1));
+}
+
+/** Source-line bounds of the current keyboard selection (active unit, widened
+ *  across any Shift-extended range). */
+export function activeUnitBounds(state: ReviewState): { line: number; endLine: number } {
+  const anchor = state.selectionAnchorUnit ?? state.activeUnit;
+  return unitBoundsForRange(state.units, Math.min(state.activeUnit, anchor), Math.max(state.activeUnit, anchor));
 }
 
 export function buildInitialReviewState(review: ReviewPayload): ReviewState {
   const sourceMap = buildSourceMap(review.content);
-  const activeLine = normalizeLine(review.result.comments[0]?.line ?? 1, sourceMap);
+  const units = deriveAnchorUnits(review.content);
+  const firstLine = review.result.comments[0]?.line;
+  const activeUnit = typeof firstLine === 'number' ? unitIndexForLine(units, firstLine) : 0;
   return {
     file: review.file,
     output: review.output,
     jobId: review.jobId,
     content: review.content,
     sourceMap,
+    units,
     comments: [...review.result.comments],
     version: review.version,
-    activeLine,
+    activeUnit: clampUnit(units, activeUnit),
+    selectionAnchorUnit: null,
     selection: null,
     composer: null,
     listOpen: false,
@@ -63,12 +83,14 @@ export function collectReviewComments(state: ReviewState): FeedbackComment[] {
 }
 
 export function selectedAnchor(state: ReviewState): SourceSelection {
-  return state.selection ?? sourceSelectionFromLineRange(state.sourceMap, state.activeLine) ?? {
-    line: state.activeLine,
-    endLine: state.activeLine,
+  if (state.selection !== null) return state.selection;
+  const { line, endLine } = activeUnitBounds(state);
+  return sourceSelectionFromLineRange(state.sourceMap, line, endLine) ?? {
+    line,
+    endLine,
     startByte: 0,
     endByte: 0,
-    lineText: state.sourceMap.lines[state.activeLine - 1]?.text ?? '',
+    lineText: state.sourceMap.lines[line - 1]?.text ?? '',
   };
 }
 
@@ -95,6 +117,9 @@ export function isDirty(state: ReviewState): boolean {
 
 export function replaceFromPayload(state: ReviewState, review: ReviewPayload): ReviewState {
   const sourceMap = buildSourceMap(review.content);
+  const units = deriveAnchorUnits(review.content);
+  const prevUnit = state.units[state.activeUnit];
+  const activeUnit = prevUnit !== undefined ? remapUnitIndex(units, prevUnit) : 0;
   return {
     ...state,
     file: review.file,
@@ -102,9 +127,11 @@ export function replaceFromPayload(state: ReviewState, review: ReviewPayload): R
     jobId: review.jobId,
     content: review.content,
     sourceMap,
+    units,
     comments: [...review.result.comments],
     version: review.version,
-    activeLine: normalizeLine(state.activeLine, sourceMap),
+    activeUnit: clampUnit(units, activeUnit),
+    selectionAnchorUnit: null,
     selection: null,
     composer: null,
     notice: null,

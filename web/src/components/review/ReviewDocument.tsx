@@ -2,12 +2,12 @@ import { useCallback, useRef } from 'react';
 import type { RefObject } from 'react';
 import { Markdown } from '@/components/Markdown';
 import type { ReviewState } from '@/lib/reviewState';
+import { activeUnitBounds } from '@/lib/reviewState';
 import type { ReviewAction } from '@/lib/reviewReducer';
 import { actionsForMouseSelection } from '@/lib/reviewReducer';
 import {
   type MarkdownSourceHighlight,
   makeCommentHighlights,
-  sourceByteRangeFromComment,
   sourceLineFromDomPoint,
   sourceLineFromElement,
   sourceSelectionFromDomSelection,
@@ -28,22 +28,16 @@ export function ReviewDocument({
   const highlights: MarkdownSourceHighlight[] = [
     ...makeCommentHighlights(state.sourceMap, state.comments, 'review-source-comment'),
   ];
-  const activeSelection = state.selection
-    ?? sourceSelectionFromLineRange(state.sourceMap, state.activeLine);
-  if (activeSelection !== null) {
-    const range = state.selection
-      ? { startByte: state.selection.startByte, endByte: state.selection.endByte }
-      : sourceByteRangeFromComment({
-        id: 'active',
-        line: state.activeLine,
-        endLine: state.activeLine,
-        lineText: '',
-        comment: '',
-        createdAt: '',
-      }, state.sourceMap);
-    if (range !== null && range.endByte > range.startByte) {
-      highlights.push({ range, className: 'review-source-active' });
-    }
+  // The active source-line range: a mouse selection's byte range, else the
+  // whole active anchor unit (widened across a Shift-extended range).
+  const activeLineRange = state.selection !== null
+    ? { line: state.selection.line, endLine: state.selection.endLine }
+    : activeUnitBounds(state);
+  const activeRange = state.selection !== null
+    ? { startByte: state.selection.startByte, endByte: state.selection.endByte }
+    : sourceSelectionFromLineRange(state.sourceMap, activeLineRange.line, activeLineRange.endLine);
+  if (activeRange !== null && activeRange.endByte > activeRange.startByte) {
+    highlights.push({ range: { startByte: activeRange.startByte, endByte: activeRange.endByte }, className: 'review-source-active' });
   }
 
   const onMouseUp = useCallback(() => {
@@ -84,7 +78,7 @@ export function ReviewDocument({
     <section className="rounded-lg border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-muted-foreground">
         <span className="truncate font-mono">{state.file}</span>
-        <span>L{state.activeLine}{state.selection && state.selection.line !== state.selection.endLine ? `–${state.selection.endLine}` : ''}</span>
+        <span>L{activeLineRange.line}{activeLineRange.endLine !== activeLineRange.line ? `–${activeLineRange.endLine}` : ''}</span>
       </div>
       <div
         ref={scrollRef}
@@ -96,7 +90,7 @@ export function ReviewDocument({
           onClick={onClick}
           className="review-document"
         >
-          <Markdown sourceMap={state.sourceMap} sourceHighlights={highlights}>
+          <Markdown sourceMap={state.sourceMap} sourceHighlights={highlights} activeBlockRange={activeLineRange}>
             {state.content}
           </Markdown>
         </div>

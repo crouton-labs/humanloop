@@ -25,6 +25,7 @@ const tests = [
   { path: 'src/__tests__/terminal-review.test.ts' },
   { path: 'src/__tests__/browser-server.test.ts' },
   { path: 'web/src/__tests__/review-sourcemap.test.ts' },
+  { path: 'web/src/__tests__/review-anchor-units.test.ts' },
   { path: 'web/src/__tests__/review-reducer.test.ts' },
   { path: 'web/src/__tests__/review-keymap.test.ts' },
   { path: 'web/src/__tests__/review-markdown-instrumentation.test.ts' },

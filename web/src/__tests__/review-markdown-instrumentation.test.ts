@@ -28,15 +28,26 @@ interface HastNode {
   children?: HastNode[];
 }
 
-function render(md: string, highlights: ReturnType<typeof makeCommentHighlights> = []): HastNode {
+function render(
+  md: string,
+  highlights: ReturnType<typeof makeCommentHighlights> = [],
+  activeBlockRange: { line: number; endLine: number } | null = null,
+): HastNode {
   const map = buildSourceMap(md);
   const proc = unified()
     .use(remarkParse)
     .use(remarkGfm)
     .use(remarkRehype)
     .use(rehypeHighlight)
-    .use(rehypeSourceSpans(map, highlights));
+    .use(rehypeSourceSpans(map, highlights, activeBlockRange));
   return proc.runSync(proc.parse(md)) as unknown as HastNode;
+}
+
+function classNames(node: HastNode): string[] {
+  const cls = node.properties?.className;
+  if (Array.isArray(cls)) return cls.map(String);
+  if (typeof cls === 'string') return cls.split(/\s+/);
+  return [];
 }
 
 function textOf(node: HastNode): string {
@@ -96,13 +107,15 @@ const endByteOf = (n: HastNode): number => Number(n.properties!['data-source-end
     assert.equal(sel!.quote, textOf(span), 'span text equals its raw source byte slice');
   }
 
-  // The spans tile the code content contiguously, in order, covering it whole.
+  // The spans are ordered and non-overlapping. Each rendered CONTENT line is
+  // now anchored to its OWN source line, so the only gaps between spans are the
+  // inter-line newlines (emitted as plain text, not source spans).
   const ordered = [...codeSpans].sort((a, b) => startByteOf(a) - startByteOf(b));
   for (let i = 1; i < ordered.length; i++) {
-    assert.equal(startByteOf(ordered[i]!), endByteOf(ordered[i - 1]!), 'code spans are contiguous (no gaps/overlap)');
+    assert.ok(startByteOf(ordered[i]!) >= endByteOf(ordered[i - 1]!), 'code spans are ordered and non-overlapping');
   }
   const wholeSel = sourceSelectionFromByteRange(map, startByteOf(ordered[0]!), endByteOf(ordered[ordered.length - 1]!));
-  assert.equal(wholeSel!.quote, 'const answer = 42;\nreturn answer;\n', 'code spans cover the exact code content');
+  assert.equal(wholeSel!.quote, 'const answer = 42;\nreturn answer;', 'code spans cover the exact code content (content bytes, no trailing newline)');
 
   // Click-to-line parity: a code span resolves to a source line in the fenced
   // block, not the fence line. (`const answer` is line 4 of the doc.)
@@ -258,6 +271,74 @@ const endByteOf = (n: HastNode): number => Number(n.properties!['data-source-end
   assert.equal(whole!.line, 2, 'content line is line 2 (past the fence), not line 1 (the fence/info-string)');
 }
 
+// ── CRLF fenced code anchors per source line (old whole-content indexOf bailed)
+{
+  const md = '```js\r\nconst a = 1;\r\nconst b = 2;\r\n```\r\n';
+  const map = buildSourceMap(md);
+  assert.equal(map.lines[1]!.text, 'const a = 1;', 'source line 2 is CR-free');
+  assert.equal(map.lines[2]!.text, 'const b = 2;');
+  const tree = render(md);
+  const code = findFirst(tree, (n) => n.tagName === 'code')!;
+  const spans = collectSpans(code);
+  assert.ok(spans.length > 0, 'CRLF fenced code gets source spans (no longer bails)');
+  // Every span is byte-accurate against the CR-free source, and each maps to
+  // its own content line (line 2 or line 3), never the fence lines.
+  for (const s of spans) {
+    const sel = sourceSelectionFromByteRange(map, startByteOf(s), endByteOf(s));
+    assert.equal(sel!.quote, textOf(s), 'CRLF code span text equals its raw (CR-free) source slice');
+    assert.ok(sel!.line === 2 || sel!.line === 3, 'CRLF code span anchors to a content line, not the fence');
+  }
+  const first = [...spans].sort((a, b) => startByteOf(a) - startByteOf(b))[0]!;
+  assert.equal(sourceSelectionFromByteRange(map, startByteOf(first), endByteOf(first))!.line, 2, 'the first content span is line 2');
+}
+
+// ── Indented (4-space) code anchors per source line, past the stripped indent
+{
+  const md = 'Intro.\n\n    const a = 1;\n    const b = 2;\n';
+  const map = buildSourceMap(md);
+  assert.equal(map.lines[2]!.text, '    const a = 1;', 'source keeps the 4-space indent');
+  const tree = render(md);
+  const code = findFirst(tree, (n) => n.tagName === 'code')!;
+  const spans = collectSpans(code);
+  assert.ok(spans.length > 0, 'indented code gets source spans (no longer bails)');
+  const first = [...spans].sort((a, b) => startByteOf(a) - startByteOf(b))[0]!;
+  // The span starts PAST the stripped 4-space indent (byte offset +4 into the
+  // source line), and its text is the de-indented content.
+  assert.equal(startByteOf(first), map.lines[2]!.startByte + 4, 'indented code span starts past the 4-space indent');
+  const sel = sourceSelectionFromByteRange(map, startByteOf(first), endByteOf(first));
+  assert.equal(sel!.line, 3, 'the first indented content span is source line 3');
+  for (const s of spans) {
+    const each = sourceSelectionFromByteRange(map, startByteOf(s), endByteOf(s));
+    assert.equal(each!.quote, textOf(s), 'indented code span text equals its raw source slice (indent excluded)');
+  }
+}
+
+// ── A single code LINE self-highlights via its own span (not the whole fence)
+{
+  const md = '```js\nconst a = 1;\nconst b = 2;\n```\n';
+  const map = buildSourceMap(md);
+  // Active anchor unit = just source line 3 ("const b = 2;"). Its byte range
+  // becomes a review-source-active highlight fed to the code spans.
+  const line3 = map.lines[2]!;
+  const activeHighlights: ReturnType<typeof makeCommentHighlights> = [
+    { range: { startByte: line3.startByte, endByte: line3.endByte }, className: 'review-source-active' },
+  ];
+  const tree = render(md, activeHighlights, { line: 3, endLine: 3 });
+  const code = findFirst(tree, (n) => n.tagName === 'code')!;
+  const spans = collectSpans(code);
+  const activeSpans = spans.filter((s) => String(s.properties?.className ?? '').includes('review-source-active'));
+  assert.ok(activeSpans.length > 0, 'the active code line gets highlighted spans');
+  for (const s of activeSpans) {
+    const sel = sourceSelectionFromByteRange(map, startByteOf(s), endByteOf(s));
+    assert.equal(sel!.line, 3, 'only line-3 spans are highlighted');
+  }
+  // Line-2 spans must NOT be highlighted.
+  const line2Spans = spans.filter((s) => startByteOf(s) < line3.startByte);
+  for (const s of line2Spans) {
+    assert.ok(!String(s.properties?.className ?? '').includes('review-source-active'), 'line-2 code spans are not highlighted by a line-3 active unit');
+  }
+}
+
 // ── M2: point-level line resolution for a multiline paragraph text leaf ─────
 // A single mdast text node can span multiple raw source lines (a soft line
 // break inside one paragraph, e.g. "alpha\nbravo", stays ONE text leaf with a
@@ -297,6 +378,30 @@ const endByteOf = (n: HastNode): number => Number(n.properties!['data-source-end
   assert.ok(code, 'Mermaid fence produces a code element');
   assert.equal(isMermaidClassName((code.properties?.className as string[]).join(' ')), true, 'Mermaid code element is recognized for diagram rendering');
   assert.equal(isMermaidClassName('language-typescript'), false, 'ordinary code remains a code block');
+}
+
+// ── Block-container tagging: <pre> carries its source-line range, and gets
+//    the active ring ONLY when the active unit fully covers the block ────────
+{
+  const md = 'Prose.\n\n```mermaid\nflowchart LR\n  A --> B\n```\n';
+  // The mermaid fence spans source lines 3..6 (``` opener through closer).
+  const inactive = render(md);
+  const pre1 = findFirst(inactive, (n) => n.tagName === 'pre')!;
+  assert.equal(pre1.properties?.['data-source-start-line'], '3', 'pre is tagged with its start source line');
+  assert.equal(pre1.properties?.['data-source-end-line'], '6', 'pre is tagged with its end source line');
+  assert.ok(!classNames(pre1).includes('review-block-active'), 'no active range → no ring');
+
+  // Active unit fully covering the mermaid block → the container is ringed.
+  const active = render(md, [], { line: 3, endLine: 6 });
+  const pre2 = findFirst(active, (n) => n.tagName === 'pre')!;
+  assert.ok(classNames(pre2).includes('review-block-active'), 'a unit covering the whole block rings the container');
+
+  // A single active line inside a code block must NOT ring the whole block
+  // (that line self-highlights via its own text span instead).
+  const codeMd = '```js\nconst a = 1;\nconst b = 2;\n```\n';
+  const oneLine = render(codeMd, [], { line: 2, endLine: 2 });
+  const codePre = findFirst(oneLine, (n) => n.tagName === 'pre')!;
+  assert.ok(!classNames(codePre).includes('review-block-active'), 'a single code line does not ring the whole fence');
 }
 
 console.log('OK: review markdown instrumentation (M1/C1/M2 real rehype-pipeline anchoring)');

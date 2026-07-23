@@ -38,6 +38,18 @@ export interface MarkdownSourceHighlight {
 
 const SOURCE_START_ATTR = 'data-source-start-byte';
 const SOURCE_END_ATTR = 'data-source-end-byte';
+const SOURCE_START_LINE_ATTR = 'data-source-start-line';
+const SOURCE_END_LINE_ATTR = 'data-source-end-line';
+const BLOCK_ACTIVE_CLASS = 'review-block-active';
+
+/** 1-indexed source-line range of the active anchor unit — used to ring a
+ *  whole code/diagram block the active unit fully covers (a Mermaid SVG has
+ *  no source-mapped text leaves, so it can't be background-highlighted like
+ *  prose; the whole-block ring is what makes it highlight as one unit). */
+export interface BlockActiveRange {
+  line: number;
+  endLine: number;
+}
 
 function byteLength(value: string): number {
   return encoder.encode(value).length;
@@ -303,16 +315,63 @@ function spanClassesForRange(range: SourceByteRange, highlights: MarkdownSourceH
   return classes;
 }
 
-// Wrap each descendant text node of a highlighted `<code>` block in a
-// source-anchored span (or several, split at highlight boundaries — same
-// `wrapTextLeaf` prose uses), walking in document order and advancing a byte
-// cursor. Fenced-code text nodes carry no AST `position` (and
-// `rehype-highlight` shreds the original single text child into `hljs-*`
-// token spans), so we can't rely on per-leaf offsets like prose — instead the
-// whole code content maps 1:1 onto a contiguous source byte range, and hljs
-// preserves the exact characters, so accumulating byte lengths in order
-// reproduces the source columns exactly.
-function wrapCodeTextNodes(node: any, highlights: MarkdownSourceHighlight[], cursor: { byte: number }): void {
+const CODE_FENCE_RE = /^\s*(```|~~~)/;
+
+// Split a rendered string into per-line segments, dropping the invisible CR of
+// a CRLF source (buildSourceMap already keeps source-line text CR-free, so
+// segments align with it and the dropped CR is visually redundant with the LF
+// inside a `<pre>`).
+function splitRenderedLines(text: string): string[] {
+  return text.split(/\r?\n/);
+}
+
+// Wrap one `<code>` text leaf line by line: split it at newline boundaries and
+// anchor each within-line segment to its OWN physical source line (via the
+// precomputed `lineByteStart`), re-syncing the cursor at each break instead of
+// carrying a single contiguous byte offset. That re-sync is what keeps CRLF
+// (source newline = 2 bytes, rendered 1) and indented code (each source line
+// carries a stripped indent prefix) exact — a running cursor would drift a
+// byte per line. A bare "\n" separator between hljs token spans just advances
+// the line. Newline separators are emitted as plain (unanchored) text.
+function wrapCodeLeafText(
+  text: string,
+  renderedLines: string[],
+  lineByteStart: number[],
+  highlights: MarkdownSourceHighlight[],
+  cursor: { lineIdx: number; col: number },
+): any[] {
+  const out: any[] = [];
+  const parts = splitRenderedLines(text);
+  for (let p = 0; p < parts.length; p++) {
+    if (p > 0) {
+      out.push({ type: 'text', value: '\n' });
+      cursor.lineIdx += 1;
+      cursor.col = 0;
+    }
+    const seg = parts[p]!;
+    if (seg.length === 0) continue;
+    const line = renderedLines[cursor.lineIdx];
+    const byteStart = lineByteStart[cursor.lineIdx];
+    if (line === undefined || byteStart === undefined) {
+      // Past the mapped content lines (e.g. rehype's appended trailing "\n") —
+      // leave as plain text rather than mis-anchor.
+      out.push({ type: 'text', value: seg });
+      continue;
+    }
+    const startByte = byteStart + byteLength(line.slice(0, cursor.col));
+    out.push(...wrapTextLeaf(startByte, seg, highlights));
+    cursor.col += seg.length;
+  }
+  return out;
+}
+
+function wrapCodeLineTextNodes(
+  node: any,
+  renderedLines: string[],
+  lineByteStart: number[],
+  highlights: MarkdownSourceHighlight[],
+  cursor: { lineIdx: number; col: number },
+): void {
   if (!Array.isArray(node.children)) return;
   for (let i = 0; i < node.children.length; i++) {
     const child = node.children[i];
@@ -320,61 +379,93 @@ function wrapCodeTextNodes(node: any, highlights: MarkdownSourceHighlight[], cur
     if (child.type === 'text') {
       const text = typeof child.value === 'string' ? child.value : '';
       if (text.length === 0) continue;
-      const startByte = cursor.byte;
-      const wrapped = wrapTextLeaf(startByte, text, highlights);
-      cursor.byte = startByte + byteLength(text);
+      const wrapped = wrapCodeLeafText(text, renderedLines, lineByteStart, highlights, cursor);
       if (wrapped.length === 0) continue;
       node.children.splice(i, 1, ...wrapped);
       i += wrapped.length - 1;
       continue;
     }
-    wrapCodeTextNodes(child, highlights, cursor);
+    wrapCodeLineTextNodes(child, renderedLines, lineByteStart, highlights, cursor);
   }
 }
 
-// The raw source position right after a fenced code block's info-string line
-// (the ```lang line), so we can search for the block's content PAST it. A
-// plain `indexOf` starting at the fence itself can false-match the info string
-// when the code content's first line happens to equal the language token
-// (e.g. a ```js block whose entire content is literally "js\n") — the fence
-// line would match before the real content does.
-function infoStringEndOffset(content: string, startOffset: number): number {
-  const newlineIdx = content.indexOf('\n', startOffset);
-  return newlineIdx < 0 ? startOffset : newlineIdx + 1;
-}
-
-// A fenced `<pre><code>` block: the `<code>` element retains an AST position
-// spanning the whole block (fences included), but its text carries none. Locate
-// the exact code content within the raw source (it appears verbatim between the
-// fences) to find where the content byte range begins, then anchor each token.
-//
-// Indented (4-space) code blocks and CRLF source both bail here gracefully:
-// `remark` strips leading indentation from an indented block's `node.value`,
-// and micromark normalizes CRLF to `\n` in `node.value`, so `fullText` is no
-// longer a verbatim substring of the raw (indented / `\r\n`) source and
-// `indexOf` returns -1. That's an accepted, narrow degradation: those blocks
-// lose DOM source-anchoring (no drag-select, no click-line, no visual
-// highlight inside the block) but nothing mis-anchors, and line-only
-// comments plus j/k line motion are unaffected since they don't depend on
-// per-block DOM spans.
+// A fenced/indented `<pre><code>` block: the `<code>` element retains an AST
+// position spanning the whole block (fences included) but its text carries no
+// per-leaf position, and `rehype-highlight` shreds the original text child into
+// `hljs-*` token spans. Anchor each rendered CONTENT line to its OWN physical
+// source line, so a single code line is independently highlightable and
+// mouse-anchorable — including under CRLF and 4-space indentation, which the
+// old whole-content `indexOf` could not map (rendered content is no longer a
+// verbatim substring of the raw source). The content-line range is derived
+// from the source bounds identically to `deriveAnchorUnits` (so the anchor
+// unit and its DOM spans agree). Malformed cases — rendered line count or a
+// per-line suffix alignment disagreeing with the source — bail without
+// instrumenting rather than mis-anchor.
 function instrumentCodeBlock(codeElement: any, sourceMap: SourceMap, highlights: MarkdownSourceHighlight[]): void {
-  const startOffset = codeElement.position?.start?.offset;
-  if (typeof startOffset !== 'number') return;
-  const fullText = collectText(codeElement);
-  if (fullText.length === 0) return;
-  const isFenced = sourceMap.content.startsWith('```', startOffset) || sourceMap.content.startsWith('~~~', startOffset);
-  const searchFrom = isFenced ? infoStringEndOffset(sourceMap.content, startOffset) : startOffset;
-  const codeStartChar = sourceMap.content.indexOf(fullText, searchFrom);
-  if (codeStartChar < 0) return; // e.g. indented/CRLF code blocks — see comment above
-  const codeStartByte = byteOffsetForCharOffset(sourceMap.content, codeStartChar);
-  wrapCodeTextNodes(codeElement, highlights, { byte: codeStartByte });
+  const startLine = codeElement.position?.start?.line;
+  const endLine = codeElement.position?.end?.line;
+  if (typeof startLine !== 'number' || typeof endLine !== 'number') return;
+  const opener = CODE_FENCE_RE.test(sourceMap.lines[startLine - 1]?.text ?? '');
+  const hasCloser = opener && endLine > startLine && CODE_FENCE_RE.test(sourceMap.lines[endLine - 1]?.text ?? '');
+  const contentStart = opener ? startLine + 1 : startLine;
+  const contentEnd = hasCloser ? endLine - 1 : endLine;
+  if (contentEnd < contentStart) return; // a contentless fence — nothing to anchor
+  const contentLineCount = contentEnd - contentStart + 1;
+
+  let renderedLines = splitRenderedLines(collectText(codeElement));
+  // remark-rehype appends a trailing "\n" to code content → one extra empty
+  // rendered line; drop it so rendered lines align 1:1 with source lines.
+  if (renderedLines.length === contentLineCount + 1 && renderedLines[renderedLines.length - 1] === '') {
+    renderedLines = renderedLines.slice(0, -1);
+  }
+  if (renderedLines.length !== contentLineCount) return; // disagreement — bail
+
+  const lineByteStart: number[] = [];
+  for (let i = 0; i < contentLineCount; i++) {
+    const sourceLine = sourceMap.lines[contentStart - 1 + i];
+    const rendered = renderedLines[i]!;
+    if (sourceLine === undefined) return;
+    // The rendered line is the source line minus a stripped indent PREFIX, so
+    // it must be a suffix of the source text; if not, the mapping is unsafe.
+    const indentChars = sourceLine.text.length - rendered.length;
+    if (indentChars < 0 || sourceLine.text.slice(indentChars) !== rendered) return;
+    lineByteStart.push(sourceLine.startByte + byteLength(sourceLine.text.slice(0, indentChars)));
+  }
+
+  wrapCodeLineTextNodes(codeElement, renderedLines, lineByteStart, highlights, { lineIdx: 0, col: 0 });
 }
 
 function isBlockCode(parent: any, child: any): boolean {
   return parent?.tagName === 'pre' && child?.type === 'element' && child?.tagName === 'code';
 }
 
-function visitTree(node: any, sourceMap: SourceMap, highlights: MarkdownSourceHighlight[]): void {
+function addClass(element: any, className: string): void {
+  const props = (element.properties ??= {});
+  const existing = props.className;
+  if (Array.isArray(existing)) existing.push(className);
+  else if (typeof existing === 'string' && existing.length > 0) props.className = `${existing} ${className}`;
+  else props.className = [className];
+}
+
+// Tag a fenced/indented code `<pre>` with its 1-indexed source-line range (from
+// the `<code>` element's AST position, fences included) and, when the active
+// anchor unit FULLY covers that block, mark it active. Full-containment (not
+// mere overlap) is deliberate: a single active code LINE self-highlights via
+// its own text span, so only a whole-block unit — a Mermaid diagram, or a
+// Shift-selection spanning the entire fence — rings the container.
+function tagBlockContainer(pre: any, code: any, activeRange: BlockActiveRange | null): void {
+  const startLine = code.position?.start?.line;
+  const endLine = code.position?.end?.line;
+  if (typeof startLine !== 'number' || typeof endLine !== 'number') return;
+  const props = (pre.properties ??= {});
+  props[SOURCE_START_LINE_ATTR] = String(startLine);
+  props[SOURCE_END_LINE_ATTR] = String(endLine);
+  if (activeRange !== null && activeRange.line <= startLine && activeRange.endLine >= endLine) {
+    addClass(pre, BLOCK_ACTIVE_CLASS);
+  }
+}
+
+function visitTree(node: any, sourceMap: SourceMap, highlights: MarkdownSourceHighlight[], activeRange: BlockActiveRange | null): void {
   if (node === null || typeof node !== 'object' || !Array.isArray(node.children)) return;
 
   for (let i = 0; i < node.children.length; i++) {
@@ -396,16 +487,17 @@ function visitTree(node: any, sourceMap: SourceMap, highlights: MarkdownSourceHi
       continue;
     }
     if (isBlockCode(node, child)) {
+      tagBlockContainer(node, child, activeRange);
       instrumentCodeBlock(child, sourceMap, highlights);
       continue;
     }
-    visitTree(child, sourceMap, highlights);
+    visitTree(child, sourceMap, highlights, activeRange);
   }
 }
 
-export function rehypeSourceSpans(sourceMap: SourceMap, highlights: MarkdownSourceHighlight[] = []): () => (tree: any) => void {
+export function rehypeSourceSpans(sourceMap: SourceMap, highlights: MarkdownSourceHighlight[] = [], activeBlockRange: BlockActiveRange | null = null): () => (tree: any) => void {
   return () => (tree: any) => {
-    visitTree(tree, sourceMap, highlights);
+    visitTree(tree, sourceMap, highlights, activeBlockRange);
   };
 }
 

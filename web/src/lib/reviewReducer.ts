@@ -1,6 +1,7 @@
 import type { FeedbackComment, ReviewPayload } from '@/types';
 import type { SourceSelection } from './sourceMap';
-import { reviewCommentsFingerprint, sourceSelectionFromComment, sourceSelectionFromLineRange } from './sourceMap';
+import { reviewCommentsFingerprint, sourceSelectionFromComment } from './sourceMap';
+import { unitIndexForLine } from './anchorUnits';
 import {
   type ReviewState,
   buildInitialReviewState,
@@ -47,6 +48,10 @@ function clampLine(state: ReviewState, line: number): number {
   return Math.max(1, Math.min(line, Math.max(1, state.sourceMap.lines.length)));
 }
 
+function clampUnit(state: ReviewState, index: number): number {
+  return Math.max(0, Math.min(index, state.units.length - 1));
+}
+
 function clone(state: ReviewState): ReviewState {
   return { ...state, submitRequested: false };
 }
@@ -78,39 +83,46 @@ export function reviewReducer(prev: ReviewState, action: ReviewAction): ReviewSt
       return { ...state, readOnly: false };
 
     case 'cursor/move': {
-      const nextLine = clampLine(state, state.activeLine + action.delta);
+      // Keyboard motion steps unit-to-unit. A bare move clears any mouse
+      // selection and range origin; a Shift-extend fixes the origin at the
+      // current unit and widens toward the new one.
       if (action.extend) {
-        const startLine = state.selection?.line ?? state.activeLine;
-        state.selection = sourceSelectionFromLineRange(state.sourceMap, startLine, nextLine);
+        if (state.selectionAnchorUnit === null) state.selectionAnchorUnit = state.activeUnit;
       } else {
-        state.selection = null;
+        state.selectionAnchorUnit = null;
       }
-      state.activeLine = nextLine;
+      state.selection = null;
+      state.activeUnit = clampUnit(state, state.activeUnit + action.delta);
       return state;
     }
 
     case 'cursor/set-line':
-      state.activeLine = clampLine(state, action.line);
+      state.activeUnit = unitIndexForLine(state.units, clampLine(state, action.line));
       state.selection = null;
+      state.selectionAnchorUnit = null;
       return state;
 
     case 'cursor/first':
-      state.activeLine = 1;
+      state.activeUnit = 0;
       state.selection = null;
+      state.selectionAnchorUnit = null;
       return state;
 
     case 'cursor/last':
-      state.activeLine = Math.max(1, state.sourceMap.lines.length);
+      state.activeUnit = Math.max(0, state.units.length - 1);
       state.selection = null;
+      state.selectionAnchorUnit = null;
       return state;
 
     case 'selection/set':
       state.selection = action.selection;
-      state.activeLine = clampLine(state, action.selection.line);
+      state.activeUnit = unitIndexForLine(state.units, clampLine(state, action.selection.line));
+      state.selectionAnchorUnit = null;
       return state;
 
     case 'selection/clear':
       state.selection = null;
+      state.selectionAnchorUnit = null;
       return state;
 
     case 'composer/open':
@@ -129,7 +141,8 @@ export function reviewReducer(prev: ReviewState, action: ReviewAction): ReviewSt
       const anchor = sourceSelectionFromComment(comment, state.sourceMap) ?? selectedAnchor(state);
       state.composer = { mode: 'edit', anchor, commentId: comment.id, buffer: comment.comment };
       state.selection = anchor;
-      state.activeLine = clampLine(state, comment.line);
+      state.activeUnit = unitIndexForLine(state.units, clampLine(state, comment.line));
+      state.selectionAnchorUnit = null;
       state.listOpen = false;
       return state;
     }

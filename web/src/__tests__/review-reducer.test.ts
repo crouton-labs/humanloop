@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { reviewReducer, buildInitialReviewState, collectReviewComments, actionsForMouseSelection, type ReviewAction } from '../lib/reviewReducer.ts';
 import type { ReviewState } from '../lib/reviewState.ts';
+import { activeUnitBounds } from '../lib/reviewState.ts';
 import { sourceSelectionFromByteRange } from '../lib/sourceMap.ts';
 import type { ReviewPayload } from '../types.ts';
 
@@ -21,25 +22,46 @@ function run(state: ReviewState, actions: ReviewAction[]): ReviewState {
   return actions.reduce((acc, action) => reviewReducer(acc, action), state);
 }
 
-const content = 'line one\nline two\nline three\n';
+// Three blank-line-separated paragraphs → three anchor units on lines 1, 3, 5
+// (line 2/4 are the blank separators). A whole paragraph is ONE unit.
+const content = 'para one\n\npara two\n\npara three\n';
 const base = buildInitialReviewState(payload(content));
+
+assert.equal(base.units.length, 3, 'three paragraphs → three anchor units');
+assert.deepEqual(base.units, [{ start: 1, end: 1 }, { start: 3, end: 3 }, { start: 5, end: 5 }]);
 
 // ── Create a line-only comment via the composer ─────────────────────────────
 {
   const s = run(base, [
-    { type: 'cursor/set-line', line: 2 },
+    { type: 'cursor/set-line', line: 3 },
     { type: 'composer/open' },
     { type: 'composer/update', buffer: '  needs work  ' },
     { type: 'composer/submit' },
   ]);
   assert.equal(s.comments.length, 1);
   const c = s.comments[0]!;
-  assert.equal(c.line, 2);
-  assert.equal(c.endLine, 2);
+  assert.equal(c.line, 3);
+  assert.equal(c.endLine, 3);
   assert.equal(c.comment, 'needs work', 'comment text is trimmed');
   assert.equal(c.colStart, undefined, 'line-only comment carries no columns');
-  assert.equal(c.lineText, 'line two');
+  assert.equal(c.lineText, 'para two');
   assert.equal(s.saveState, 'dirty', 'adding a comment marks the draft dirty');
+}
+
+// A click inside a multi-line (soft-broken) paragraph anchors the WHOLE unit.
+{
+  const softState = buildInitialReviewState(payload('alpha\nbravo\n'));
+  assert.deepEqual(softState.units, [{ start: 1, end: 2 }], 'soft-broken paragraph is one unit');
+  const s = run(softState, [
+    { type: 'cursor/set-line', line: 2 },
+    { type: 'composer/open' },
+    { type: 'composer/update', buffer: 'x' },
+    { type: 'composer/submit' },
+  ]);
+  const c = s.comments[0]!;
+  assert.equal(c.line, 1, 'clicking line 2 of a paragraph anchors the whole unit from line 1');
+  assert.equal(c.endLine, 2);
+  assert.equal(c.lineText, 'alpha\nbravo');
 }
 
 // ── A range selection produces a column-anchored comment ────────────────────
@@ -117,7 +139,7 @@ const base = buildInitialReviewState(payload(content));
   const two = run(base, [
     { type: 'cursor/set-line', line: 1 },
     { type: 'composer/open' }, { type: 'composer/update', buffer: 'a' }, { type: 'composer/submit' },
-    { type: 'cursor/set-line', line: 2 },
+    { type: 'cursor/set-line', line: 3 },
     { type: 'composer/open' }, { type: 'composer/update', buffer: 'b' }, { type: 'composer/submit' },
   ]);
   assert.equal(two.comments.length, 2);
@@ -131,23 +153,25 @@ const base = buildInitialReviewState(payload(content));
 // ── Cursor motion + Shift range extension ───────────────────────────────────
 {
   const moved = run(base, [
-    { type: 'cursor/set-line', line: 1 },
+    { type: 'cursor/first' },
     { type: 'cursor/move', delta: 1 },
     { type: 'cursor/move', delta: 1, extend: true },
   ]);
-  assert.equal(moved.activeLine, 3);
-  assert.ok(moved.selection !== null, 'shift-extend builds a keyboard range');
-  assert.equal(moved.selection!.line, 2);
-  assert.equal(moved.selection!.endLine, 3);
+  assert.equal(moved.activeUnit, 2, 'j steps unit-to-unit');
+  assert.equal(moved.selectionAnchorUnit, 1, 'shift-extend fixes the origin unit');
+  assert.equal(moved.selection, null, 'keyboard extension does not create a mouse byte selection');
+  assert.deepEqual(activeUnitBounds(moved), { line: 3, endLine: 5 }, 'the selection spans units 1..2 (lines 3..5)');
 
-  const clamped = run(base, [{ type: 'cursor/set-line', line: 1 }, { type: 'cursor/move', delta: -5 }]);
-  assert.equal(clamped.activeLine, 1, 'motion clamps at the first line');
-  // A5: the lower-bound clamp above was the only clamp asserted — also cover
-  // the upper bound (moving past the last source line stays on it).
-  const clampedHigh = run(base, [{ type: 'cursor/set-line', line: 3 }, { type: 'cursor/move', delta: 5 }]);
-  assert.equal(clampedHigh.activeLine, 3, 'motion clamps at the last line');
+  const clamped = run(base, [{ type: 'cursor/first' }, { type: 'cursor/move', delta: -5 }]);
+  assert.equal(clamped.activeUnit, 0, 'motion clamps at the first unit');
+  const clampedHigh = run(base, [{ type: 'cursor/last' }, { type: 'cursor/move', delta: 5 }]);
+  assert.equal(clampedHigh.activeUnit, 2, 'motion clamps at the last unit');
   const last = reviewReducer(base, { type: 'cursor/last' });
-  assert.equal(last.activeLine, 3, 'G goes to the last source line');
+  assert.equal(last.activeUnit, 2, 'G goes to the last unit');
+
+  const collapsed = run(moved, [{ type: 'cursor/move', delta: -1 }]);
+  assert.equal(collapsed.selectionAnchorUnit, null, 'a bare move clears the extend origin');
+  assert.equal(collapsed.activeUnit, 1);
 }
 
 // ── submit/request is a single-pulse flag ───────────────────────────────────

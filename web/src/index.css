@@ -207,3 +207,13 @@
 .review-source-comment.review-source-active {
   background-color: oklch(0.66 0.19 300 / 28%);
 }
+
+/* Whole-block active ring: a Mermaid diagram (an SVG with no source-mapped
+ * text leaves) or a code fence fully covered by the active anchor unit. This
+ * is what makes "the entire mermaid diagram highlighted as one unit" real —
+ * the container is ringed rather than any floating text. */
+.review-block-active {
+  outline: 2px solid oklch(0.62 0.19 250 / 65%);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}

@@ -26,7 +26,7 @@ export function isMermaidClassName(className: string | undefined): boolean {
   return className?.split(/\s+/).includes('language-mermaid') ?? false;
 }
 
-export function MermaidDiagram({ source }: { source: string }) {
+export function MermaidDiagram({ source, active = false }: { source: string; active?: boolean }) {
   const id = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export function MermaidDiagram({ source }: { source: string }) {
   }
 
   return (
-    <div className="mermaid-diagram">
+    <div className={active ? 'mermaid-diagram review-block-active' : 'mermaid-diagram'}>
       {svg !== null && (
         <button
           type="button"

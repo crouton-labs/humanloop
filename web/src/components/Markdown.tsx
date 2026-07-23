@@ -14,12 +14,18 @@ function textContent(node: ReactNode): string {
   return '';
 }
 
-function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<'pre'>) {
+function MarkdownPre({ children, className, ...props }: ComponentPropsWithoutRef<'pre'>) {
+  // The block-container active flag is tagged onto the <pre> by
+  // `rehypeSourceSpans` when the active anchor unit fully covers this block
+  // (see lib/sourceMap.ts). A Mermaid block renders as an SVG with no
+  // source-mapped text leaves, so it can't be background-highlighted like
+  // prose — it takes the flag as a ring on the whole diagram instead.
+  const blockActive = typeof className === 'string' && className.split(/\s+/).includes('review-block-active');
   const child = Children.toArray(children)[0];
   if (isValidElement<{ className?: string; children?: ReactNode }>(child) && isMermaidClassName(child.props.className)) {
-    return <MermaidDiagram source={textContent(child.props.children)} />;
+    return <MermaidDiagram source={textContent(child.props.children)} active={blockActive} />;
   }
-  return <pre {...props}>{children}</pre>;
+  return <pre className={className} {...props}>{children}</pre>;
 }
 
 // The "friendlier markdown than nvim" requirement — a real renderer (GFM
@@ -32,11 +38,16 @@ export function Markdown({
   className,
   sourceMap,
   sourceHighlights = [],
+  activeBlockRange = null,
 }: {
   children: string;
   className?: string;
   sourceMap?: SourceMap;
   sourceHighlights?: MarkdownSourceHighlight[];
+  /** 1-indexed source-line range of the active anchor unit — rings a whole
+   *  code/diagram block it fully covers (the mechanism for "the entire
+   *  mermaid diagram highlighted as one unit"). */
+  activeBlockRange?: { line: number; endLine: number } | null;
 }) {
   // Highlight MUST run before source instrumentation: `rehype-highlight`
   // rebuilds the `<pre><code>` subtree from scratch (dropping any children we
@@ -45,7 +56,7 @@ export function Markdown({
   // code tokens (which carry no position) by locating the code text in source.
   const rehypePlugins = sourceMap === undefined
     ? [rehypeHighlight]
-    : [rehypeHighlight, rehypeSourceSpans(sourceMap, sourceHighlights)];
+    : [rehypeHighlight, rehypeSourceSpans(sourceMap, sourceHighlights, activeBlockRange)];
 
   return (
     <div className={cn('markdown-body prose prose-sm dark:prose-invert max-w-none', className)}>

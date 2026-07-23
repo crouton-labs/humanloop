@@ -3,6 +3,7 @@ import type { FeedbackComment, ReviewPayload } from '@/types';
 import { Button } from '@/components/ui/button';
 import { reviewReducer, buildInitialReviewState, collectReviewComments } from '@/lib/reviewReducer';
 import type { ReviewState } from '@/lib/reviewState';
+import { activeUnitBounds } from '@/lib/reviewState';
 import { useReviewKeymap } from '@/hooks/useReviewKeymap';
 import { reviewRangeLabel } from '@/lib/sourceMap';
 import { cn } from '@/lib/utils';
@@ -259,7 +260,10 @@ export function ReviewSurface({ review, readOnly, draftPing, takeBackPing, onSub
       colStart: state.selection.colStart, colEnd: state.selection.colEnd,
       lineText: '', comment: '', createdAt: '',
     })
-    : `L${state.activeLine}`;
+    : reviewRangeLabel({
+      id: 'active', ...activeUnitBounds(state),
+      lineText: '', comment: '', createdAt: '',
+    });
 
   const saveLabel = effectiveReadOnly
     ? 'read-only'
