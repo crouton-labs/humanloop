@@ -153,11 +153,11 @@ async function unmount(container: HTMLDivElement, root: import('react-dom/client
   assert.ok(container.textContent?.includes('Ship it?'), 'interaction title renders');
   assert.ok(container.textContent?.includes('Yes'), 'option label renders');
 
-  // 3. width gating: deck surface keeps max-w-3xl, never review's max-w-5xl.
+  // 3. width gating: deck surface keeps max-w-3xl, never review's wide max-w-7xl.
   const wrapper = container.querySelector('div.mx-auto');
   assert.ok(wrapper !== null, 'top-level mx-auto shell wrapper renders');
   assert.ok(wrapper!.className.includes('max-w-3xl'), 'deck surface uses max-w-3xl');
-  assert.ok(!wrapper!.className.includes('max-w-5xl'), 'deck surface does NOT pick up review\'s max-w-5xl');
+  assert.ok(!wrapper!.className.includes('max-w-7xl'), 'deck surface does NOT pick up review\'s max-w-7xl');
 
   // 4. deck Markdown is NOT instrumented: ItemReview renders `interaction.subtitle`
   // via <Markdown> with no `sourceMap` prop, so `rehypeSourceSpans` never runs —

@@ -298,7 +298,7 @@ export function ReviewSurface({ review, readOnly, draftPing, takeBackPing, onSub
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className={cn('grid gap-4', state.listOpen && 'lg:grid-cols-[minmax(0,1fr)_320px]')}>
         <div className="flex flex-col gap-4">
           <ReviewDocument state={state} dispatch={dispatch} scrollRef={scrollRef} />
           {state.composer !== null && (

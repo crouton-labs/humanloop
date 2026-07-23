@@ -123,7 +123,7 @@
 }
 
 .mermaid-diagram {
-  @apply my-4 overflow-x-auto rounded-md border border-border bg-muted p-4 text-center;
+  @apply relative my-4 overflow-x-auto rounded-md border border-border bg-muted p-4 text-center;
 }
 
 .mermaid-diagram svg {
@@ -132,6 +132,32 @@
 
 .mermaid-error {
   @apply border-destructive;
+}
+
+/* Expand-to-full-screen affordance sitting in the diagram's top-right. */
+.mermaid-expand-btn {
+  @apply absolute right-2 top-2 z-10 rounded-md border border-border bg-card/90 p-1.5 text-muted-foreground opacity-70 transition hover:text-foreground hover:opacity-100;
+}
+
+/* Full-screen diagram viewer: a dim backdrop (click or Esc to close) with the
+ * SVG scaled up to the viewport; overflow-auto lets a very tall diagram
+ * scroll rather than clip. */
+.mermaid-fullscreen {
+  @apply fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black/70 p-8;
+}
+
+.mermaid-fullscreen-close {
+  @apply absolute right-4 top-4 rounded-md border border-border bg-card p-2 text-muted-foreground shadow-lg hover:text-foreground;
+}
+
+.mermaid-fullscreen-svg {
+  @apply rounded-lg bg-card p-6 shadow-2xl;
+}
+
+.mermaid-fullscreen-svg svg {
+  width: 82vw !important;
+  max-width: 82vw !important;
+  height: auto !important;
 }
 
 /* Syntax highlighting (rehype-highlight → hljs.* classes), tuned to sit on
