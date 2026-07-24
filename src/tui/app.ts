@@ -8,7 +8,6 @@ import type {
 import { setupTerminal, restoreTerminal, parseKeypress, getTerminalSize } from './terminal.js';
 import { diffFrame, renderOverview, renderItemReview, renderFinal, renderHandoff, clampItemReviewScroll } from './render.js';
 import { handleKeypress, assignShortcuts } from './input.js';
-import { renderMarkdown } from '../render/termrender.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { validateDeck } from '../inbox/deck-schema.js';
 import { canonicalizeInteraction } from '../inbox/visual.js';
@@ -135,22 +134,6 @@ function rebindPersist(internals: PanelInternals): void {
   };
 }
 
-function visualRenderWidth(cols: number): number {
-  return Math.max(1, Math.min(cols - 4, 76));
-}
-
-function renderVisualMarkdown(markdown: string, cols: number): string {
-  return renderMarkdown(markdown, visualRenderWidth(cols)).join('\n');
-}
-
-/** Reflow ready Visual Markdown locally without issuing another request. */
-function rerenderVisuals(internals: PanelInternals): void {
-  for (const [id, visual] of internals.state.visuals) {
-    if (visual.status !== 'ready' || visual.markdown === undefined) continue;
-    internals.state.visuals.set(id, { ...visual, content: renderVisualMarkdown(visual.markdown, internals.cols) });
-  }
-}
-
 function visualRequestInteraction(interaction: Interaction): CanonicalInteraction {
   return canonicalizeInteraction(interaction);
 }
@@ -199,7 +182,7 @@ function fireVisuals(internals: PanelInternals, interactions: Interaction[]): vo
       if (!internals.mounted || generation !== internals.visualGeneration) return;
       if (!internals.state.interactions.some((candidate) => candidate.id === interaction.id)) return;
       internals.state.visuals.set(interaction.id, result.status === 'ready' && typeof result.markdown === 'string'
-        ? { questionId: interaction.id, content: renderVisualMarkdown(result.markdown, internals.cols), markdown: result.markdown, status: 'ready' }
+        ? { questionId: interaction.id, content: result.markdown, markdown: result.markdown, status: 'ready' }
         : { questionId: interaction.id, content: '', status: 'error' });
       internals.callbacks.onDirty?.();
     }).catch(() => {
@@ -294,9 +277,8 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     handleResize(cols, rows) {
       internals.cols = cols;
       internals.rows = rows;
-      // Width changes reflow saved visual markdown, so clamp against the new
-      // content and geometry rather than the stale pre-resize wrapping.
-      rerenderVisuals(internals);
+      // Visual Markdown is re-rendered by the item layout at this width, so
+      // the same block-aware geometry drives both resize and initial paint.
       return renderLines();
     },
 

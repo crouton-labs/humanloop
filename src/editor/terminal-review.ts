@@ -430,14 +430,30 @@ export function renderReviewDoc(content: string, cols: number): RenderedDoc {
   return renderMarkdownBlockAware(content, renderWidthForCols(cols), contentWidthForCols(cols));
 }
 
-/** Widest visible row, in display cells, for a body window. */
-export function widestVisibleRow(doc: RenderedDoc, scroll: number, bodyHeight: number): number {
-  let widest = 0;
+interface PaintedBodyRow {
+  /** Rendered source row, absent for a vertical-scroll indicator or blank fill. */
+  abs: number | null;
+  line: string;
+}
+
+/** Body rows as they are actually painted. Vertical-scroll indicators replace
+ * their endpoint rows, so content behind one cannot advertise or claim h/l. */
+function paintedBodyRows(doc: RenderedDoc, scroll: number, bodyHeight: number): PaintedBodyRow[] {
+  const rows: PaintedBodyRow[] = [];
   for (let i = 0; i < bodyHeight; i++) {
     const abs = scroll + i;
-    if (abs >= doc.lines.length) break;
-    widest = Math.max(widest, visibleWidth(doc.lines[abs]!));
+    rows.push(abs < doc.lines.length ? { abs, line: doc.lines[abs]! } : { abs: null, line: '' });
   }
+  if (scroll > 0 && rows.length > 0) rows[0] = { abs: null, line: `  ${DIM}↑ ${scroll} more above${RESET}` };
+  const remaining = doc.lines.length - (scroll + bodyHeight);
+  if (remaining > 0 && rows.length > 0) rows[rows.length - 1] = { abs: null, line: `  ${DIM}↓ ${remaining} more below${RESET}` };
+  return rows;
+}
+
+/** Widest painted row, in display cells, for a body window. */
+export function widestVisibleRow(doc: RenderedDoc, scroll: number, bodyHeight: number): number {
+  let widest = 0;
+  for (const row of paintedBodyRows(doc, scroll, bodyHeight)) widest = Math.max(widest, visibleWidth(row.line));
   return widest;
 }
 
@@ -524,7 +540,7 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   } else if (state.mode === 'help') {
     footer.push('  Keys:');
     footer.push(`  ${DIM}j/k${RESET}         move anchor            ${DIM}shift+j/k${RESET}   extend selection`);
-    footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document       ${DIM}h/l${RESET}         pan wide diagrams`);
+    footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document       ${DIM}h/l${RESET}         pan visible wide diagrams`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
     footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
     footer.push(`  ${DIM}space w${RESET}     hand off to browser`);
@@ -551,25 +567,21 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   const { lo, hi } = selectedUnitBounds(state);
   const commented = commentedUnitSet(state);
   const body: string[] = [];
-  for (let i = 0; i < bodyHeight; i++) {
-    const abs = scroll + i;
-    if (abs >= doc.lines.length) {
-      body.push('');
+  for (const source of paintedBodyRows(doc, scroll, bodyHeight)) {
+    if (source.abs === null) {
+      body.push(source.line);
       continue;
     }
     // Every body row is windowed into the body rectangle: a diagram wider than
     // the pane pans instead of spilling past the right edge.
-    const row = panLine(doc.lines[abs]!, hscroll, contentW);
-    const u = state.rowUnits[abs] ?? null;
+    const row = panLine(source.line, hscroll, contentW);
+    const u = state.rowUnits[source.abs] ?? null;
     // Tint the prose column at minimum, and a wide row across what it occupies.
     const tintW = Math.min(contentW, Math.max(docW, visibleWidth(row)));
     if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, tintW)}`);
     else if (u !== null && commented.has(u)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
     else body.push(`    ${row}`);
   }
-  if (scroll > 0 && body.length > 0) body[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
-  const remaining = doc.lines.length - (scroll + bodyHeight);
-  if (remaining > 0 && body.length > 0) body[body.length - 1] = `  ${DIM}↓ ${remaining} more below${RESET}`;
   // Contextual pan hint: only while something on screen actually overflows.
   // Appends to the existing footer line, so the reserved row count is unchanged.
   if (overflow > 0 && state.mode === 'view' && footer.length > 0) {
@@ -825,8 +837,8 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
       else if (input === 'K') { state = moveActiveUnit(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
       else if (input === 'u' || key.pageUp) state = scrollBy(state, -bodyH(), bodyH(), doc.lines.length);
       else if (input === 'd' || key.pageDown) state = scrollBy(state, bodyH(), bodyH(), doc.lines.length);
-      else if (input === 'h' || key.leftArrow) state = panBy(state, -PAN_STEP, doc, cols, rows);
-      else if (input === 'l' || key.rightArrow) state = panBy(state, PAN_STEP, doc, cols, rows);
+      else if ((input === 'h' || key.leftArrow) && maxHScroll(state, doc, cols, rows) > 0) state = panBy(state, -PAN_STEP, doc, cols, rows);
+      else if ((input === 'l' || key.rightArrow) && maxHScroll(state, doc, cols, rows) > 0) state = panBy(state, PAN_STEP, doc, cols, rows);
       else if (input === '?') state = openHelp(state);
       else if (key.escape) { finish(buildDraftFeedbackResult(absFile, state.comments)); return; }
       paint();

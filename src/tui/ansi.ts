@@ -174,7 +174,32 @@ export function visibleWidth(line: string): number {
   return stringWidth(line);
 }
 
-const ANSI_AT = /^\x1b\[[0-9;?]*[a-zA-Z]|^\x1b[@-_]/;
+const ANSI_TOKEN = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[@-_]/g;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+type DisplayToken = { ansi: true; text: string } | { ansi: false; text: string; width: number };
+
+/** ANSI escapes are tokens of their own; all printable text is segmented into
+ * extended grapheme clusters before widths or slice boundaries are calculated.
+ * `string-width` assigns display width to the complete cluster (not its
+ * constituent code points), which keeps ZWJ emoji, flags, skin tones and
+ * combining sequences indivisible while panning. */
+function displayTokens(line: string): DisplayToken[] {
+  const tokens: DisplayToken[] = [];
+  let at = 0;
+  ANSI_TOKEN.lastIndex = 0;
+  for (let match = ANSI_TOKEN.exec(line); match !== null; match = ANSI_TOKEN.exec(line)) {
+    for (const segment of GRAPHEMES.segment(line.slice(at, match.index))) {
+      tokens.push({ ansi: false, text: segment.segment, width: stringWidth(segment.segment) });
+    }
+    tokens.push({ ansi: true, text: match[0]! });
+    at = match.index + match[0]!.length;
+  }
+  for (const segment of GRAPHEMES.segment(line.slice(at))) {
+    tokens.push({ ansi: false, text: segment.segment, width: stringWidth(segment.segment) });
+  }
+  return tokens;
+}
 
 /**
  * The one display-cell containment primitive: the visible cells
@@ -196,32 +221,33 @@ export function sliceCells(line: string, start: number, width: number): string {
   let out = '';
   let emitted = false; // any escape inside the window
   let cell = 0;
-  let i = 0;
-  while (i < line.length && cell < end) {
-    if (line[i] === '\x1b') {
-      const m = ANSI_AT.exec(line.slice(i));
-      if (m !== null) {
-        if (cell < from) carried += m[0];
-        else { out += m[0]; emitted = true; }
-        i += m[0].length;
-        continue;
-      }
+  for (const token of displayTokens(line)) {
+    if (token.ansi) {
+      if (cell < from) carried += token.text;
+      else { out += token.text; emitted = true; }
+      continue;
     }
-    const ch = String.fromCodePoint(line.codePointAt(i)!);
-    const cw = stringWidth(ch);
-    i += ch.length;
+    if (cell >= end) break;
+    const cw = token.width;
+    // A standalone combining mark has no cells but is still a complete
+    // grapheme cluster; retain it whenever its zero-width position is inside
+    // the window rather than dropping it through the usual boundary check.
+    if (cw === 0) {
+      if (cell >= from) out += token.text;
+      continue;
+    }
     if (cell + cw <= from) { cell += cw; continue; }
-    if (cell < from) {                      // straddles the left edge
+    if (cell < from) {                      // whole grapheme straddles the left edge
       out += ' '.repeat(cell + cw - from);
       cell += cw;
       continue;
     }
-    if (cell + cw > end) {                  // straddles the right edge
+    if (cell + cw > end) {                  // whole grapheme straddles the right edge
       out += ' '.repeat(end - cell);
       cell = end;
       break;
     }
-    out += ch;
+    out += token.text;
     cell += cw;
   }
   if (out === '') return '';

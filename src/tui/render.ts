@@ -196,7 +196,10 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     if (visual?.status === 'ready') {
       bodyLines.push('');
       bodyLines.push(`  ${DIM}── context ${hline(maxW - 12)}${RESET}`);
-      for (const vl of visual.content.split('\n')) {
+      // Keep the provider's original Markdown through layout. This is the
+      // same block-aware contract as question/follow-up content: prose stays
+      // readable while Mermaid uses the available pane width.
+      for (const vl of visual.markdown === undefined ? visual.content.split('\n') : mdLines(visual.markdown)) {
         bodyLines.push(`  ${vl}`);
       }
       bodyLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
@@ -285,7 +288,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   // wider than the prose column takes the whole pane (which also drops the
   // centering pad below), and anything past that pans.
   const scroll = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
-  const visible = overflows ? bodyLines.slice(scroll, scroll + bodyHeight) : bodyLines;
+  const visible = visibleItemBodyLines(bodyLines, scroll, bodyHeight);
   let widest = 0;
   for (const line of visible) widest = Math.max(widest, visibleWidth(line));
   const bodyBoxW = widest > maxW + 2 ? paneW + 2 : maxW + 2;
@@ -294,6 +297,17 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     maxW, bodyHeight, maxScroll, overflows,
     bodyBoxW, maxHScroll: Math.max(0, widest - bodyBoxW),
   };
+}
+
+/** Body rows as they are actually painted: vertical-scroll indicators replace
+ * their endpoint rows, so those hidden rows cannot make h/l available. */
+function visibleItemBodyLines(bodyLines: string[], scroll: number, bodyHeight: number): string[] {
+  if (bodyLines.length <= bodyHeight) return bodyLines;
+  const visible = bodyLines.slice(scroll, scroll + bodyHeight);
+  if (scroll > 0) visible[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
+  const remainingBelow = bodyLines.length - (scroll + bodyHeight);
+  if (remainingBelow > 0) visible[visible.length - 1] = `  ${DIM}↓ ${remainingBelow} more below${RESET}`;
+  return visible;
 }
 
 /**
@@ -326,19 +340,7 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   // pre-render, keeps state.scrollOffset itself in bounds).
   const scroll = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
 
-  let visibleBody: string[];
-  if (overflows) {
-    visibleBody = bodyLines.slice(scroll, scroll + bodyHeight);
-    if (scroll > 0) {
-      visibleBody[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
-    }
-    const remainingBelow = bodyLines.length - (scroll + bodyHeight);
-    if (remainingBelow > 0) {
-      visibleBody[visibleBody.length - 1] = `  ${DIM}↓ ${remainingBelow} more below${RESET}`;
-    }
-  } else {
-    visibleBody = bodyLines;
-  }
+  let visibleBody = visibleItemBodyLines(bodyLines, scroll, bodyHeight);
   // Contain every body row in the card's rectangle: rows that fit are
   // untouched, a diagram wider than the pane pans under h/l with ‹/› marking
   // the content still off-screen.
