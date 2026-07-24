@@ -615,7 +615,12 @@ export class InboxController {
     try {
       // Install the watch before the first durable reread so a publication in
       // the narrow setup window is either observed or found by that reread.
-      watcher = watch(join(visualsDir(dir), durableRequestId), () => reread());
+      watcher = watch(join(visualsDir(dir), durableRequestId), (_event, file) => {
+        // Rereading takes a short directory lock, which itself emits watch events on Linux.
+        // Only the immutable result can settle this handle; ignoring lock/request churn avoids a self-triggered event loop.
+        if (file !== null && file !== 'result.json') return;
+        reread();
+      });
       watcher.once('error', (error) => finish({ status: 'error', error: error.message }));
       reread();
     } catch (error) {
