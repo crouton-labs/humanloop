@@ -226,11 +226,11 @@ export default function App() {
   // submit-failure path).
   const reviewReadOnly = status === 'submitting' || status === 'taking-back' || status === 'taken-back' || status === 'submitted' || status === 'pending-handoff' || status === 'disconnected';
 
-  // The review document (prose + code + tables + diagrams) reads best with
-  // real width, so the shell is gated per-surface — the deck keeps its
-  // narrow reading column, review gets a wide one.
+  // Both interaction decks and review documents can include long prose,
+  // tables, and diagrams, so let the browser surface use a generous reading
+  // column while retaining a comfortable outer gutter on ultra-wide displays.
   return (
-    <div className={cn('mx-auto flex min-h-screen flex-col gap-6 p-8', surface === 'review' ? 'max-w-7xl' : 'max-w-3xl')}>
+    <div className={cn('mx-auto flex min-h-screen flex-col gap-6 p-8 max-w-[120rem]')}>
       <header className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">
           {deck?.title ?? (surface === 'review' ? 'humanloop — review' : 'humanloop — browser surface')}
