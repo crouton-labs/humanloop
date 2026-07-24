@@ -213,9 +213,11 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
 
   if (state.inputMode) {
     postLines.push(`  ${DIM}${hline(maxW)}${RESET}`);
-    const label = interaction.freetextLabel !== undefined
-      ? interaction.freetextLabel
-      : state.inputMode.kind === 'comment' ? 'Comment' : 'Response';
+    const label = state.inputMode.kind === 'follow-up'
+      ? 'Ask a follow-up'
+      : interaction.freetextLabel !== undefined
+        ? interaction.freetextLabel
+        : state.inputMode.kind === 'comment' ? 'Comment' : 'Response';
 
     // Show attached option in comment mode. For single-select the comment
     // qualifies the pick; for multi-select an attached option means the

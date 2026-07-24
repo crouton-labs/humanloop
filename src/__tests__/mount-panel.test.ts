@@ -1025,6 +1025,8 @@ const sendFollowUpKey = (bytes: string) => {
 };
 sendFollowUpKey('\x1b[B');
 sendFollowUpKey('?');
+const followUpComposerFrame = followUpPanel.render().join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+assert.ok(followUpComposerFrame.includes('Ask a follow-up:'), 'the follow-up composer labels its own action instead of reusing the response label');
 for (const character of 'Why this choice?') sendFollowUpKey(character);
 sendFollowUpKey('\r');
 assert.equal(submittedFollowUp, 'Why this choice?', 'the parsed follow-up submission invokes only the follow-up callback');
