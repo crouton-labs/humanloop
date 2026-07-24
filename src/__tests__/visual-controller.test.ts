@@ -13,6 +13,15 @@ import { VISUAL_CAPABILITY, readVisualRequest, startVisualRequest, submitVisualR
 import { parseKeypress } from '../tui/terminal.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const handler = { command: process.execPath, args: ['-e', ''] };
 const deck = (visual = false): Deck => ({
   title: 'Visual decisions',
@@ -100,7 +109,10 @@ for (const bytes of ['\r', '\x1b[Z']) {
   const parsed = parseKeypress(Buffer.from(bytes));
   reopened.handleKey(parsed.input, parsed.key);
 }
-assert.ok(reopened.render().join('\n').includes('saved Visual result'), 'the adopted running request renders when its durable result arrives');
+await waitFor(
+  () => reopened.render().join('\n').includes('saved Visual result'),
+  'the adopted running request renders when its durable result arrives',
+);
 reopened.close();
 
 const reopenedAfterResult = new InboxController({ roots: [root], cols: 100, rows: 24 });
