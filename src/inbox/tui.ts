@@ -37,18 +37,12 @@ export function buildInboxLines(items: TicketSummary[], width: number, selectedI
 function buildItemLines(item: TicketSummary, index: number, selectedIndex: number, contentWidth: number): string[] {
   const kind = item.kind === 'deck' ? item.interactionKind ?? 'decision' : 'review';
   const icon = KIND_ICON[kind] ?? '·';
-  // Source and title share the row budget: an unbounded source (a long node
-  // or session name) would floor the title at its minimum and overflow the
-  // column, bending the panel divider. Shrink the source only when the row
-  // cannot hold it alongside the title's 10-col minimum.
-  const rawSource = item.source.sessionName ?? item.source.askedBy ?? item.source.nodeId ?? '';
+  // The inbox is a title-first triage surface. Origin details remain available
+  // after opening a ticket, rather than consuming the list's scarce row width.
   const age = formatTimeAgo(item.blockedSince);
-  const source = truncateRow(rawSource, Math.max(8, contentWidth - age.length - 8 - 10));
   const cursor = index === selectedIndex ? `${CYAN}▸${RESET} ` : '  ';
-  const titleWidth = Math.max(10, contentWidth - source.length - age.length - 8);
-  let row = `${cursor}${ansiColor(icon, KIND_COLOR[kind] ?? 'cyan')} `;
-  if (source) row += `${ansiColor(source, 'yellow')} ${DIM}·${RESET} `;
-  row += `${BOLD}${truncateRow(item.title || `(${item.id.slice(0, 8)})`, titleWidth)}${RESET}  ${DIM}${age}${RESET}`;
+  const titleWidth = Math.max(1, contentWidth - age.length - 6);
+  const row = `${cursor}${ansiColor(icon, KIND_COLOR[kind] ?? 'cyan')} ${BOLD}${truncateRow(item.title || `(${item.id.slice(0, 8)})`, titleWidth)}${RESET}  ${DIM}${age}${RESET}`;
   if (item.claim) return [row, `      ${DIM}${truncateRow(`claimed by ${item.claim.owner}`, contentWidth - 6)}${RESET}`];
   if (item.subtitle) return [row, `      ${DIM}${truncateRow(item.subtitle, contentWidth - 6)}${RESET}`];
   return [row];
