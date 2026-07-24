@@ -14,7 +14,7 @@ import { inboxLayout } from './layout.js';
 import { scanInbox } from './scan.js';
 import { inboxActivityPath, inboxRootsDirectory, inboxStateDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
-import { completeDeck, readTicketResult, ticketRoot } from './tickets.js';
+import { cancelTicket, completeDeck, readTicketResult, ticketRoot } from './tickets.js';
 import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, runHandler, visualsDir } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
@@ -73,6 +73,7 @@ export class InboxController {
   private claim: { dir: string; token: string } | undefined;
   private suspended = false;
   private submittingDir: string | undefined;
+  private cancelConfirmation: { dir: string; title: string } | undefined;
   private stdinListener: ((data: Buffer) => void) | undefined;
   private cols: number;
   private rows: number;
@@ -188,6 +189,28 @@ export class InboxController {
       this.repaint();
       return;
     }
+    if (this.cancelConfirmation !== undefined) {
+      if (input === 'y' || input === 'Y') {
+        const dir = this.cancelConfirmation.dir;
+        this.cancelConfirmation = undefined;
+        this.status = 'canceling…';
+        void this.cancelFromInbox(dir);
+      } else if (input === 'n' || input === 'N' || key.escape) {
+        this.cancelConfirmation = undefined;
+        this.status = undefined;
+      }
+      this.repaint();
+      return;
+    }
+    if (input === 'x' || input === 'X') {
+      const selected = this.items[this.selectedIndex];
+      if (selected !== undefined) {
+        this.cancelConfirmation = { dir: selected.dir, title: selected.title };
+        this.status = undefined;
+      }
+      this.repaint();
+      return;
+    }
     if (key.escape || input === 'q') { this.close(); return; }
     // Passive previews share the deck's documented scroll bindings without
     // claiming or mounting an editable panel. Ctrl+E/Y are line-wise aliases;
@@ -199,6 +222,20 @@ export class InboxController {
     else if (input === 'g' || input === 'G') void this.focusSelectedSource();
     else if (key.return || input === 'a') this.activate();
     this.repaint();
+  }
+
+  private async cancelFromInbox(dir: string): Promise<void> {
+    this.submittingDir = dir;
+    try {
+      const result = await cancelTicket(dir, { reason: 'Canceled from the inbox.', actor: 'human' });
+      this.status = result.status === 'canceled' ? 'canceled' : 'ticket already resolved';
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.submittingDir = undefined;
+      this.rescan();
+      this.repaint();
+    }
   }
 
   activate(): void {
@@ -632,8 +669,8 @@ export class InboxController {
     if (selected === undefined) return this.previewViewport(this.passiveDetailLines(width), width, rows);
     const focusHint = this.focusAvailable(selected.dir) ? `  ${DIM}g${RESET} chat` : '';
     const footer = selected.kind === 'deck'
-      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser${focusHint}  ${DIM}q${RESET} close`]
-      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select`, ` ${focusHint}  ${DIM}q${RESET} close`];
+      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser${focusHint}  ${DIM}q${RESET} close`]
+      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, ` ${focusHint}  ${DIM}q${RESET} close`];
     return [...this.previewViewport(this.passiveDetailLines(width), width, Math.max(0, rows - footer.length)), ...footer.map((line) => clipLine(line, width))];
   }
 
@@ -715,10 +752,13 @@ export class InboxController {
   }
 
   private withStatus(lines: string[]): string[] {
-    if (this.status === undefined || this.rows < 1) return lines;
+    const status = this.cancelConfirmation === undefined
+      ? this.status
+      : `cancel “${this.cancelConfirmation.title}”?  y yes · n/Esc no`;
+    if (status === undefined || this.rows < 1) return lines;
     const next = [...lines];
     while (next.length < this.rows) next.push('');
-    next[this.rows - 1] = `${YELLOW}${this.status}${RESET}`;
+    next[this.rows - 1] = `${YELLOW}${status}${RESET}`;
     return next;
   }
 
