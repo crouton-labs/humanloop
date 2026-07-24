@@ -40,7 +40,7 @@ assert.notEqual(pending[0]!.request.requestId, pending[1]!.request.requestId, 'e
 assert.deepEqual(Object.keys(pending[0]!.request).sort(), ['generationId', 'interaction', 'requestId'], 'the provider request is width-free');
 send(panel, '\r');
 send(panel, '\x1b[Z');
-assert.ok(panel.render().join('\n').includes('loading context...'), 'the unresolved current interaction renders loading without blocking mount');
+assert.ok(panel.render().join('\n').includes('loading context'), 'the unresolved current interaction renders loading without blocking mount');
 
 panel.loadDeck(deck('fresh'));
 assert.deepEqual(pending.slice(0, 2).map((entry) => entry.cancelCount), [1, 1], 'deck replacement cancels every unresolved request in the old generation');
@@ -51,7 +51,7 @@ send(panel, '\x1b[Z');
 pending[0]!.resolve({ status: 'ready', markdown: 'stale old generation' });
 await settlePromises();
 assert.ok(!panel.render().join('\n').includes('stale old generation'), 'a late old-generation result cannot alter the replacement panel');
-assert.ok(panel.render().join('\n').includes('loading context...'), 'the replacement remains governed by its own unresolved request');
+assert.ok(panel.render().join('\n').includes('loading context'), 'the replacement remains governed by its own unresolved request');
 
 const markdown = 'alpha beta gamma delta epsilon zeta eta theta iota kappa';
 pending[2]!.resolve({ status: 'ready', markdown });

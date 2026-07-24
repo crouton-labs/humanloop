@@ -9,10 +9,10 @@ import { waitForParkedReviewSubmit } from './parked.js';
 import { openBrowser } from '../browser/open.js';
 import { startReviewWebServer } from '../browser/server.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
-import { renderMarkdownWithMap, type RenderedDoc } from '../render/termrender.js';
+import { renderMarkdownBlockAware, type RenderedDoc } from '../render/termrender.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
 import { diffFrame, renderInputBuffer } from '../tui/render.js';
-import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, hline, sanitize, truncate } from '../tui/ansi.js';
+import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, clipLine, hline, panLine, sanitize, truncate, visibleWidth } from '../tui/ansi.js';
 
 // ── Pure state ───────────────────────────────────────────────────────────────
 // The document is the cursor: the anchor is a leaf unit of the rendered
@@ -101,6 +101,9 @@ export interface ReviewState {
   selectionAnchor: number | null;
   /** Scroll offset into the rendered (termrender) lines. */
   scroll: number;
+  /** Horizontal pan offset, in display cells, for rows wider than the body
+   *  rectangle (diagrams). Rows that fit never move. */
+  hscroll: number;
   mode: 'view' | 'list' | 'compose' | 'help';
   compose: ComposeState | null;
   listIndex: number;
@@ -168,6 +171,7 @@ export function initReviewState(sourceLines: string[], anchor: AnchorDoc, commen
     activeUnit: comments.length > 0 ? unitIndexForLine(safe.units, comments[0]!.line) : 0,
     selectionAnchor: null,
     scroll: 0,
+    hscroll: 0,
     mode: 'view',
     compose: null,
     listIndex: 0,
@@ -407,11 +411,58 @@ export function textVertical(buffer: string, cursor: number, delta: number): num
 
 // ── Rendering (pure) ─────────────────────────────────────────────────────────
 
-/** Width the document is rendered at for a given terminal width: 2-col left
+/** Width prose is rendered at for a given terminal width: 2-col left
  *  margin + 2-col gutter before the content, capped for readability. */
 export function renderWidthForCols(cols: number): number {
   return Math.min(Math.max(20, cols - 6), 120);
 }
+
+/** The body rectangle a rendered row is painted into: the terminal minus the
+ *  4-col gutter prefix. Diagram blocks render at this width (no prose cap),
+ *  and every emitted body row is contained within it. */
+export function contentWidthForCols(cols: number): number {
+  return Math.max(20, cols - 4);
+}
+
+/** The mapped render this surface paints: prose at the readability cap,
+ *  diagrams at the full body width. */
+export function renderReviewDoc(content: string, cols: number): RenderedDoc {
+  return renderMarkdownBlockAware(content, renderWidthForCols(cols), contentWidthForCols(cols));
+}
+
+/** Widest visible row, in display cells, for a body window. */
+export function widestVisibleRow(doc: RenderedDoc, scroll: number, bodyHeight: number): number {
+  let widest = 0;
+  for (let i = 0; i < bodyHeight; i++) {
+    const abs = scroll + i;
+    if (abs >= doc.lines.length) break;
+    widest = Math.max(widest, visibleWidth(doc.lines[abs]!));
+  }
+  return widest;
+}
+
+/** How far the body can pan right, given what is currently on screen. Zero
+ *  when nothing visible overflows — which is also what makes h/l contextual:
+ *  the keys only pan while an overflowing row is in view. */
+export function maxHScroll(state: ReviewState, doc: RenderedDoc, cols: number, rows: number): number {
+  const bodyHeight = Math.max(1, rows - reservedRows(state, cols));
+  const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
+  const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
+  return Math.max(0, widestVisibleRow(doc, scroll, bodyHeight) - contentWidthForCols(cols));
+}
+
+/** Pan the body horizontally, clamped to what is currently reachable. The
+ *  stored offset is only ever clamped against the live window, so vertical
+ *  scrolling and resize can never leave it pointing past the content. */
+export function panBy(state: ReviewState, delta: number, doc: RenderedDoc, cols: number, rows: number): ReviewState {
+  const max = maxHScroll(state, doc, cols, rows);
+  const next = Math.max(0, Math.min(state.hscroll + delta, max));
+  return next === state.hscroll ? state : { ...state, hscroll: next };
+}
+
+/** Cells one h/l press pans by — a chunk large enough to cross a diagram in a
+ *  few presses, small enough to keep orientation. */
+const PAN_STEP = 8;
 
 // Single-hue anchor tint (a dark neutral step below the CYAN gutter bar).
 // termrender's only reset is `\x1b[0m`, so re-arming the background after each
@@ -473,7 +524,7 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   } else if (state.mode === 'help') {
     footer.push('  Keys:');
     footer.push(`  ${DIM}j/k${RESET}         move anchor            ${DIM}shift+j/k${RESET}   extend selection`);
-    footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document`);
+    footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document       ${DIM}h/l${RESET}         pan wide diagrams`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
     footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
     footer.push(`  ${DIM}space w${RESET}     hand off to browser`);
@@ -491,6 +542,12 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   const bodyHeight = Math.max(1, rows - reserved);
   const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
   const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
+  const contentW = contentWidthForCols(cols);
+  // Effective pan: the stored offset, clamped to what this window can reach.
+  // Scrolling into narrow content parks the diagram offset rather than losing
+  // it, so scrolling back restores the same horizontal position.
+  const overflow = Math.max(0, widestVisibleRow(doc, scroll, bodyHeight) - contentW);
+  const hscroll = Math.max(0, Math.min(state.hscroll, overflow));
   const { lo, hi } = selectedUnitBounds(state);
   const commented = commentedUnitSet(state);
   const body: string[] = [];
@@ -500,20 +557,31 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
       body.push('');
       continue;
     }
-    const row = doc.lines[abs]!;
+    // Every body row is windowed into the body rectangle: a diagram wider than
+    // the pane pans instead of spilling past the right edge.
+    const row = panLine(doc.lines[abs]!, hscroll, contentW);
     const u = state.rowUnits[abs] ?? null;
-    if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, docW)}`);
+    // Tint the prose column at minimum, and a wide row across what it occupies.
+    const tintW = Math.min(contentW, Math.max(docW, visibleWidth(row)));
+    if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, tintW)}`);
     else if (u !== null && commented.has(u)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
     else body.push(`    ${row}`);
   }
   if (scroll > 0 && body.length > 0) body[0] = `  ${DIM}↑ ${scroll} more above${RESET}`;
   const remaining = doc.lines.length - (scroll + bodyHeight);
   if (remaining > 0 && body.length > 0) body[body.length - 1] = `  ${DIM}↓ ${remaining} more below${RESET}`;
+  // Contextual pan hint: only while something on screen actually overflows.
+  // Appends to the existing footer line, so the reserved row count is unchanged.
+  if (overflow > 0 && state.mode === 'view' && footer.length > 0) {
+    footer[0] = `${footer[0]}  ${DIM}h/l${RESET} pan`;
+  }
   while (body.length < bodyHeight) body.push('');
 
   const lines = [...header, ...body, ...footer];
   while (lines.length < rows) lines.push('');
-  return lines.slice(0, rows);
+  // The frame is contained by construction: no row may exceed the terminal, or
+  // it wraps and breaks the differ's one-line-per-row model.
+  return lines.slice(0, rows).map((line) => clipLine(line, cols));
 }
 
 // ── Host loop (impure — the only part that touches the real TTY) ───────────
@@ -605,7 +673,7 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
 
   setupTerminal();
   let { cols, rows } = getTerminalSize();
-  let doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
+  let doc = renderReviewDoc(content, cols);
   let state = initReviewState(sourceLines, deriveAnchorUnits(doc), draft?.comments ?? [], draft?.version ?? 0);
   let prevFrame: string[] = [];
   let spaceArmed = false;
@@ -647,7 +715,7 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
 
     const onResize = (): void => {
       ({ cols, rows } = getTerminalSize());
-      doc = renderMarkdownWithMap(content, renderWidthForCols(cols));
+      doc = renderReviewDoc(content, cols);
       // Unit SOURCE ranges are width-independent under the same renderer (only
       // their rendered-row bounds move), but a mid-session renderer→fallback
       // transition can reshape the list — so remap the anchor by its source
@@ -757,6 +825,8 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
       else if (input === 'K') { state = moveActiveUnit(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
       else if (input === 'u' || key.pageUp) state = scrollBy(state, -bodyH(), bodyH(), doc.lines.length);
       else if (input === 'd' || key.pageDown) state = scrollBy(state, bodyH(), bodyH(), doc.lines.length);
+      else if (input === 'h' || key.leftArrow) state = panBy(state, -PAN_STEP, doc, cols, rows);
+      else if (input === 'l' || key.rightArrow) state = panBy(state, PAN_STEP, doc, cols, rows);
       else if (input === '?') state = openHelp(state);
       else if (key.escape) { finish(buildDraftFeedbackResult(absFile, state.comments)); return; }
       paint();

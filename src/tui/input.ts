@@ -1,5 +1,6 @@
 import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import type { Key } from './terminal.js';
+import { panItemReview } from './render.js';
 
 export type RenderFn = () => void;
 export type ExitFn = () => void;
@@ -199,6 +200,17 @@ function handleItemReview(
   }
   if (input === 'u' || key.pageUp || (key.ctrl && (input === 'u' || input === 'y'))) {
     state.scrollOffset = Math.max(0, (state.scrollOffset ?? 0) - (input === 'y' ? 1 : 10));
+    render();
+    return;
+  }
+
+  // Body pan: contextual, so h/l only claim the key while the visible body
+  // actually overflows its rectangle (a wide diagram) AND no option owns that
+  // shortcut. Otherwise they fall through to the option/action handling below.
+  if ((input === 'h' || input === 'l' || key.leftArrow || key.rightArrow)
+      && (state.hscrollMax ?? 0) > 0
+      && !interaction.options.some((o) => o.shortcut === input)) {
+    panItemReview(state, input === 'h' || key.leftArrow ? -1 : 1);
     render();
     return;
   }
@@ -642,6 +654,7 @@ function advanceItem(state: TuiState, direction: number): void {
   state.bodyMode = 'question';
   state.scrollOffset = 0;
   state.bodyScrollOffsets = { question: 0, visual: 0 };
+  state.hscrollOffset = 0;
 }
 
 /**
@@ -665,6 +678,7 @@ function advanceToNextUnanswered(state: TuiState): void {
   state.bodyMode = 'question';
   state.scrollOffset = 0;
   state.bodyScrollOffsets = { question: 0, visual: 0 };
+  state.hscrollOffset = 0;
 }
 
 function actionCount(interaction: Interaction): number {

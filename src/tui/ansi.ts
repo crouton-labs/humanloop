@@ -169,36 +169,99 @@ export function centerHorizontal(lines: string[], cols: number, contentWidth: nu
   return lines.map((line) => (line === '' ? '' : pad + line));
 }
 
+/** Visible width of a line in display cells (string-width ignores ANSI). */
+export function visibleWidth(line: string): number {
+  return stringWidth(line);
+}
+
+const ANSI_AT = /^\x1b\[[0-9;?]*[a-zA-Z]|^\x1b[@-_]/;
+
 /**
- * ANSI-aware clip: truncate a line's *visible* width to `maxWidth`, passing
- * escape sequences through untouched. Every line written to the terminal must
- * fit within the columns, or it physically wraps onto the next row — which
- * breaks diffFrame's one-logical-line-per-row model and strands spillover text
- * on rows the differ believes are empty (so it never erases them).
+ * The one display-cell containment primitive: the visible cells
+ * `[start, start + width)` of `line`, with escape sequences preserved.
+ *
+ * Every line written to the terminal must fit within its rectangle, or it
+ * physically wraps onto the next row — which breaks diffFrame's
+ * one-logical-line-per-row model and strands spillover text on rows the
+ * differ believes are empty (so it never erases them). Styling seen before
+ * the window is replayed at its head so a slice keeps the colors it had in
+ * place, and a double-width glyph straddling either edge becomes spaces so
+ * the slice occupies exactly the cells it claims.
  */
-export function clipLine(line: string, maxWidth: number): string {
-  if (maxWidth < 1) return '';
-  if (stringWidth(line) <= maxWidth) return line; // string-width ignores ANSI
+export function sliceCells(line: string, start: number, width: number): string {
+  if (width < 1) return '';
+  const from = Math.max(0, start);
+  const end = from + width;
+  let carried = '';   // styling established before the window
   let out = '';
-  let w = 0;
+  let emitted = false; // any escape inside the window
+  let cell = 0;
   let i = 0;
-  let sawAnsi = false;
-  while (i < line.length) {
+  while (i < line.length && cell < end) {
     if (line[i] === '\x1b') {
-      const m = /^\x1b\[[0-9;?]*[a-zA-Z]|^\x1b[@-_]/.exec(line.slice(i));
+      const m = ANSI_AT.exec(line.slice(i));
       if (m !== null) {
-        out += m[0];
+        if (cell < from) carried += m[0];
+        else { out += m[0]; emitted = true; }
         i += m[0].length;
-        sawAnsi = true;
         continue;
       }
     }
     const ch = String.fromCodePoint(line.codePointAt(i)!);
     const cw = stringWidth(ch);
-    if (w + cw > maxWidth) break;
-    out += ch;
-    w += cw;
     i += ch.length;
+    if (cell + cw <= from) { cell += cw; continue; }
+    if (cell < from) {                      // straddles the left edge
+      out += ' '.repeat(cell + cw - from);
+      cell += cw;
+      continue;
+    }
+    if (cell + cw > end) {                  // straddles the right edge
+      out += ' '.repeat(end - cell);
+      cell = end;
+      break;
+    }
+    out += ch;
+    cell += cw;
   }
-  return sawAnsi ? out + RESET : out;
+  if (out === '') return '';
+  if (carried !== '') { out = carried + out; emitted = true; }
+  return emitted ? out + RESET : out;
+}
+
+/**
+ * ANSI-aware clip: truncate a line's visible width to `maxWidth`. Thin
+ * wrapper over `sliceCells` so containment has a single implementation.
+ */
+export function clipLine(line: string, maxWidth: number): string {
+  if (maxWidth < 1) return '';
+  if (stringWidth(line) <= maxWidth) return line; // string-width ignores ANSI
+  return sliceCells(line, 0, maxWidth);
+}
+
+/**
+ * Horizontal window onto a row that may be wider than its rectangle (a
+ * Mermaid diagram rendered at the pane's full width). A row that fits is
+ * returned untouched — panning only ever moves content that overflows, so
+ * prose stays put while a diagram slides. Hidden content on either side is
+ * marked with a dim ‹/› in the edge cell, so the row always states whether
+ * more of the diagram exists left or right, and the marker disappears once
+ * that edge is reached (nothing is unreachable).
+ */
+export function panLine(line: string, offset: number, width: number): string {
+  if (width < 1) return '';
+  const w = stringWidth(line);
+  if (w <= width) return line;
+  const max = w - width;
+  const off = Math.max(0, Math.min(offset, max));
+  const left = off > 0;
+  const right = off < max;
+  const innerWidth = width - (left ? 1 : 0) - (right ? 1 : 0);
+  const body = innerWidth > 0 ? sliceCells(line, off + (left ? 1 : 0), innerWidth) : '';
+  return `${left ? `${DIM}‹${RESET}` : ''}${body}${right ? `${DIM}›${RESET}` : ''}`;
+}
+
+/** Cells of `line` that fall outside a `width`-wide rectangle. */
+export function rowOverflow(line: string, width: number): number {
+  return Math.max(0, stringWidth(line) - width);
 }

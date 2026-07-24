@@ -61,6 +61,8 @@ function buildInitialState(deck: Deck, editorAvailable = false, followUpAvailabl
     bodyMode: 'question',
     scrollOffset: 0,
     bodyScrollOffsets: { question: 0, visual: 0 },
+    hscrollOffset: 0,
+    hscrollMax: 0,
     editorAvailable,
     followUpAvailable,
     followUp: undefined,
@@ -242,7 +244,13 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
   const renderLines = (): string[] => {
     switch (internals.state.phase) {
       case 'overview':    return renderOverview(internals.state, internals.cols, internals.rows);
-      case 'item-review': return renderItemReview(internals.state, internals.cols, internals.rows);
+      case 'item-review':
+        // The one pre-render clamp: keeps scrollOffset/hscrollOffset inside the
+        // current body's bounds (so u/d and h/l stay responsive) and publishes
+        // the live horizontal reach the input layer reads. The renderer itself
+        // stays pure; running it here covers mount, resize and every keypress.
+        clampItemReviewScroll(internals.state, internals.cols, internals.rows);
+        return renderItemReview(internals.state, internals.cols, internals.rows);
       case 'final':       return renderFinal(internals.state, internals.cols, internals.rows);
     }
   };
@@ -276,11 +284,6 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
         cancel: () => internals.callbacks.onFollowUpCancel?.(),
       });
 
-      // Pre-render clamp (input layer): keep scrollOffset within the current
-      // body's bounds so u/d stay responsive. The renderer itself is pure.
-      if (internals.state.phase === 'item-review') {
-        clampItemReviewScroll(internals.state, internals.cols, internals.rows);
-      }
     },
 
     render() {
@@ -294,9 +297,6 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       // Width changes reflow saved visual markdown, so clamp against the new
       // content and geometry rather than the stale pre-resize wrapping.
       rerenderVisuals(internals);
-      if (internals.state.phase === 'item-review') {
-        clampItemReviewScroll(internals.state, cols, rows);
-      }
       return renderLines();
     },
 

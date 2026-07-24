@@ -1,9 +1,12 @@
 import type { TuiState, Interaction, InteractionResponse } from '../types.js';
-import { renderMarkdown } from '../render/termrender.js';
+import { renderMarkdownBlockAwareLines } from '../render/termrender.js';
 import {
   ESC, RESET, BOLD, DIM, ITALIC, GREEN, YELLOW, CYAN, REVERSE,
-  sanitize, singleLine, truncate, hline, wrap, hardWrap, centerHorizontal, clipLine,
+  sanitize, singleLine, truncate, hline, wrap, hardWrap, centerHorizontal, clipLine, panLine, visibleWidth,
 } from './ansi.js';
+
+/** Cells one h/l press pans by in the card body. */
+const PAN_STEP = 8;
 
 // ── Frame buffer ─────────────────────────────────────────────────────────────
 
@@ -125,6 +128,11 @@ interface ItemReviewLayout {
   bodyHeight: number;
   maxScroll: number;
   overflows: boolean;
+  /** Width of the rectangle body rows are painted into (including the 2-col
+   *  left prefix). Equals the prose column unless a diagram claims the pane. */
+  bodyBoxW: number;
+  /** Cells the visible body can still pan right; 0 when nothing overflows. */
+  maxHScroll: number;
 }
 
 /**
@@ -138,6 +146,11 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   const visual = state.visuals.get(interaction.id);
   const response = state.responses.get(interaction.id);
   const maxW = Math.min(cols - 4, 120);
+  // Diagrams are pictures, not prose: they render at the pane's full width
+  // rather than the readability cap. The card stops being centered when one
+  // claims that width, so the extra columns are actually available to it.
+  const paneW = Math.max(20, cols - 4);
+  const mdLines = (md: string): string[] => renderMarkdownBlockAwareLines(md, maxW, paneW);
 
   // Pre-body: position, divider, title, subtitle (always visible)
   const preLines: string[] = [];
@@ -168,13 +181,13 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   if (state.bodyMode === 'question') {
     if (interaction.subtitle) {
       bodyLines.push('');
-      for (const line of renderMarkdown(interaction.subtitle, maxW)) {
+      for (const line of mdLines(interaction.subtitle)) {
         bodyLines.push(`  ${line}`);
       }
     }
     if (interaction.body) {
       bodyLines.push('');
-      for (const line of renderMarkdown(interaction.body, maxW)) {
+      for (const line of mdLines(interaction.body)) {
         bodyLines.push(`  ${line}`);
       }
     }
@@ -193,7 +206,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
       bodyLines.push(`  ${DIM}── follow-up ${hline(Math.max(0, maxW - 14))}${RESET}`);
       if (state.followUp.status === 'running') bodyLines.push(`  ${DIM}consulting…${RESET}`);
       else if (state.followUp.status === 'ready') {
-        for (const line of renderMarkdown(state.followUp.markdown, maxW)) bodyLines.push(`  ${line}`);
+        for (const line of mdLines(state.followUp.markdown)) bodyLines.push(`  ${line}`);
       } else bodyLines.push(`  ${YELLOW}${state.followUp.error}${RESET}`);
     }
   }
@@ -266,9 +279,20 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
   const reservedRows = preLines.length + postLines.length + 1; // +1 for footer
   const bodyHeight = Math.max(1, rows - reservedRows);
   const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
+  const overflows = bodyLines.length > bodyHeight;
+
+  // Horizontal geometry, derived from what is actually on screen: a body row
+  // wider than the prose column takes the whole pane (which also drops the
+  // centering pad below), and anything past that pans.
+  const scroll = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
+  const visible = overflows ? bodyLines.slice(scroll, scroll + bodyHeight) : bodyLines;
+  let widest = 0;
+  for (const line of visible) widest = Math.max(widest, visibleWidth(line));
+  const bodyBoxW = widest > maxW + 2 ? paneW + 2 : maxW + 2;
   return {
     interaction, preLines, bodyLines, postLines,
-    maxW, bodyHeight, maxScroll, overflows: bodyLines.length > bodyHeight,
+    maxW, bodyHeight, maxScroll, overflows,
+    bodyBoxW, maxHScroll: Math.max(0, widest - bodyBoxW),
   };
 }
 
@@ -279,13 +303,24 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
  * renderer mutating state mid-frame.
  */
 export function clampItemReviewScroll(state: TuiState, cols: number, rows: number): void {
-  const { maxScroll } = buildItemReviewLayout(state, cols, rows);
+  const { maxScroll, maxHScroll } = buildItemReviewLayout(state, cols, rows);
   state.scrollOffset = Math.max(0, Math.min(state.scrollOffset || 0, maxScroll));
   state.bodyScrollOffsets[state.bodyMode] = state.scrollOffset;
+  // Publish the live horizontal reach so the input layer can tell whether h/l
+  // mean "pan" on this card, and keep the stored pan inside it across vertical
+  // scrolling and resize.
+  state.hscrollMax = maxHScroll;
+  state.hscrollOffset = Math.max(0, Math.min(state.hscrollOffset || 0, maxHScroll));
+}
+
+/** Pan the card body horizontally. Clamping happens in the pre-render clamp
+ *  the host already runs, exactly like vertical over-scroll. */
+export function panItemReview(state: TuiState, direction: -1 | 1): void {
+  state.hscrollOffset = Math.max(0, (state.hscrollOffset || 0) + direction * PAN_STEP);
 }
 
 export function renderItemReview(state: TuiState, cols: number, rows: number): string[] {
-  const { interaction, preLines, bodyLines, postLines, maxW, bodyHeight, maxScroll, overflows } =
+  const { interaction, preLines, bodyLines, postLines, maxW, bodyHeight, maxScroll, overflows, bodyBoxW, maxHScroll } =
     buildItemReviewLayout(state, cols, rows);
   // Read-only clamp: renderer never mutates state (clampItemReviewScroll, run
   // pre-render, keeps state.scrollOffset itself in bounds).
@@ -304,6 +339,11 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   } else {
     visibleBody = bodyLines;
   }
+  // Contain every body row in the card's rectangle: rows that fit are
+  // untouched, a diagram wider than the pane pans under h/l with ‹/› marking
+  // the content still off-screen.
+  const hscroll = Math.max(0, Math.min(state.hscrollOffset || 0, maxHScroll));
+  visibleBody = visibleBody.map((line) => panLine(line, hscroll, bodyBoxW));
 
   // Footer hint — mention scroll keys when body overflows
   const footerParts = interaction.multiSelect === true
@@ -322,6 +362,9 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   if (overflows) {
     footerParts.unshift(state.inputMode ? `${DIM}pgup/pgdn${RESET} scroll` : `${DIM}u/d${RESET} scroll`);
   }
+  if (maxHScroll > 0 && state.inputMode === null) {
+    footerParts.unshift(`${DIM}h/l${RESET} pan`);
+  }
   if (state.inputMode === null) {
     if (state.followUpAvailable) footerParts.push(`${DIM}?${RESET} follow-up`);
     footerParts.push(`${DIM}w${RESET} browser`);
@@ -337,9 +380,10 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   const clamped = lines.length > rows
     ? [...lines.slice(0, rows - 1), footer]
     : lines;
-  // Content occupies maxW cols of body + 2 cols of left prefix — center the
-  // whole block when the terminal is wider than that.
-  return centerHorizontal(clamped, cols, maxW + 2);
+  // Content occupies the body rectangle (prose column, or the full pane when a
+  // diagram claims it) — center the whole block when the terminal is wider,
+  // then contain every row so nothing can wrap past the card's rectangle.
+  return centerHorizontal(clamped, cols, bodyBoxW).map((line) => clipLine(line, cols));
 }
 
 function renderActions(

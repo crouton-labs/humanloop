@@ -155,7 +155,9 @@ export class InboxController {
       // Hard-clip the list line to its column: an overflowing row would eat
       // the pad and push the divider out of alignment for that row alone.
       const left = clipLine(list[i] ?? '', geometry.listWidth);
-      const right = detail[i] ?? '';
+      // Clip the detail column too: a deck/preview row is only ever entitled to
+      // its own panel, so an over-wide row cannot run past the pane's edge.
+      const right = clipLine(detail[i] ?? '', geometry.detailWidth);
       const pad = ' '.repeat(Math.max(0, geometry.listWidth - visibleWidth(left)));
       lines.push(`${left}${pad}${divider}${right}`);
     }

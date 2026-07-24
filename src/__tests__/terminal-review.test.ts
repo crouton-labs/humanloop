@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import stringWidth from 'string-width';
 import type { RenderedDoc } from '../render/termrender.js';
 import {
   anchorRowRange,
@@ -16,6 +17,8 @@ import {
   openComposeNew,
   openList,
   remapUnitIndex,
+  maxHScroll,
+  panBy,
   renderReviewFrame,
   scrollBy,
   scrollToReveal,
@@ -38,9 +41,9 @@ const doc: RenderedDoc = {
   rows: [0, null, 1, 1, null, 2],
   spans: [[1, 1], null, [3, 3], [4, 4], null, [6, 6]],
   blocks: [
-    { start: 1, end: 1 },
-    { start: 3, end: 4 },
-    { start: 6, end: 6 },
+    { type: 'paragraph', start: 1, end: 1 },
+    { type: 'paragraph', start: 3, end: 4 },
+    { type: 'paragraph', start: 6, end: 6 },
   ],
 };
 const anchor = deriveAnchorUnits(doc);
@@ -66,8 +69,8 @@ const { units } = anchor;
     rows: [0, 0, null, 1],
     spans: [[2, 2], [2, 2], null, null],
     blocks: [
-      { start: 1, end: 3 },
-      { start: 5, end: 9 },
+      { type: 'paragraph', start: 1, end: 3 },
+      { type: 'paragraph', start: 5, end: 9 },
     ],
   };
   const a = deriveAnchorUnits(d);
@@ -80,7 +83,7 @@ const { units } = anchor;
 
 // deriveAnchorUnits: a fully unmapped doc degrades to one whole-doc unit.
 {
-  const d: RenderedDoc = { lines: ['x', 'y'], rows: [null, null], spans: [null, null], blocks: [{ start: 1, end: 7 }] };
+  const d: RenderedDoc = { lines: ['x', 'y'], rows: [null, null], spans: [null, null], blocks: [{ type: 'paragraph', start: 1, end: 7 }] };
   const a = deriveAnchorUnits(d);
   assert.deepEqual(a.units, [{ start: 1, end: 7, firstRow: 0, lastRow: 1 }]);
   assert.deepEqual(a.rowUnits, [0, 0]);
@@ -106,7 +109,7 @@ const { units } = anchor;
     lines: ['┌─', 'code a', 'code b', '└─'],
     rows: [0, 0, 0, 0],
     spans: [[5, 10], [6, 6], [7, 7], [5, 10]],
-    blocks: [{ start: 5, end: 10 }],
+    blocks: [{ type: 'paragraph', start: 5, end: 10 }],
   });
   assert.equal(fence.units.length, 4, 'fence = top chrome + per-line content + bottom chrome');
   assert.deepEqual(unitRangeForSpan(fence.units, 5, 10), { lo: 0, hi: 3 }, 'a whole-fence comment highlights every fence unit');
@@ -151,7 +154,7 @@ const { units } = anchor;
     lines: ['┌─', 'code a', '└─'],
     rows: [0, 0, 0],
     spans: [[5, 8], [6, 6], [5, 8]],
-    blocks: [{ start: 5, end: 8 }],
+    blocks: [{ type: 'paragraph', start: 5, end: 8 }],
   });
   let state = initReviewState(['', '', '', '', '```', 'a', 'b', '```'], fence, [], 0);
   state = moveActiveUnit(state, 1, false); // content line unit
@@ -318,6 +321,46 @@ const { units } = anchor;
   const frame2 = renderReviewFrame(state, 'doc.md', doc, 60, 20);
   assert.ok(frame2[3 + 5]!.includes('▎'), 'commented units get the comment gutter marker');
   assert.ok(!frame2[3 + 3]!.includes('▎'), 'uncommented sibling units carry no comment marker');
+}
+
+// ── Regression: a Mermaid diagram wider than the pane (reported bug) ────────
+// Wide diagram rows used to run past the terminal's right edge; the spillover
+// wrapped and was unreachable. Every emitted row must now fit the frame, and
+// h/l must reach the far end of the diagram.
+{
+  const wide = '\u2500'.repeat(300);
+  const wideDoc: RenderedDoc = {
+    lines: ['TITLE', '', wide, '', 'tail'],
+    rows: [0, null, 1, null, 2],
+    spans: [[1, 1], null, [3, 3], null, [5, 5]],
+    blocks: [
+      { type: 'heading', start: 1, end: 1 },
+      { type: 'mermaid', start: 3, end: 3 },
+      { type: 'paragraph', start: 5, end: 5 },
+    ],
+  };
+  const cols = 80;
+  let s = initReviewState(['# t', '', 'diagram', '', 'tail'], deriveAnchorUnits(wideDoc), [], 0);
+  const widths = (frame: string[]): number[] => frame.map((line) => stringWidth(line));
+
+  const frame = renderReviewFrame(s, 'doc.md', wideDoc, cols, 20);
+  assert.ok(Math.max(...widths(frame)) <= cols, 'every frame row fits inside the terminal');
+  assert.ok(frame[3 + 2]!.includes('\u203a'), 'a diagram continuing to the right says so');
+  assert.ok(!frame[3 + 2]!.includes('\u2039'), 'nothing is hidden to the left at offset 0');
+
+  // h/l pan is bounded by what the visible rows actually overflow by.
+  const max = maxHScroll(s, wideDoc, cols, 20);
+  assert.equal(max, 300 - (cols - 4), 'pan reach is the widest visible row minus the body rectangle');
+  s = panBy(s, 10_000, wideDoc, cols, 20);
+  assert.equal(s.hscroll, max, 'panning right clamps at the end of the diagram');
+  const panned = renderReviewFrame(s, 'doc.md', wideDoc, cols, 20);
+  assert.ok(Math.max(...widths(panned)) <= cols, 'panned rows stay inside the terminal too');
+  assert.ok(panned[3 + 2]!.includes('\u2039'), 'a diagram continuing to the left says so');
+  assert.ok(!panned[3 + 2]!.includes('\u203a'), 'the far edge of the diagram is reachable');
+  // Prose rows never move under panning — only overflowing rows do.
+  assert.equal(panned[3 + 4]!.replace(/\x1b\[[0-9;]*m/g, '').trim(), 'tail');
+  s = panBy(s, -10_000, wideDoc, cols, 20);
+  assert.equal(s.hscroll, 0, 'panning left returns to the diagram start');
 }
 
 console.log('terminal review tests passed');

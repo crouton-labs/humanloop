@@ -162,6 +162,12 @@ export interface TuiState {
   bodyMode: 'question' | 'visual';
   scrollOffset: number;
   bodyScrollOffsets: { question: number; visual: number };
+  /** Horizontal pan offset, in display cells, for body rows wider than the
+   *  card's rectangle (diagrams). Rows that fit never move. */
+  hscrollOffset: number;
+  /** Cells the current body can still pan right, published by the pre-render
+   *  clamp so the input layer knows whether h/l mean "pan" here at all. */
+  hscrollMax: number;
   /** The mounting host provided an active Ctrl+O editor callback. */
   editorAvailable: boolean;
   followUpAvailable: boolean;

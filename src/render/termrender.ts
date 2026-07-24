@@ -509,9 +509,15 @@ export interface RenderedDoc {
    *  (a bullet, a table row, a code line…); null for separator rows and rows
    *  of unmapped blocks. Same length as `lines`. */
   spans: ([number, number] | null)[];
-  /** Per top-level block: 1-indexed inclusive source-line bounds. Never empty. */
-  blocks: { start: number; end: number }[];
+  /** Per top-level block: its termrender block type plus 1-indexed inclusive
+   *  source-line bounds. Never empty. */
+  blocks: { type: string; start: number; end: number }[];
 }
+
+/** Block types allowed to use the full pane width instead of the prose cap:
+ *  a diagram is a picture, not prose, so a readability column limit only
+ *  shrinks it below what the pane could show. */
+const WIDE_BLOCK_TYPES = new Set(['mermaid']);
 
 /** Validate + normalize `doc render --line-map` JSON into a RenderedDoc.
  *  Null block bounds (a scanner edge case) are filled from neighbors and
@@ -531,10 +537,13 @@ function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
   const blockCount = p.blocks.length;
   if (!p.rows.every((r) => r === null || (typeof r === 'number' && Number.isInteger(r) && r >= 0 && r < blockCount))) return null;
   const totalSource = Math.max(1, source.split('\n').length);
-  const blocks: { start: number; end: number }[] = [];
+  const blocks: { type: string; start: number; end: number }[] = [];
   let prevEnd = 0;
-  for (const raw of p.blocks as Array<{ start?: number | null; end?: number | null } | null>) {
+  for (const raw of p.blocks as Array<{ type?: unknown; start?: number | null; end?: number | null } | null>) {
     if (typeof raw !== 'object' || raw === null) return null;
+    // The block type is what lets callers render diagrams differently from
+    // prose; a map without it cannot drive block-aware rendering at all.
+    if (typeof raw.type !== 'string' || raw.type === '') return null;
     // Bounds are integers or null — a fractional bound would otherwise flow
     // into a recorded comment's line/endLine instead of tripping tool-fault.
     if (raw.start != null && !Number.isInteger(raw.start)) return null;
@@ -543,10 +552,10 @@ function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
     const end = typeof raw.end === 'number' ? Math.max(raw.end, start) : start;
     const s = Math.max(1, Math.min(start, totalSource));
     const e = Math.max(s, Math.min(end, totalSource));
-    blocks.push({ start: s, end: e });
+    blocks.push({ type: raw.type, start: s, end: e });
     prevEnd = e;
   }
-  if (blocks.length === 0) blocks.push({ start: 1, end: totalSource });
+  if (blocks.length === 0) blocks.push({ type: 'paragraph', start: 1, end: totalSource });
   const spans: ([number, number] | null)[] = [];
   for (let r = 0; r < (p.spans as unknown[]).length; r++) {
     const raw = (p.spans as unknown[])[r];
@@ -581,18 +590,18 @@ function parseRenderedDoc(out: string, source: string): RenderedDoc | null {
  *  and spans exactly itself, so leaf anchoring degrades to true line-by-line. */
 function fallbackDocWithMap(md: string, width: number): RenderedDoc {
   const src = sanitize(md).split('\n');
-  const blocks: { start: number; end: number }[] = [];
+  const blocks: { type: string; start: number; end: number }[] = [];
   let openAt: number | null = null;
   for (let i = 0; i < src.length; i++) {
     if (src[i]!.trim() !== '') {
       if (openAt === null) openAt = i;
     } else if (openAt !== null) {
-      blocks.push({ start: openAt + 1, end: i });
+      blocks.push({ type: 'paragraph', start: openAt + 1, end: i });
       openAt = null;
     }
   }
-  if (openAt !== null) blocks.push({ start: openAt + 1, end: src.length });
-  if (blocks.length === 0) blocks.push({ start: 1, end: Math.max(1, src.length) });
+  if (openAt !== null) blocks.push({ type: 'paragraph', start: openAt + 1, end: src.length });
+  if (blocks.length === 0) blocks.push({ type: 'paragraph', start: 1, end: Math.max(1, src.length) });
   const lines: string[] = [];
   const rows: (number | null)[] = [];
   const spans: ([number, number] | null)[] = [];
@@ -657,6 +666,58 @@ export function renderMarkdownWithMap(md: string, width: number): RenderedDoc {
   // transient failure (e.g. a timeout) must not pin degraded block anchoring
   // for the rest of the session when a later re-render could succeed.
   return fallbackDocWithMap(md, width);
+}
+
+/**
+ * The shared block-aware mapped render: prose blocks keep the readability cap
+ * (`proseWidth`), while diagram blocks are re-rendered at the pane's full
+ * `paneWidth` and spliced back in by block index. Both surfaces (terminal
+ * review and the ask deck) go through this, so "which blocks may be wide" is
+ * decided once, from the renderer's own block types, never by heuristics on
+ * the emitted rows.
+ *
+ * Row order, block list and source spans are the narrow render's; only the
+ * rows OF a wide block are replaced, so anchoring stays source-based and
+ * unchanged.
+ */
+export function renderMarkdownBlockAware(md: string, proseWidth: number, paneWidth: number): RenderedDoc {
+  const base = renderMarkdownWithMap(md, proseWidth);
+  if (paneWidth <= proseWidth) return base;
+  if (!base.blocks.some((b) => WIDE_BLOCK_TYPES.has(b.type))) return base;
+  const wide = renderMarkdownWithMap(md, paneWidth);
+  // Same source, so the two renders describe the same top-level blocks. A
+  // disagreement means one of the two maps is degraded (renderer failure mid
+  // session) — render the narrow one rather than splice mismatched rows.
+  if (wide.blocks.length !== base.blocks.length) return base;
+
+  const lines: string[] = [];
+  const rows: (number | null)[] = [];
+  const spans: ([number, number] | null)[] = [];
+  for (let r = 0; r < base.lines.length; r++) {
+    const bi = base.rows[r] ?? null;
+    if (bi === null || !WIDE_BLOCK_TYPES.has(base.blocks[bi]!.type)) {
+      lines.push(base.lines[r]!);
+      rows.push(bi);
+      spans.push(base.spans[r] ?? null);
+      continue;
+    }
+    // First row of this block's run: emit the wide render's rows for the same
+    // block, then skip the narrow run (a block's rows are contiguous).
+    if (r === 0 || base.rows[r - 1] !== bi) {
+      for (let q = 0; q < wide.lines.length; q++) {
+        if (wide.rows[q] !== bi) continue;
+        lines.push(wide.lines[q]!);
+        rows.push(bi);
+        spans.push(wide.spans[q] ?? null);
+      }
+    }
+  }
+  return { lines, rows, spans, blocks: base.blocks };
+}
+
+/** Block-aware render as plain rows, for surfaces that do not anchor. */
+export function renderMarkdownBlockAwareLines(md: string, proseWidth: number, paneWidth: number): string[] {
+  return renderMarkdownBlockAware(md, proseWidth, paneWidth).lines;
 }
 
 /** Validate markdown via `termrender doc check`. */
