@@ -325,6 +325,8 @@ export type VisualResult =
 
 export interface VisualHandle {
   result: Promise<VisualResult>;
+  /** Stop watching from this UI without changing the durable request. */
+  detach(): void;
   /** Synchronous and idempotent. A canceled handle has no renderable result. */
   cancel(): void;
 }
@@ -357,6 +359,7 @@ export interface MountedPanel {
   handleKey(input: string, key: Key): void;
   render(): string[];
   handleResize(cols: number, rows: number): string[];
+  /** Detach this UI while leaving provider work alive for a later mount. */
   unmount(): void;
   loadDeck(deck: Deck, opts?: { progressPath?: string; visualProvider?: VisualProvider }): void;
   setFollowUpHandlers(available: boolean, onRequest?: (question: string) => void, onCancel?: () => void): void;

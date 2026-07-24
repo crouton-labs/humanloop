@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import type { Deck } from '../types.js';
 import { InboxController } from '../inbox/controller.js';
 import { claimTicket } from '../inbox/claim.js';
-import { atomicWriteJson, claimPath, deckPath, visualsDir } from '../inbox/convention.js';
+import { atomicWriteJson, deckPath, visualsDir } from '../inbox/convention.js';
 import { registerInboxRoot } from '../inbox/registry.js';
 import { completeDeck, submitDeck } from '../inbox/tickets.js';
-import { VISUAL_CAPABILITY, readVisualRequest, reconcileVisualRequestsForTicket, startVisualRequest, submitVisualResult } from '../inbox/visual.js';
+import { VISUAL_CAPABILITY, readVisualRequest, startVisualRequest, submitVisualResult } from '../inbox/visual.js';
+import { parseKeypress } from '../tui/terminal.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const handler = { command: process.execPath, args: ['-e', ''] };
@@ -79,7 +80,39 @@ controller.reloadSelectedDeck();
 const remounted = readdirSync(visualsDir(ticket.dir)).map((requestId) => readVisualRequest(root, ticket.dir, requestId)!).filter((request) => request.state === 'running');
 assert.equal(remounted.length, 2, 'reload re-derives a restored handler and starts only its new generation');
 controller.close();
-assert.ok(remounted.every((request) => readVisualRequest(root, ticket.dir, request.requestId)?.state === 'canceled'), 'unmount state-first cancels every unresolved current request');
+assert.ok(remounted.every((request) => readVisualRequest(root, ticket.dir, request.requestId)?.state === 'running'), 'closing the inbox leaves every unresolved request running');
+
+const reopened = new InboxController({ roots: [root], cols: 100, rows: 24 });
+reopened.activate();
+assert.equal(readdirSync(visualsDir(ticket.dir)).length, 6, 'reopening adopts the detached generation instead of duplicating requests');
+const readyRequest = remounted.find((request) => request.interactionId === 'one')!;
+assert.equal(submitVisualResult(root, ticket.dir, {
+  requestId: readyRequest.requestId,
+  generationId: readyRequest.generationId,
+  interactionId: readyRequest.interactionId,
+  interaction: readyRequest.interaction,
+  claimToken: readyRequest.claim.token,
+  status: 'ready',
+  markdown: 'saved Visual result',
+}).published, true);
+await tick();
+for (const bytes of ['\r', '\x1b[Z']) {
+  const parsed = parseKeypress(Buffer.from(bytes));
+  reopened.handleKey(parsed.input, parsed.key);
+}
+assert.ok(reopened.render().join('\n').includes('saved Visual result'), 'the adopted running request renders when its durable result arrives');
+reopened.close();
+
+const reopenedAfterResult = new InboxController({ roots: [root], cols: 100, rows: 24 });
+reopenedAfterResult.activate();
+assert.equal(readdirSync(visualsDir(ticket.dir)).length, 6, 'reopening after completion adopts the saved result without a new request');
+for (const bytes of ['\r', '\x1b[Z']) {
+  const parsed = parseKeypress(Buffer.from(bytes));
+  reopenedAfterResult.handleKey(parsed.input, parsed.key);
+}
+await tick();
+assert.ok(reopenedAfterResult.render().join('\n').includes('saved Visual result'), 'a completed Visual result survives closing and reopening');
+reopenedAfterResult.close();
 
 const completing = submitDeck({ root, id: 'completing', deck: deck(true) });
 const completingClaim = claimTicket(completing.dir);
@@ -92,21 +125,6 @@ const completingRequest = startVisualRequest({
 }).request;
 await completeDeck(completing.dir, [], completingClaim.token);
 assert.equal(readVisualRequest(root, completing.dir, completingRequest.requestId)?.state, 'canceled', 'primary completion persists Visual cancellation before publishing its owner delivery');
-
-const stale = submitDeck({ root, id: 'stale', deck: deck(true) });
-const staleClaim = claimTicket(stale.dir);
-assert.ok(staleClaim !== null);
-const staleRequest = startVisualRequest({
-  root,
-  dir: stale.dir,
-  claimToken: staleClaim.token,
-  request: { requestId: randomUUID(), generationId: randomUUID(), interaction: { id: 'one', title: 'One', options: [] } },
-}).request;
-atomicWriteJson(claimPath(stale.dir), { ...staleClaim, pid: 999_999_999, heartbeatAt: new Date().toISOString() });
-const staleReconciliation = reconcileVisualRequestsForTicket(root, stale.dir);
-await staleReconciliation.delivery;
-await tick();
-assert.equal(readVisualRequest(root, stale.dir, staleRequest.requestId)?.state, 'canceled', 'a stale claim retires its running Visual request without replaying its start');
 
 rmSync(temp, { recursive: true, force: true });
 console.log('visual controller tests passed');

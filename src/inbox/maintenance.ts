@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inboxRootsDirectory, listInboxRoots } from './registry.js';
 import { reconcileCompletions } from './completion.js';
-import { dispatchVisualCleanup, listVisualCleanupObligationsForRoot, reconcileStaleVisualRequestsForRoot, type VisualCleanupTask } from './visual.js';
+import { dispatchVisualCleanup, listVisualCleanupObligationsForRoot, type VisualCleanupTask } from './visual.js';
 
 const LEASE_STALE_MS = 300_000;
 
@@ -70,10 +70,6 @@ async function repairOnce(): Promise<VisualCleanupTask[]> {
   for (const root of allRoots) {
     try { await reconcileCompletions(root); } catch { /* receipt remains durable for the next pass */ }
   }
-  const retirements = allRoots.flatMap((root) => {
-    try { return reconcileStaleVisualRequestsForRoot(root).map((entry) => entry.delivery); } catch { return []; }
-  });
-  await Promise.all(retirements);
   const tasks = dueTasks(allRoots);
   await Promise.all(tasks.filter((task) => Date.parse(task.nextAttemptAt) <= Date.now()).map((task) => dispatchVisualCleanup(task.root, task.dir, task.requestId)));
   return dueTasks(roots());

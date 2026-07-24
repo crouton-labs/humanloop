@@ -7,16 +7,18 @@ interface PendingVisual {
   request: VisualRequest;
   resolve(result: VisualResult): void;
   cancelCount: number;
+  detachCount: number;
 }
 
 const pending: PendingVisual[] = [];
 const provider: VisualProvider = (request) => {
   let resolve!: (result: VisualResult) => void;
   const result = new Promise<VisualResult>((settle) => { resolve = settle; });
-  const entry: PendingVisual = { request, resolve, cancelCount: 0 };
+  const entry: PendingVisual = { request, resolve, cancelCount: 0, detachCount: 0 };
   pending.push(entry);
   return {
     result,
+    detach: () => { entry.detachCount += 1; },
     cancel: () => { entry.cancelCount += 1; },
   };
 };
@@ -60,7 +62,8 @@ assert.equal(pending.length, 4, 'resize performs no provider request');
 assert.ok(panel.render().join('\n').includes(renderMarkdown(markdown, 36)[0]!), 'resize locally reflows retained Markdown');
 panel.unmount();
 assert.equal(pending[2]!.cancelCount, 0, 'a settled request is not canceled during unmount');
-assert.equal(pending[3]!.cancelCount, 1, 'unmount cancels the remaining unresolved request');
+assert.equal(pending[3]!.cancelCount, 0, 'unmount leaves unresolved provider work alive');
+assert.equal(pending[3]!.detachCount, 1, 'unmount detaches the unresolved request from this panel');
 pending[3]!.resolve({ status: 'ready', markdown: 'late after unmount' });
 await settlePromises();
 assert.deepEqual(panel.render(), [], 'a late unmounted result remains non-renderable');

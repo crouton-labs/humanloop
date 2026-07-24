@@ -34,8 +34,7 @@ export {
   dispatchVisualCleanup,
   listVisualCleanupObligations,
   listVisualCleanupObligationsForRoot,
-  reconcileVisualRequestsForTicket,
-  reconcileStaleVisualRequestsForRoot,
+  latestVisualRequestForInteraction,
 } from './inbox/visual.js';
 export type {
   VisualClaimIdentity,
@@ -49,7 +48,6 @@ export type {
   VisualStartDeliveryResult,
   VisualCleanupDeliveryResult,
   VisualCleanupTask,
-  VisualRequestReconciliation,
 } from './inbox/visual.js';
 export { claimTicket, heartbeatClaim, releaseClaim, readTicketClaim } from './inbox/claim.js';
 export type { TicketClaim, ClaimOptions } from './inbox/claim.js';

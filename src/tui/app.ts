@@ -163,6 +163,15 @@ function retireVisuals(internals: PanelInternals): void {
   }
 }
 
+function detachVisuals(internals: PanelInternals): void {
+  internals.visualGeneration += 1;
+  const handles = [...internals.visualHandles.values()];
+  internals.visualHandles.clear();
+  for (const handle of handles) {
+    try { handle.detach(); } catch { /* UI teardown remains local even if provider cleanup fails */ }
+  }
+}
+
 function fireVisuals(internals: PanelInternals, interactions: Interaction[]): void {
   const provider = internals.visualProvider;
   if (provider === undefined) return;
@@ -294,7 +303,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     unmount() {
       if (!internals.mounted) return;
       internals.mounted = false;
-      retireVisuals(internals);
+      detachVisuals(internals);
       internals.state.persist = undefined;
     },
 

@@ -13,7 +13,7 @@ import { submitDeck, cancelTicketResult, finalizeDeck } from '../inbox/tickets.j
 import { scanInbox } from '../inbox/scan.js';
 import { startWebServer } from '../browser/server.js';
 import { atomicWriteJson, deckPath, followupRequestPath, followupResultPath } from '../inbox/convention.js';
-import { readFollowUp } from '../inbox/followup.js';
+import { readFollowUp, submitFollowUpResult } from '../inbox/followup.js';
 
 const key = (part: Partial<import('../tui/terminal.js').Key> = {}) => ({ ctrl: false, meta: false, upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, wordLeft: false, wordRight: false, home: false, end: false, pageUp: false, pageDown: false, del: false, return: false, newline: false, escape: false, tab: false, backTab: false, backspace: false, ...part });
 const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
@@ -142,10 +142,40 @@ assert.equal(readFollowUp(mixedFollowUp.dir).request?.state, 'running', 'an elig
 const mixedRequestId = readFollowUp(mixedFollowUp.dir).request?.requestId;
 atomicWriteJson(deckPath(mixedFollowUp.dir), { title: 'now notification-only', interactions: [{ id: 'notice', title: 'Notice', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] });
 mixedFollowUpController.reloadSelectedDeck();
-assert.ok(!mixedFollowUpController.render().join('\n').includes('follow-up'), 'a live reload removes follow-up availability when a mixed deck becomes notification-only');
+assert.ok(!mixedFollowUpController.render().join('\n').includes('?'), 'a live reload removes follow-up availability when a mixed deck becomes notification-only');
 mixedFollowUpController.handleKey('?', key());
 assert.equal(readFollowUp(mixedFollowUp.dir).request?.requestId, mixedRequestId, 'a notification-only reload cannot dispatch a follow-up callback');
 mixedFollowUpController.close();
+
+const persistentFollowUp = submitDeck({ root: followUpRoot, id: 'persistent-follow-up', deck: { title: 'persistent follow-up', interactions: [{ id: 'answer', title: 'Answer', options: [{ id: 'yes', label: 'Yes' }] }] } });
+const persistentController = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
+while (persistentController.snapshot().selectedDir !== persistentFollowUp.dir) persistentController.handleKey('j', key());
+persistentController.activate();
+persistentController.handleKey('?', key());
+for (const char of 'Explain this choice') persistentController.handleKey(char, key());
+persistentController.handleKey('', key({ return: true }));
+const persistentRequest = readFollowUp(persistentFollowUp.dir).request!;
+assert.equal(persistentRequest.state, 'running');
+persistentController.close();
+assert.equal(readFollowUp(persistentFollowUp.dir).request?.requestId, persistentRequest.requestId, 'closing the inbox preserves the running follow-up conversation');
+assert.equal(readFollowUp(persistentFollowUp.dir).request?.state, 'running', 'closing the inbox does not cancel follow-up work');
+
+const reopenedFollowUp = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
+while (reopenedFollowUp.snapshot().selectedDir !== persistentFollowUp.dir) reopenedFollowUp.handleKey('j', key());
+reopenedFollowUp.activate();
+reopenedFollowUp.handleKey('', key({ backTab: true }));
+assert.ok(reopenedFollowUp.render().join('\n').includes('consulting…'), 'reopening restores the running follow-up state');
+assert.equal(submitFollowUpResult(followUpRoot, persistentFollowUp.dir, { requestId: persistentRequest.requestId, status: 'ready', markdown: 'Durable follow-up answer' }).published, true);
+await new Promise((resolve) => setTimeout(resolve, 20));
+assert.ok(reopenedFollowUp.render().join('\n').includes('Durable follow-up answer'), 'the restored conversation renders its result');
+reopenedFollowUp.close();
+
+const reopenedFollowUpResult = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
+while (reopenedFollowUpResult.snapshot().selectedDir !== persistentFollowUp.dir) reopenedFollowUpResult.handleKey('j', key());
+reopenedFollowUpResult.activate();
+reopenedFollowUpResult.handleKey('', key({ backTab: true }));
+assert.ok(reopenedFollowUpResult.render().join('\n').includes('Durable follow-up answer'), 'the follow-up result survives another close and reopen');
+reopenedFollowUpResult.close();
 
 const replacement = submitDeck({ root, id: 'replace', deck: { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'drop', title: 'Drop', options: [{ id: 'no', label: 'No', shortcut: 'n' }] }] } });
 const live = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined });

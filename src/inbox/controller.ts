@@ -23,8 +23,8 @@ import { editBufferInEditor } from '../editor/roundtrip.js';
 import { cancelFollowUp, readFollowUp, requestFollowUp } from './followup.js';
 import {
   cancelVisualRequest,
+  latestVisualRequestForInteraction,
   readVisualResult,
-  reconcileVisualRequestsForTicket,
   startVisualRequest,
   VISUAL_CAPABILITY,
 } from './visual.js';
@@ -248,13 +248,6 @@ export class InboxController {
     this.claim = { dir: item.dir, token: claim.token };
     const deck = this.readDeck(item.dir);
     if (deck === undefined) { releaseClaim(item.dir, claim.token); this.claim = undefined; this.invalidate(); return; }
-    const root = ticketRoot(item.dir);
-    if (root !== null) {
-      // A newly acquired claim makes every older running generation stale
-      // before the panel can mint its own work. This only dispatches cleanup.
-      const retirement = reconcileVisualRequestsForTicket(root, item.dir, claim.token);
-      void retirement.delivery.finally(kickInboxMaintenance);
-    }
     // Notifications use the same canonical deck panel as every other deck:
     // opening is not acknowledgement; panel completion is.
     this.activeDeck = deck;
@@ -590,17 +583,25 @@ export class InboxController {
       watcher = undefined;
       settle(outcome);
     };
-    let started: ReturnType<typeof startVisualRequest>;
+    let durableRequestId: string;
+    let delivery: Promise<unknown> | undefined;
     try {
-      started = startVisualRequest({ root, dir, claimToken, request });
+      const adopted = latestVisualRequestForInteraction(root, dir, request.interaction);
+      if (adopted !== null) {
+        durableRequestId = adopted.requestId;
+      } else {
+        const started = startVisualRequest({ root, dir, claimToken, request });
+        durableRequestId = started.request.requestId;
+        delivery = started.delivery;
+      }
     } catch (error) {
       finish({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-      return { result, cancel: () => {} };
+      return { result, detach: () => {}, cancel: () => {} };
     }
     const reread = () => {
       if (settled) return;
       try {
-        const outcome = readVisualResult(root, dir, request.requestId);
+        const outcome = readVisualResult(root, dir, durableRequestId);
         if (outcome === null) return;
         finish(outcome.status === 'ready'
           ? { status: 'ready', markdown: outcome.markdown }
@@ -612,19 +613,19 @@ export class InboxController {
     try {
       // Install the watch before the first durable reread so a publication in
       // the narrow setup window is either observed or found by that reread.
-      watcher = watch(join(visualsDir(dir), request.requestId), () => reread());
+      watcher = watch(join(visualsDir(dir), durableRequestId), () => reread());
       watcher.once('error', (error) => finish({ status: 'error', error: error.message }));
       reread();
     } catch (error) {
       finish({ status: 'error', error: error instanceof Error ? error.message : String(error) });
     }
-    void started.delivery.then(reread, (error) => finish({ status: 'error', error: error instanceof Error ? error.message : String(error) }));
+    void delivery?.then(reread, (error) => finish({ status: 'error', error: error instanceof Error ? error.message : String(error) }));
     return {
       result,
+      detach: () => finish({ status: 'error', error: 'Visual view detached' }),
       cancel: () => {
-        watcher?.close();
-        watcher = undefined;
-        void cancelVisualRequest(root, dir, request.requestId).finally(kickInboxMaintenance);
+        finish({ status: 'error', error: 'Visual request canceled' });
+        void cancelVisualRequest(root, dir, durableRequestId).finally(kickInboxMaintenance);
       },
     };
   }
