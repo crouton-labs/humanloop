@@ -1,16 +1,26 @@
 ---
 kind: knowledge
-name: humanloop
-when-and-why-to-read: When working in humanloop, this knowledge should be read because its ESM import-extension and yalc-link conventions keep changes from compiling clean yet failing at runtime or shipping a broken package to consumers.
-short-form: Constraints
+when-and-why-to-read: When working in Humanloop, this knowledge should be read
+  because its dependency and release boundaries determine whether renderer and
+  SDK fixes actually reach shipped consumers.
+short-form: Humanloop constraints and renderer release chain
 system-prompt-visibility: content
-file-read-visibility: content
+file-read-visibility: none
+name: humanloop
 ---
 
 ## Constraints
-- All relative imports must use `.js` extensions (e.g. `import foo from './foo.js'`), even in `.ts` source files. `"module": "Node16"` + `"type": "module"` requires this — omitting the extension compiles silently but fails at runtime.
 
-## Consumer convention (sisyphus, crouter, downstream)
-- Committed `package.json` deps for `@crouton-kit/humanloop` say `"latest"` — npm install always pulls the newest publish. The `minimumReleaseAgeExclude` entry in the consumer's `pnpm-workspace.yaml` bypasses pnpm's 24h release-age filter so fresh CI publishes resolve immediately.
-- For local iteration against an unpublished humanloop, use **`yalc link`, not `yalc add`**. `cd humanloop && yalc publish`, then `cd <consumer> && yalc link @crouton-kit/humanloop`. `yalc link` symlinks the package into `node_modules/` without touching `package.json` — so the committed `"latest"` reference stays clean and you never need to remove/re-add. Switch back with `yalc remove` (drops the symlink, npm-installed version resurfaces).
-- `.yalc/` directory and `yalc.lock` belong in every consumer's `.gitignore`. If `file:.yalc/...` ever appears in a committed `package.json`, that's `yalc add` being used by mistake — switch the workflow to `yalc link` and `git rm -r .yalc yalc.lock` from the consumer.
+- All relative imports must use `.js` extensions (for example, `import foo from './foo.js'`), even in `.ts` source files. `"module": "Node16"` plus `"type": "module"` requires this; omitting the extension compiles silently but fails at runtime.
+
+## Renderer ownership and release handoff
+
+- Humanloop is the sole org-wide termrender binding. It pins the PyPI release in `src/render/version.ts` and provisions that exact version in its managed venv; downstream packages must not install or pin termrender independently.
+- A published termrender fix is not delivered until Humanloop bumps `TERMRENDER_VERSION`, verifies the managed-renderer path, and publishes a new `@crouton-kit/humanloop` release.
+- After Humanloop publishes, update direct consumers according to their actual dependency contract: crouter pins `@crouton-kit/humanloop` to an exact version in both `package.json` and `package-lock.json`; Sisyphus declares `latest` but its `pnpm-lock.yaml` still pins the installed resolution and must be refreshed when shipping the new renderer. Do not claim Northlight consumes Humanloop directly.
+- Northlight receives this renderer transitively through the crouter package baked into `apps/crouter-guest`. To ship the fix there, first publish crouter with the new Humanloop pin, then update Northlight's `apps/crouter-guest/build.env` `CRTR_VERSION` and rebuild/roll the guest image. Keep local-docker and Blaxel on the same image.
+
+## Local cross-package development
+
+- Use `yalc link`, never `yalc add`, for an unpublished Humanloop build: run `yalc publish` in Humanloop, then `yalc link @crouton-kit/humanloop` in the consumer. `yalc link` leaves the committed dependency spec clean; remove it with `yalc remove @crouton-kit/humanloop`.
+- `.yalc/` and `yalc.lock` belong in consumer `.gitignore` files. A committed `file:.yalc/...` dependency means `yalc add` was used accidentally and must be removed before publishing.
