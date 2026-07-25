@@ -714,7 +714,12 @@ export class InboxController {
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
     const source = sourceLabel(selected.source);
-    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind}${source === undefined ? '' : ` · ${source}`}${RESET}`];
+    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, ''];
+    if (selected.kind === 'review') {
+      for (const rendered of renderMarkdown(selected.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+      lines.push('');
+    }
+    lines.push(`  ${DIM}${selected.kind}${source === undefined ? '' : ` · ${source}`}${RESET}`);
     if (selected.kind === 'review') {
       lines.push('', `  ${DIM}${selected.file}${RESET}`);
       const draft = readJson<{ comments?: unknown[] }>(progressPath(selected.dir))?.comments;

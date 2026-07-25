@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,7 @@ import { InboxController } from '../inbox/controller.js';
 import { buildInboxLines } from '../inbox/tui.js';
 import { registerInboxRoot } from '../inbox/registry.js';
 import { claimTicket } from '../inbox/claim.js';
-import { submitDeck, cancelTicketResult, finalizeDeck } from '../inbox/tickets.js';
+import { submitDeck, submitReview, cancelTicketResult, finalizeDeck } from '../inbox/tickets.js';
 import { scanInbox } from '../inbox/scan.js';
 import { startWebServer } from '../browser/server.js';
 import { atomicWriteJson, deckPath, followupRequestPath, followupResultPath } from '../inbox/convention.js';
@@ -64,6 +64,14 @@ active.rescan();
 assert.equal(active.snapshot().screen, 'list', 'cancellation invalidation returns to list');
 assert.equal(active.snapshot().selectedDir !== first.dir, true);
 active.close();
+
+const reviewSource = join(temp, 'review-source.md');
+writeFileSync(reviewSource, 'Review body stays below the descriptor context.\n');
+const reviewPreview = submitReview({ root, id: 'review-preview', review: { file: reviewSource, title: 'Review source', subtitle: 'Review this source before approving the release.', source: { sessionName: 'Release planning' } } });
+const reviewController = new InboxController({ roots: [root], cols: 100, rows: 24 });
+while (reviewController.snapshot().selectedDir !== reviewPreview.dir) reviewController.handleKey('j', key());
+assert.ok(reviewController.render().join('\n').includes('Review this source before approving the release.'), 'passive review detail renders its authored subtitle');
+reviewController.close();
 
 const navigation = submitDeck({ root, id: 'navigation', deck: { title: 'navigation', interactions: [
   { id: 'one', title: 'One', subtitle: 'One requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
