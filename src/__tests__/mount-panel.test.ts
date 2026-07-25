@@ -51,7 +51,7 @@ const deckA: Deck = {
     },
     {
       id: 'q2',
-      title: 'Migration tool',
+      title: 'Migration tool', subtitle: 'Migration tool requires your attention.',
       options: [
         { id: 'prisma', label: 'Prisma', shortcut: 'p' },
         { id: 'drizzle', label: 'Drizzle', shortcut: 'd' },
@@ -96,7 +96,7 @@ panelB.unmount();
 
 // ── Test 4: question and context modes retain independent scroll positions ───
 const scrollPanel = mountPanel({
-  deck: { interactions: [{ id: 'scroll', title: 'Separate scroll positions', body: Array.from({ length: 40 }, (_, i) => `- question ${i}`).join('\n'), options: [] }] },
+  deck: { interactions: [{ id: 'scroll', title: 'Separate scroll positions', subtitle: 'Separate scroll positions requires your attention.', body: Array.from({ length: 40 }, (_, i) => `- question ${i}`).join('\n'), options: [] }] },
   cols: 50,
   rows: 12,
   onFollowUpRequest: () => {},
@@ -121,19 +121,19 @@ scrollPanel.unmount();
 const roundTripDeck: Deck = {
   interactions: [
     {
-      id: 'i1', title: 'Review PR',
+      id: 'i1', title: 'Review PR', subtitle: 'Review PR requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }, { id: 'reject', label: 'Reject', shortcut: 'r' }],
       allowFreetext: true,
       kind: 'decision',
     },
     {
-      id: 'i2', title: 'Pick ORM',
+      id: 'i2', title: 'Pick ORM', subtitle: 'Pick ORM requires your attention.',
       options: [{ id: 'opt-0', label: 'Prisma', shortcut: 'p' }, { id: 'opt-1', label: 'Drizzle', shortcut: 'z' }],
       allowFreetext: true,
       kind: 'decision',
     },
     {
-      id: 'i3', title: 'Rate limit',
+      id: 'i3', title: 'Rate limit', subtitle: 'Rate limit requires your attention.',
       options: [],
       allowFreetext: true,
       kind: 'context',
@@ -187,8 +187,8 @@ assert.deepEqual(capturedResponses2, [
 const deckB: Deck = {
   title: 'Deck B',
   interactions: [
-    { id: 'b1', title: 'First B item', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
-    { id: 'b2', title: 'Second B item', options: [] , allowFreetext: true },
+    { id: 'b1', title: 'First B item', subtitle: 'First B item requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
+    { id: 'b2', title: 'Second B item', subtitle: 'Second B item requires your attention.', options: [] , allowFreetext: true },
   ],
 };
 
@@ -208,12 +208,12 @@ loadDeckPanel.unmount();
 const deckSingle: Deck = {
   interactions: [
     {
-      id: 's1', title: 'Single item',
+      id: 's1', title: 'Single item', subtitle: 'Single item requires your attention.',
       options: [{ id: 'opt', label: 'Option', shortcut: 'o' }],
       allowFreetext: true,
     },
     {
-      id: 's2', title: 'Second item',
+      id: 's2', title: 'Second item', subtitle: 'Second item requires your attention.',
       options: [{ id: 'opt2', label: 'Option2', shortcut: 'o' }],
     },
   ],
@@ -250,7 +250,7 @@ assert.equal(ckPanel.canAcceptHostKeys(), false, 'after unmount: canAcceptHostKe
 
 const freetextOnlyDeck: Deck = {
   interactions: [
-    { id: 'q1', title: 'Optional notes', options: [], allowFreetext: true },
+    { id: 'q1', title: 'Optional notes', subtitle: 'Optional notes requires your attention.', options: [], allowFreetext: true },
   ],
 };
 
@@ -281,7 +281,7 @@ ftPanel.unmount();
 const commentDeck: Deck = {
   interactions: [
     {
-      id: 'c1', title: 'Approve deploy?',
+      id: 'c1', title: 'Approve deploy?', subtitle: 'Approve deploy? requires your attention.',
       options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }],
       allowFreetext: true,
     },
@@ -319,7 +319,7 @@ cmPanel.unmount();
 const shortcutTypingDeck: Deck = {
   interactions: [
     {
-      id: 'q1', title: 'Approve?',
+      id: 'q1', title: 'Approve?', subtitle: 'Approve? requires your attention.',
       options: [
         { id: 'yes', label: 'Yes', shortcut: 'y' },
         { id: 'no', label: 'No', shortcut: 'n' },
@@ -362,7 +362,7 @@ stPanel.unmount();
 const attachDeck: Deck = {
   interactions: [
     {
-      id: 'a1', title: 'Approve?',
+      id: 'a1', title: 'Approve?', subtitle: 'Approve? requires your attention.',
       options: [
         { id: 'yes', label: 'Yes', shortcut: 'y' },
         { id: 'no', label: 'No', shortcut: 'n' },
@@ -432,7 +432,7 @@ tabPanel.unmount();
 const multiDeck: Deck = {
   interactions: [
     {
-      id: 'ms1', title: 'Pick toppings', multiSelect: true,
+      id: 'ms1', title: 'Pick toppings', subtitle: 'Pick toppings requires your attention.', multiSelect: true,
       options: [
         { id: 'mush', label: 'Mushroom', shortcut: 'a' },
         { id: 'onion', label: 'Onion', shortcut: 'b' },
@@ -476,7 +476,7 @@ msPanel.unmount();
 const preAnsweredDeck: Deck = {
   interactions: [
     {
-      id: 'r1', title: 'Carry-over requirement',
+      id: 'r1', title: 'Carry-over requirement', subtitle: 'Carry-over requirement requires your attention.',
       options: [
         { id: 'approve', label: 'Approve', shortcut: 'a' },
         { id: 'reject',  label: 'Reject',  shortcut: 'r' },
@@ -485,7 +485,7 @@ const preAnsweredDeck: Deck = {
       preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
     },
     {
-      id: 'r2', title: 'Fresh requirement',
+      id: 'r2', title: 'Fresh requirement', subtitle: 'Fresh requirement requires your attention.',
       options: [
         { id: 'approve', label: 'Approve', shortcut: 'a' },
         { id: 'reject',  label: 'Reject',  shortcut: 'r' },
@@ -511,17 +511,17 @@ paPanel.unmount();
 const skipStartDeck: Deck = {
   interactions: [
     {
-      id: 's1', title: 'Carried-1',
+      id: 's1', title: 'Carried-1', subtitle: 'Carried-1 requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
       preAnswered: { selectedOptionId: 'approve' },
     },
     {
-      id: 's2', title: 'Carried-2',
+      id: 's2', title: 'Carried-2', subtitle: 'Carried-2 requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
       preAnswered: { selectedOptionId: 'approve' },
     },
     {
-      id: 's3', title: 'Needs answer',
+      id: 's3', title: 'Needs answer', subtitle: 'Needs answer requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
   ],
@@ -546,16 +546,16 @@ startPanel.unmount();
 const skipMidDeck: Deck = {
   interactions: [
     {
-      id: 'm1', title: 'Fresh-1',
+      id: 'm1', title: 'Fresh-1', subtitle: 'Fresh-1 requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
     {
-      id: 'm2', title: 'Carried',
+      id: 'm2', title: 'Carried', subtitle: 'Carried requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
       preAnswered: { selectedOptionId: 'approve' },
     },
     {
-      id: 'm3', title: 'Fresh-2',
+      id: 'm3', title: 'Fresh-2', subtitle: 'Fresh-2 requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
   ],
@@ -597,16 +597,16 @@ skipMidPanel.unmount();
 const npReachDeck: Deck = {
   interactions: [
     {
-      id: 'n1', title: 'Fresh',
+      id: 'n1', title: 'Fresh', subtitle: 'Fresh requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
     {
-      id: 'n2', title: 'Carried',
+      id: 'n2', title: 'Carried', subtitle: 'Carried requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
       preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
     },
     {
-      id: 'n3', title: 'Also fresh',
+      id: 'n3', title: 'Also fresh', subtitle: 'Also fresh requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
   ],
@@ -637,7 +637,7 @@ npPanel.unmount();
 const overrideDeck: Deck = {
   interactions: [
     {
-      id: 'o1', title: 'Carried, may override',
+      id: 'o1', title: 'Carried, may override', subtitle: 'Carried, may override requires your attention.',
       options: [
         { id: 'approve', label: 'Approve', shortcut: 'a' },
         { id: 'reject',  label: 'Reject',  shortcut: 'r' },
@@ -645,7 +645,7 @@ const overrideDeck: Deck = {
       preAnswered: { selectedOptionId: 'approve', label: 'Previously approved' },
     },
     {
-      id: 'o2', title: 'Fresh',
+      id: 'o2', title: 'Fresh', subtitle: 'Fresh requires your attention.',
       options: [{ id: 'approve', label: 'Approve', shortcut: 'a' }],
     },
   ],
@@ -687,7 +687,7 @@ ovPanel.unmount();
 const optCommentDeck: Deck = {
   interactions: [
     {
-      id: 'oc1', title: 'Pick toppings (with notes)', multiSelect: true,
+      id: 'oc1', title: 'Pick toppings (with notes)', subtitle: 'Pick toppings (with notes) requires your attention.', multiSelect: true,
       allowFreetext: true,
       options: [
         { id: 'mush', label: 'Mushroom', shortcut: 'a' },
@@ -754,7 +754,7 @@ ocPanel.unmount();
 const confirmDeck: Deck = {
   interactions: [
     {
-      id: 'cs1', title: 'Pick toppings', multiSelect: true,
+      id: 'cs1', title: 'Pick toppings', subtitle: 'Pick toppings requires your attention.', multiSelect: true,
       options: [
         { id: 'mush', label: 'Mushroom', shortcut: 'a' },
         { id: 'onion', label: 'Onion', shortcut: 'b' },
@@ -807,7 +807,7 @@ confirmPanel.unmount();
 const emptyDeck: Deck = {
   interactions: [
     {
-      id: 'es1', title: 'Pick toppings', multiSelect: true,
+      id: 'es1', title: 'Pick toppings', subtitle: 'Pick toppings requires your attention.', multiSelect: true,
       options: [
         { id: 'mush', label: 'Mushroom', shortcut: 'a' },
         { id: 'onion', label: 'Onion', shortcut: 'b' },
@@ -859,7 +859,7 @@ const ALT_BACKSPACE = mkKey({ backspace: true, meta: true });
 
 function freetextAfter(typed: string, ops: Key[]): string | undefined {
   const deck: Deck = {
-    interactions: [{ id: 'w1', title: 'Notes', options: [], allowFreetext: true }],
+    interactions: [{ id: 'w1', title: 'Notes', subtitle: 'Notes requires your attention.', options: [], allowFreetext: true }],
   };
   let captured: InteractionResponse[] = [];
   const p = mountPanel({ deck, cols: 80, rows: 24, onComplete: (r) => { captured = r; } });
@@ -901,7 +901,7 @@ assert.equal(
 
 function freetextRaw(typed: string, rawOps: string[]): string | undefined {
   const deck: Deck = {
-    interactions: [{ id: 'w2', title: 'Notes', options: [], allowFreetext: true }],
+    interactions: [{ id: 'w2', title: 'Notes', subtitle: 'Notes requires your attention.', options: [], allowFreetext: true }],
   };
   let captured: InteractionResponse[] = [];
   const p = mountPanel({ deck, cols: 80, rows: 24, onComplete: (r) => { captured = r; } });
@@ -950,7 +950,7 @@ assert.equal(
 const longBodyDeck: Deck = {
   interactions: [{
     id: 'scroll-comment',
-    title: 'Scrollable question',
+    title: 'Scrollable question', subtitle: 'Scrollable question requires your attention.',
     body: Array.from({ length: 40 }, (_, i) => `body line ${i + 1}`).join('\n'),
     options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }],
     allowFreetext: true,
@@ -991,7 +991,7 @@ assert.deepEqual(
 scrollCommentPanel.unmount();
 
 // ── Test 24: host capability hints are truthful ───────────────────────────────
-const capabilityDeck: Deck = { interactions: [{ id: 'note', title: 'Note', options: [], allowFreetext: true }] };
+const capabilityDeck: Deck = { interactions: [{ id: 'note', title: 'Note', subtitle: 'Note requires your attention.', options: [], allowFreetext: true }] };
 const noCapabilityPanel = mountPanel({ deck: capabilityDeck, cols: 80, rows: 20 });
 assert.ok(!noCapabilityPanel.render().join('\n').includes('expand'), 'a deck without a visual generator does not advertise expansion');
 noCapabilityPanel.handleKey('r', mkKey({}));
@@ -1006,7 +1006,7 @@ assert.equal(editorRequests, 1, 'Ctrl+O delegates only through the host editor c
 editorCapabilityPanel.unmount();
 
 // ── Test 25: submitted follow-up is presentation-only while pending ──────────
-const followUpDeck: Deck = { interactions: [{ id: 'follow-up', title: 'Choose', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] }] };
+const followUpDeck: Deck = { interactions: [{ id: 'follow-up', title: 'Choose', subtitle: 'Choose requires your attention.', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] }] };
 let submittedFollowUp = '';
 let followUpPanel!: ReturnType<typeof mountPanel>;
 followUpPanel = mountPanel({

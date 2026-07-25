@@ -27,8 +27,8 @@ const deck = (visual = false): Deck => ({
   title: 'Visual decisions',
   source: visual ? { visual: VISUAL_CAPABILITY } : {},
   interactions: [
-    { id: 'one', title: 'One', options: [] },
-    { id: 'two', title: 'Two', options: [] },
+    { id: 'one', title: 'One', subtitle: 'One requires your attention.', options: [] },
+    { id: 'two', title: 'Two', subtitle: 'Two requires your attention.', options: [] },
   ],
 });
 
@@ -133,7 +133,7 @@ const completingRequest = startVisualRequest({
   root,
   dir: completing.dir,
   claimToken: completingClaim.token,
-  request: { requestId: randomUUID(), generationId: randomUUID(), interaction: { id: 'one', title: 'One', options: [] } },
+  request: { requestId: randomUUID(), generationId: randomUUID(), interaction: { id: 'one', title: 'One', subtitle: 'One requires your attention.', options: [] } },
 }).request;
 await completeDeck(completing.dir, [], completingClaim.token);
 assert.equal(readVisualRequest(root, completing.dir, completingRequest.requestId)?.state, 'canceled', 'primary completion persists Visual cancellation before publishing its owner delivery');

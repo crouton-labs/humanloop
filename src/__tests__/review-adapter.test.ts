@@ -17,7 +17,7 @@ writeFileSync(editor, '#!/bin/sh\nif [ "$1" = "--version" ]; then exit 0; fi\nsl
 chmodSync(editor, 0o755);
 
 registerInboxRoot({ root, owner: 'review-adapter-test' });
-const ticket = submitReview({ root, id: 'race', review: { file: source, title: 'Review', source: {} } });
+const ticket = submitReview({ root, id: 'race', review: { file: source, title: 'Review', subtitle: 'Review findings require your decision.', source: {} } });
 const claim = claimTicket(ticket.dir);
 assert.notEqual(claim, null);
 
@@ -43,7 +43,7 @@ assert.deepEqual(delivered, canceled.result, 'the controller callback must recei
 const closeEditor = join(temp, 'close-editor');
 writeFileSync(closeEditor, '#!/bin/sh\nif [ "$1" = "--version" ]; then exit 0; fi\ntouch "$HL_CLOSE_FLAG"\n');
 chmodSync(closeEditor, 0o755);
-const closeTicket = submitReview({ root, id: 'close', review: { file: source, title: 'Close', source: {} } });
+const closeTicket = submitReview({ root, id: 'close', review: { file: source, title: 'Close', subtitle: 'Closing leaves this review pending.', source: {} } });
 const closeClaim = claimTicket(closeTicket.dir);
 assert.notEqual(closeClaim, null);
 let closed = false;

@@ -55,14 +55,10 @@ export function ItemReview({ state, dispatch, scrollRef, multiInteraction }: Ite
         )}
       </div>
 
-      {(interaction.subtitle !== undefined || interaction.body !== undefined) && (
-        <div ref={scrollRef} className="max-h-[45vh] overflow-y-auto rounded-md border border-border bg-card p-4">
-          {interaction.subtitle !== undefined && <Markdown>{interaction.subtitle}</Markdown>}
-          {interaction.body !== undefined && (
-            <Markdown className={interaction.subtitle !== undefined ? 'mt-4' : undefined}>{interaction.body}</Markdown>
-          )}
-        </div>
-      )}
+      <div ref={scrollRef} className="max-h-[45vh] overflow-y-auto rounded-md border border-border bg-card p-4">
+        <Markdown>{interaction.subtitle}</Markdown>
+        {interaction.body !== undefined && <Markdown className="mt-4">{interaction.body}</Markdown>}
+      </div>
 
       {state.inputMode !== null ? (
         <InputPanel

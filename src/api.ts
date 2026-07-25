@@ -7,7 +7,7 @@ import type {
 import { resolveInteractionDir } from './tui/app.js';
 import { InboxController } from './inbox/controller.js';
 import { deckPath, atomicWriteJson, stampCanvasNode } from './inbox/convention.js';
-import { resolveDeckBodyPaths } from './inbox/deck-schema.js';
+import { resolveDeckBodyPaths, validateDeck } from './inbox/deck-schema.js';
 import { notifyDeck } from './inbox/deck-factories.js';
 import { buildSummary } from './summary.js';
 
@@ -37,7 +37,7 @@ export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnv
   // resolved BEFORE the deck is ever written to disk, so every reader
   // downstream (terminal render, the live-reload poller, the browser server)
   // only ever sees a plain `body`.
-  deck = resolveDeckBodyPaths(deck, dir);
+  deck = validateDeck(resolveDeckBodyPaths(deck, dir));
   stampCanvasNode(deck);
   atomicWriteJson(deckPath(dir), deck);
 
@@ -59,8 +59,8 @@ export async function ask(deck: Deck, opts: AskOpts = {}): Promise<ResolutionEnv
 }
 
 /** Sugar: a single `kind:'notify'` acknowledgement. */
-export async function notify(title: string, body?: string): Promise<void> {
-  const deck = notifyDeck(title, body !== undefined ? { body } : {});
+export async function notify(title: string, subtitle: string, body?: string): Promise<void> {
+  const deck = notifyDeck(title, { subtitle, ...(body !== undefined ? { body } : {}) });
   await ask(deck, {});
 }
 

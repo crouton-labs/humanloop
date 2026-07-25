@@ -24,8 +24,8 @@ const provider: VisualProvider = (request) => {
 };
 
 const deck = (prefix: string): Deck => ({ interactions: [
-  { id: `${prefix}-one`, title: `${prefix} one`, options: [] },
-  { id: `${prefix}-two`, title: `${prefix} two`, options: [] },
+  { id: `${prefix}-one`, title: `${prefix} one`, subtitle: `${prefix} one requires your attention.`, options: [] },
+  { id: `${prefix}-two`, title: `${prefix} two`, subtitle: `${prefix} two requires your attention.`, options: [] },
 ] });
 const send = (panel: ReturnType<typeof mountPanel>, bytes: string) => {
   const { input, key } = parseKeypress(Buffer.from(bytes));
@@ -70,7 +70,7 @@ assert.deepEqual(panel.render(), [], 'a late unmounted result remains non-render
 
 let standaloneResponses: InteractionResponse[] = [];
 const standalone = mountPanel({
-  deck: { interactions: [{ id: 'standalone', title: 'Standalone', options: [{ id: 'yes', label: 'Yes' }] }] },
+  deck: { interactions: [{ id: 'standalone', title: 'Standalone', subtitle: 'Standalone requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] },
   cols: 80,
   rows: 20,
   onComplete: (responses) => { standaloneResponses = responses; },

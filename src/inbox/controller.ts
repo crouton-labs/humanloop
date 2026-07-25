@@ -713,7 +713,8 @@ export class InboxController {
   private passiveDetailLines(width: number): string[] {
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
-    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind} · ${sourceLabel(selected.source)}${RESET}`];
+    const source = sourceLabel(selected.source);
+    const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, '', `  ${DIM}${selected.kind}${source === undefined ? '' : ` · ${source}`}${RESET}`];
     if (selected.kind === 'review') {
       lines.push('', `  ${DIM}${selected.file}${RESET}`);
       const draft = readJson<{ comments?: unknown[] }>(progressPath(selected.dir))?.comments;
@@ -728,7 +729,7 @@ export class InboxController {
       if (deck !== null) {
         for (const interaction of deck.interactions) {
           lines.push('', `  ${BOLD}${interaction.title}${RESET}`);
-          if (interaction.subtitle) for (const rendered of renderMarkdown(interaction.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+          for (const rendered of renderMarkdown(interaction.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
           if (interaction.body) for (const rendered of renderMarkdown(interaction.body, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
           for (const option of interaction.options) lines.push(`    ${DIM}• ${option.label}${RESET}`);
         }
@@ -819,6 +820,5 @@ function isAnswerBearingDeck(deck: Deck): boolean {
   return deck.interactions.some((interaction) => interaction.kind !== 'notify');
 }
 
-/** Prefer a human-meaningful source label, falling back to the raw node id
- *  before an opaque "unknown source" — a crouter ticket always carries nodeId. */
-function sourceLabel(source: DeckSource): string { return source.sessionName ?? source.askedBy ?? source.nodeId ?? 'unknown source'; }
+/** Machine node IDs remain stored for routing, but passive detail shows only authored labels. */
+function sourceLabel(source: DeckSource): string | undefined { return source.sessionName?.trim() || source.askedBy?.trim() || undefined; }

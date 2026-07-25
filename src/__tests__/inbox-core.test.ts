@@ -11,6 +11,7 @@ import { claimTicket } from '../inbox/claim.js';
 import { scanInbox } from '../inbox/scan.js';
 import { atomicWriteJson, deliveryPath, progressPath, responsePath, reviewPath } from '../inbox/convention.js';
 import { validateDeck } from '../inbox/deck-schema.js';
+import { ask } from '../api.js';
 import { dispatchCompletion, reconcileCompletions } from '../inbox/completion.js';
 import type { Deck, FeedbackResult } from '../types.js';
 
@@ -19,11 +20,21 @@ process.env.XDG_STATE_HOME = join(temp, 'state');
 const root = join(temp, 'tickets');
 const source = join(temp, 'source.md');
 writeFileSync(source, '# Source\n');
-const deck = (blockedSince: string): Deck => ({ title: 'A deck', source: { blockedSince, nodeId: 'node-1' }, interactions: [{ id: 'go', title: 'Go?', options: [{ id: 'yes', label: 'Yes' }] }] });
+const deck = (blockedSince: string): Deck => ({ title: 'A deck', source: { blockedSince, nodeId: 'node-1' }, interactions: [{ id: 'go', title: 'Go?', subtitle: 'Go? requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] });
 assert.throws(
-  () => validateDeck({ interactions: [{ id: 'go', title: 'Go?', options: [] }] }),
+  () => validateDeck({ interactions: [{ id: 'go', title: 'Go?', subtitle: 'Go? requires your attention.', options: [] }] }),
   /title/,
   'a deck must carry its own explicit inbox title',
+);
+assert.throws(
+  () => validateDeck({ title: 'Missing subtitle', interactions: [{ id: 'go', title: 'Go?', options: [] }] }),
+  /subtitle/,
+  'a deck interaction without an authored subtitle is invalid',
+);
+await assert.rejects(
+  () => ask({ title: 'Missing subtitle', interactions: [{ id: 'go', title: 'Go?', options: [] }] } as never, { dir: join(temp, 'invalid-api-deck') }),
+  /subtitle/,
+  'ask validates before persisting a supplied deck',
 );
 async function waitFor(paths: string[]): Promise<void> {
   for (let attempts = 0; !paths.every(existsSync); attempts++) {
@@ -45,13 +56,14 @@ assert.equal(listInboxRoots()[0]?.available, true);
 
 const oldDeck = submitDeck({ root, id: 'z-last', deck: deck('2025-01-01T00:00:00.000Z') });
 const newDeck = submitDeck({ root, id: 'a-first', deck: deck('2025-01-02T00:00:00.000Z') });
-const review = submitReview({ root, id: 'review', review: { file: source, title: 'Review source', source: { nodeId: 'node-1' }, blockedSince: '2025-01-02T00:00:00.000Z' } });
-assert.throws(() => submitReview({ root, id: 'bad-review', review: { file: join(temp, 'missing.md'), title: 'Bad', source: {} } }), /existing absolute markdown/);
+const review = submitReview({ root, id: 'review', review: { file: source, title: 'Review source', subtitle: 'Review findings require your decision.', source: { nodeId: 'node-1' }, blockedSince: '2025-01-02T00:00:00.000Z' } });
+assert.throws(() => submitReview({ root, id: 'missing-review-subtitle', review: { file: source, title: 'Missing subtitle', source: {} } as never }), /subtitle/, 'a review without an authored subtitle is invalid');
+assert.throws(() => submitReview({ root, id: 'bad-review', review: { file: join(temp, 'missing.md'), title: 'Bad', subtitle: 'This invalid review must be rejected.', source: {} } }), /existing absolute markdown/);
 assert.equal(existsSync(join(root, 'bad-review')), false, 'invalid submission does not strand an id');
 const prepared = join(root, 'prepared');
 mkdirSync(prepared);
 writeFileSync(join(prepared, 'body.md'), 'prepared body');
-const preparedTicket = submitDeck({ root, id: 'prepared', deck: { ...deck('2025-01-02T00:00:00.000Z'), interactions: [{ id: 'go', title: 'Go?', bodyPath: 'body.md', options: [{ id: 'yes', label: 'Yes' }] }] } });
+const preparedTicket = submitDeck({ root, id: 'prepared', deck: { ...deck('2025-01-02T00:00:00.000Z'), interactions: [{ id: 'go', title: 'Go?', subtitle: 'Go? requires your attention.', bodyPath: 'body.md', options: [{ id: 'yes', label: 'Yes' }] }] } });
 assert.equal(preparedTicket.dir, realpathSync(prepared), 'submission accepts a crouter-precreated direct child and colocated assets');
 
 
@@ -61,6 +73,7 @@ const scanned = scanInbox([root]);
 assert.deepEqual(scanned.map((item) => item.id), ['a-first', 'prepared', 'review', 'z-last']);
 assert.equal(scanned.find((item) => item.id === 'a-first')?.claim, undefined);
 assert.equal(scanned.find((item) => item.id === 'review')?.kind, 'review');
+assert.equal(scanned.find((item) => item.id === 'review')?.subtitle, 'Review findings require your decision.', 'review scanning exposes its required subtitle');
 
 const firstClaim = claimTicket(newDeck.dir);
 assert.notEqual(firstClaim, null);
@@ -162,12 +175,12 @@ writeFileSync(claimRelease, 'go');
 await Promise.all(concurrentClaimRuns);
 
 const feedback: FeedbackResult = { file: source, submitted: true, approved: true, comments: [], submittedAt: '2025-01-04T00:00:00.000Z', savedAt: '2025-01-04T00:00:00.000Z' };
-assert.throws(() => submitReview({ root, id: 'bad-output', review: { file: source, output: responsePath(review.dir), title: 'Bad output', source: {} } }), /must not alias/, 'review output cannot replace a ticket response');
-assert.throws(() => submitReview({ root, id: 'source-output', review: { file: source, output: source, title: 'Bad output', source: {} } }), /must not alias/, 'review output cannot overwrite its source');
-const mutableReview = submitReview({ root, id: 'mutable-projection', review: { file: source, title: 'Mutable output', source: {} } });
+assert.throws(() => submitReview({ root, id: 'bad-output', review: { file: source, output: responsePath(review.dir), title: 'Bad output', subtitle: 'This invalid output path must be rejected.', source: {} } }), /must not alias/, 'review output cannot replace a ticket response');
+assert.throws(() => submitReview({ root, id: 'source-output', review: { file: source, output: source, title: 'Bad output', subtitle: 'This invalid output path must be rejected.', source: {} } }), /must not alias/, 'review output cannot overwrite its source');
+const mutableReview = submitReview({ root, id: 'mutable-projection', review: { file: source, title: 'Mutable output', subtitle: 'The mutable projection must stay safe.', source: {} } });
 const mutableClaim = claimTicket(mutableReview.dir)!;
 assert.equal(finalizeReview(mutableReview.dir, feedback, mutableClaim.token).won, true);
-atomicWriteJson(reviewPath(mutableReview.dir), { schema: 'humanloop.review/v1', file: source, output: source, title: 'Mutable output', source: {}, blockedSince: '2025-01-04T00:00:00.000Z' });
+atomicWriteJson(reviewPath(mutableReview.dir), { schema: 'humanloop.review/v1', file: source, output: source, title: 'Mutable output', subtitle: 'The mutable projection must stay safe.', source: {}, blockedSince: '2025-01-04T00:00:00.000Z' });
 assert.equal(await dispatchCompletion(root, mutableReview.dir), 'pending', 'projection revalidates mutable descriptors at its write boundary');
 assert.equal(readFileSync(source, 'utf8'), '# Source\n', 'mutable review descriptor cannot overwrite source');
 

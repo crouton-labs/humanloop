@@ -30,7 +30,7 @@ function reviewSummary(dir: string, id: string): TicketSummary | null {
   if (raw === null) return null;
   let review: ReviewDescriptor;
   try { review = validateReviewDescriptor(raw); } catch { return null; }
-  return { dir, id, kind: 'review', title: review.title, file: review.file, output: review.output, source: review.source, blockedSince: review.blockedSince, claim: claimSummary(dir) };
+  return { dir, id, kind: 'review', title: review.title, subtitle: review.subtitle, file: review.file, output: review.output, source: review.source, blockedSince: review.blockedSince, claim: claimSummary(dir) };
 }
 
 /** Read all unresolved deck/review tickets, newest first. Progress never affects visibility. */

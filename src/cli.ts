@@ -85,7 +85,7 @@ root.command('register').description('Register a root owned by a host.').require
 root.command('unregister').description('Remove a matching root registration without deleting tickets.').requiredOption('--root <path>').requiredOption('--owner <owner>').action((options: { root: string; owner: string }) => emit({ removed: unregisterInboxRoot(resolve(options.root), options.owner) }));
 root.command('list').description('List registered roots and availability.').action(() => emit(listInboxRoots()));
 
-program.command('deck').command('ask').description('Submit a durable deck ticket; it never changes tmux. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'present the deck in this terminal and block until it is answered').action(async (options: { root?: string; inline?: boolean }) => {
+program.command('deck').command('ask').description('Submit a durable deck ticket; every interaction needs a one-sentence subtitle stating the decision, recommendation/status, and stakes. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'present the deck in this terminal and block until it is answered').action(async (options: { root?: string; inline?: boolean }) => {
   try {
     const body = objectInput();
     const deck = validateDeck(body.deck);
@@ -99,10 +99,11 @@ program.command('deck').command('ask').description('Submit a durable deck ticket
   } catch (error) { fail(error); }
 });
 
-program.command('review').command('open').description('Submit a durable anchored review; it never changes tmux. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'run the review in this terminal and block until submitted').action(async (options: { root?: string; inline?: boolean }) => {
+program.command('review').command('open').description('Submit a durable anchored review; subtitle is a required one-sentence recommendation/status and stakes. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'run the review in this terminal and block until submitted').action(async (options: { root?: string; inline?: boolean }) => {
   try {
     const body = objectInput();
     if (typeof body.file !== 'string' || !existsSync(resolve(body.file))) throw new Error('file must be an existing markdown path');
+    if (typeof body.subtitle !== 'string' || body.subtitle.trim() === '') throw new Error('subtitle is required and must be a non-empty plain-English sentence stating the recommendation/status and stakes');
     const absFile = resolve(body.file);
     const output = typeof body.output === 'string' ? resolve(body.output) : `${absFile}.feedback.json`;
     if (options.inline) {
@@ -112,7 +113,7 @@ program.command('review').command('open').description('Submit a durable anchored
     }
     if (typeof body.title !== 'string' || !body.title) throw new Error('title is required');
     const registration = options.root === undefined ? managedInboxRoot() : requireRegisteredRoot(options.root);
-    emit({ ...submitReview({ root: registration.root, id: typeof body.id === 'string' ? body.id : randomUUID(), review: { file: absFile, output, title: body.title, source: typeof body.source === 'object' && body.source !== null ? body.source as never : {} } }), queued: true });
+    emit({ ...submitReview({ root: registration.root, id: typeof body.id === 'string' ? body.id : randomUUID(), review: { file: absFile, output, title: body.title, subtitle: body.subtitle, source: typeof body.source === 'object' && body.source !== null ? body.source as never : {} } }), queued: true });
   } catch (error) { fail(error); }
 });
 

@@ -110,7 +110,7 @@ export function submitReview(opts: SubmitReviewOptions): { id: string; dir: stri
   const { dir, created } = ticketDir(opts.root, opts.id);
   try {
     if (hasTicketProtocolState(dir)) throw new Error(`ticket protocol state already exists: ${dir}`);
-    const descriptor = validateReviewProjection(dir, { schema: 'humanloop.review/v1', file: source, output: resolve(opts.review.output ?? `${dir}/feedback.json`), title: opts.review.title, source: opts.review.source, blockedSince: opts.review.blockedSince ?? new Date().toISOString() });
+    const descriptor = validateReviewProjection(dir, { schema: 'humanloop.review/v1', file: source, output: resolve(opts.review.output ?? `${dir}/feedback.json`), title: opts.review.title, subtitle: opts.review.subtitle, source: opts.review.source, blockedSince: opts.review.blockedSince ?? new Date().toISOString() });
     publishRequest(reviewPath(dir), descriptor);
     signalInboxActivity();
     return { id: opts.id, dir, kind: 'review' };

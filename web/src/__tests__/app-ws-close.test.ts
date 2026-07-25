@@ -119,7 +119,7 @@ function makeDeckFixture(): Deck {
     interactions: [
       {
         id: 'q1',
-        title: 'Ship it?',
+        title: 'Ship it?', subtitle: 'Ship it? requires your attention.',
         options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }],
       },
     ],

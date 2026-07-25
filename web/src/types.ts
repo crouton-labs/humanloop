@@ -38,7 +38,7 @@ export interface InteractionPreAnswer {
 export interface Interaction {
   id: string;
   title: string;
-  subtitle?: string;
+  subtitle: string;
   body?: string;
   options: InteractionOption[];
   multiSelect?: boolean;

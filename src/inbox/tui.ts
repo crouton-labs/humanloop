@@ -43,9 +43,8 @@ function buildItemLines(item: TicketSummary, index: number, selectedIndex: numbe
   const cursor = index === selectedIndex ? `${CYAN}▸${RESET} ` : '  ';
   const titleWidth = Math.max(1, contentWidth - age.length - 6);
   const row = `${cursor}${ansiColor(icon, KIND_COLOR[kind] ?? 'cyan')} ${BOLD}${truncateRow(item.title || `(${item.id.slice(0, 8)})`, titleWidth)}${RESET}  ${DIM}${age}${RESET}`;
-  if (item.claim) return [row, `      ${DIM}${truncateRow(`claimed by ${item.claim.owner}`, contentWidth - 6)}${RESET}`];
-  if (item.subtitle) return [row, `      ${DIM}${truncateRow(item.subtitle, contentWidth - 6)}${RESET}`];
-  return [row];
+  const subtitle = item.claim ? `claimed by ${item.claim.owner} · ${item.subtitle}` : item.subtitle;
+  return [row, `      ${DIM}${truncateRow(subtitle, contentWidth - 6)}${RESET}`];
 }
 
 /** Select a contiguous row window that always contains the selected ticket. */

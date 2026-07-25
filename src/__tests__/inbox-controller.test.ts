@@ -16,7 +16,7 @@ import { atomicWriteJson, deckPath, followupRequestPath, followupResultPath } fr
 import { readFollowUp, submitFollowUpResult } from '../inbox/followup.js';
 
 const key = (part: Partial<import('../tui/terminal.js').Key> = {}) => ({ ctrl: false, meta: false, upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, wordLeft: false, wordRight: false, home: false, end: false, pageUp: false, pageDown: false, del: false, return: false, newline: false, escape: false, tab: false, backTab: false, backspace: false, ...part });
-const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
+const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, subtitle: `${id} requires your attention.`, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
 
 assert.deepEqual(inboxLayout(120, 30), { mode: 'two-column', listWidth: 40, detailWidth: 79, height: 30 });
 assert.equal(inboxLayout(80, 24).mode, 'list');
@@ -26,9 +26,12 @@ const crowded = Array.from({ length: 20 }, (_, index) => item(`ticket-${index}`)
 const visibleRows = buildInboxLines(crowded, 40, 10, 8).join('\n');
 assert.ok(visibleRows.includes('ticket-10'), 'list viewport keeps the selected ticket visible');
 assert.ok(visibleRows.includes('↑') && visibleRows.includes('↓'), 'list viewport signals tickets above and below');
+const claimedRows = buildInboxLines([{ ...item('claimed'), subtitle: 'Approve the deployment because production is blocked.', claim: { owner: 'silas', claimedAt: '2025-01-01T00:00:00.000Z', heartbeatAt: '2025-01-01T00:00:00.000Z' } }], 120, 0).join('\n');
+assert.ok(claimedRows.includes('claimed by silas · Approve the deployment because production is blocked.'), 'claimed rows compose claim status with the required subtitle');
 
 let rows = [item('b'), item('a')];
 const stable = new InboxController({ cols: 100, rows: 24, scan: () => rows });
+assert.ok(!stable.render().join('\n').includes('unknown source'), 'passive detail omits missing source labels instead of rendering a fallback');
 stable.handleKey('j', key());
 assert.equal(stable.snapshot().selectedDir, '/tickets/a');
 rows = [item('new'), ...rows];
@@ -42,9 +45,13 @@ const temp = mkdtempSync(join(tmpdir(), 'humanloop-controller-'));
 process.env.XDG_STATE_HOME = join(temp, 'state');
 const root = join(temp, 'tickets');
 registerInboxRoot({ root, owner: 'test' });
-const deck = (id: string): Deck => ({ title: id, source: { blockedSince: new Date().toISOString() }, interactions: [{ id: 'note', title: 'Notes', options: [], allowFreetext: true }] });
+const deck = (id: string): Deck => ({ title: id, source: { blockedSince: new Date().toISOString(), sessionName: 'Release planning', nodeId: 'node-private-123' }, interactions: [{ id: 'note', title: 'Notes', subtitle: 'Notes requires your attention.', options: [], allowFreetext: true }] });
 const first = submitDeck({ root, id: 'first', deck: deck('first') });
 const active = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined });
+const initialInbox = active.render().join('\n');
+assert.ok(initialInbox.includes('Notes requires your attention.'), 'every sidebar row renders its required subtitle');
+assert.ok(initialInbox.includes('Release planning'), 'passive detail renders the authored source label');
+assert.ok(!initialInbox.includes('node-private-123'), 'passive detail never renders machine node IDs');
 active.activate();
 active.handleKey('r', key());
 for (const char of 'draft') active.handleKey(char, key());
@@ -59,8 +66,8 @@ assert.equal(active.snapshot().selectedDir !== first.dir, true);
 active.close();
 
 const navigation = submitDeck({ root, id: 'navigation', deck: { title: 'navigation', interactions: [
-  { id: 'one', title: 'One', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
-  { id: 'two', title: 'Two', options: [{ id: 'no', label: 'No', shortcut: 'n' }] },
+  { id: 'one', title: 'One', subtitle: 'One requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
+  { id: 'two', title: 'Two', subtitle: 'Two requires your attention.', options: [{ id: 'no', label: 'No', shortcut: 'n' }] },
 ] } });
 let finished: import('../types.js').InteractionResponse[] | undefined;
 const keys = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async (_dir, responses) => { finished = responses; } });
@@ -78,7 +85,7 @@ assert.deepEqual(finished, [{ id: 'one', selectedOptionId: 'yes' }], 'q finishes
 keys.close();
 
 const notificationBody = ['Notification body that must be visible before acknowledgement.', ...Array.from({ length: 30 }, (_, index) => `- Notice detail ${index}`)].join('\n');
-const notification = submitDeck({ root, id: 'notification', deck: { title: 'notification', interactions: [{ id: 'notify', title: 'Read this', kind: 'notify', subtitle: 'Read the complete notice', body: notificationBody, options: [{ id: 'ok', label: 'OK' }] }] } });
+const notification = submitDeck({ root, id: 'notification', deck: { title: 'notification', interactions: [{ id: 'notify', title: 'Read this', subtitle: 'Read the complete notice', kind: 'notify', body: notificationBody, options: [{ id: 'ok', label: 'OK' }] }] } });
 let acknowledgement: import('../types.js').InteractionResponse[] | undefined;
 const notifyController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async (_dir, responses) => { acknowledgement = responses; } });
 while (notifyController.snapshot().selectedDir !== notification.dir) notifyController.handleKey('j', key());
@@ -108,7 +115,7 @@ assert.equal(finalizeDeck(notification.dir, [{ id: 'notify', selectedOptionId: '
 
 const followUpRoot = join(temp, 'follow-up-tickets');
 registerInboxRoot({ root: followUpRoot, owner: 'test', followUpHandler: { command: process.execPath, args: ['-e', ''] } });
-const pureNotification = submitDeck({ root: followUpRoot, id: 'pure-notification', deck: { title: 'pure notification', interactions: [{ id: 'notice', title: 'Notice', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] } });
+const pureNotification = submitDeck({ root: followUpRoot, id: 'pure-notification', deck: { title: 'pure notification', interactions: [{ id: 'notice', title: 'Notice', subtitle: 'Notice requires your attention.', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] } });
 atomicWriteJson(followupRequestPath(pureNotification.dir), { schema: 'humanloop.followup-request/v1', requestId: 'notification-request', question: 'What changed?', state: 'running', askedAt: new Date().toISOString() });
 const pureNotificationController = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
 pureNotificationController.activate();
@@ -119,7 +126,7 @@ assert.equal(readFollowUp(pureNotification.dir).request?.requestId, 'notificatio
 atomicWriteJson(followupResultPath(pureNotification.dir), { schema: 'humanloop.followup-result/v1', requestId: 'notification-request', status: 'ready', markdown: 'Consult answer', completedAt: new Date().toISOString() });
 await new Promise((resolve) => setTimeout(resolve, 20));
 assert.ok(!pureNotificationController.render().join('\n').includes('follow-up'), 'a pure notification ignores follow-up watcher refreshes');
-atomicWriteJson(deckPath(pureNotification.dir), { title: 'now mixed', interactions: [{ id: 'notice', title: 'Notice', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }, { id: 'answer', title: 'Answer', options: [{ id: 'yes', label: 'Yes' }] }] });
+atomicWriteJson(deckPath(pureNotification.dir), { title: 'now mixed', interactions: [{ id: 'notice', title: 'Notice', subtitle: 'Notice requires your attention.', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }, { id: 'answer', title: 'Answer', subtitle: 'Answer requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] });
 pureNotificationController.reloadSelectedDeck();
 pureNotificationController.handleKey('', key({ return: true }));
 assert.ok(pureNotificationController.render().join('\n').includes('follow-up'), 'a notification-only deck reloaded with an answer-bearing interaction gains follow-up availability');
@@ -129,7 +136,7 @@ pureNotificationController.handleKey('', key({ return: true }));
 assert.notEqual(readFollowUp(pureNotification.dir).request?.requestId, 'notification-request', 'an answer-bearing reload installs the follow-up callback');
 pureNotificationController.close();
 
-const mixedFollowUp = submitDeck({ root: followUpRoot, id: 'mixed-follow-up', deck: { title: 'mixed follow-up', interactions: [{ id: 'notice', title: 'Notice', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }, { id: 'answer', title: 'Answer', options: [{ id: 'yes', label: 'Yes' }] }] } });
+const mixedFollowUp = submitDeck({ root: followUpRoot, id: 'mixed-follow-up', deck: { title: 'mixed follow-up', interactions: [{ id: 'notice', title: 'Notice', subtitle: 'Notice requires your attention.', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }, { id: 'answer', title: 'Answer', subtitle: 'Answer requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] } });
 const mixedFollowUpController = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
 while (mixedFollowUpController.snapshot().selectedDir !== mixedFollowUp.dir) mixedFollowUpController.handleKey('j', key());
 mixedFollowUpController.activate();
@@ -140,14 +147,14 @@ for (const char of 'Explain the choice') mixedFollowUpController.handleKey(char,
 mixedFollowUpController.handleKey('', key({ return: true }));
 assert.equal(readFollowUp(mixedFollowUp.dir).request?.state, 'running', 'an eligible deck dispatches its follow-up request');
 const mixedRequestId = readFollowUp(mixedFollowUp.dir).request?.requestId;
-atomicWriteJson(deckPath(mixedFollowUp.dir), { title: 'now notification-only', interactions: [{ id: 'notice', title: 'Notice', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] });
+atomicWriteJson(deckPath(mixedFollowUp.dir), { title: 'now notification-only', interactions: [{ id: 'notice', title: 'Notice', subtitle: 'Notice requires your attention.', kind: 'notify', options: [{ id: 'ok', label: 'OK' }] }] });
 mixedFollowUpController.reloadSelectedDeck();
 assert.ok(!mixedFollowUpController.render().join('\n').includes('?'), 'a live reload removes follow-up availability when a mixed deck becomes notification-only');
 mixedFollowUpController.handleKey('?', key());
 assert.equal(readFollowUp(mixedFollowUp.dir).request?.requestId, mixedRequestId, 'a notification-only reload cannot dispatch a follow-up callback');
 mixedFollowUpController.close();
 
-const persistentFollowUp = submitDeck({ root: followUpRoot, id: 'persistent-follow-up', deck: { title: 'persistent follow-up', interactions: [{ id: 'answer', title: 'Answer', options: [{ id: 'yes', label: 'Yes' }] }] } });
+const persistentFollowUp = submitDeck({ root: followUpRoot, id: 'persistent-follow-up', deck: { title: 'persistent follow-up', interactions: [{ id: 'answer', title: 'Answer', subtitle: 'Answer requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] } });
 const persistentController = new InboxController({ roots: [followUpRoot], cols: 100, rows: 24, completeDeck: async () => undefined });
 while (persistentController.snapshot().selectedDir !== persistentFollowUp.dir) persistentController.handleKey('j', key());
 persistentController.activate();
@@ -177,12 +184,12 @@ reopenedFollowUpResult.handleKey('', key({ backTab: true }));
 assert.ok(reopenedFollowUpResult.render().join('\n').includes('Durable follow-up answer'), 'the follow-up result survives another close and reopen');
 reopenedFollowUpResult.close();
 
-const replacement = submitDeck({ root, id: 'replace', deck: { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'drop', title: 'Drop', options: [{ id: 'no', label: 'No', shortcut: 'n' }] }] } });
+const replacement = submitDeck({ root, id: 'replace', deck: { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', subtitle: 'Keep requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'drop', title: 'Drop', subtitle: 'Drop requires your attention.', options: [{ id: 'no', label: 'No', shortcut: 'n' }] }] } });
 const live = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined });
 while (live.snapshot().selectedDir !== replacement.dir) live.handleKey('j', key());
 live.activate();
 live.handleKey('y', key());
-const replacementDeck: Deck = { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }] };
+const replacementDeck: Deck = { title: 'replace', interactions: [{ id: 'keep', title: 'Keep', subtitle: 'Keep requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }] };
 await import('../inbox/convention.js').then(({ atomicWriteJson, deckPath }) => atomicWriteJson(deckPath(replacement.dir), replacementDeck));
 live.reloadSelectedDeck();
 assert.ok(live.render().join('\n').includes('Current: Yes'), 'deck replacement keeps surviving answer');
@@ -218,7 +225,7 @@ assert.equal(browserStopped, true, 'w takes the inbox deck back from the browser
 assert.equal(browserController.snapshot().screen, 'detail');
 browserController.close();
 
-const browserIntegration = submitDeck({ root, id: 'browser-integration', deck: { title: 'browser integration', interactions: [{ id: 'pick', title: 'Pick', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'note', title: 'Note', options: [], allowFreetext: true }] } });
+const browserIntegration = submitDeck({ root, id: 'browser-integration', deck: { title: 'browser integration', interactions: [{ id: 'pick', title: 'Pick', subtitle: 'Pick requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] }, { id: 'note', title: 'Note', subtitle: 'Note requires your attention.', options: [], allowFreetext: true }] } });
 let integrationUrl = '';
 const integrationController = new InboxController({
   roots: [root], cols: 100, rows: 24,

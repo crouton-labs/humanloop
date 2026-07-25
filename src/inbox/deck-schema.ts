@@ -10,7 +10,7 @@ export const interactionOptionSchema = z.object({ id: z.string().min(1), label: 
 export const preAnswerSchema = z.object({ selectedOptionId: z.string().optional(), selectedOptionIds: z.array(z.string()).optional(), freetext: z.string().optional(), label: z.string().optional() });
 const interactionSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]+$/, { error: 'interaction id must match /^[A-Za-z0-9_-]+$/' }).min(1).max(64),
-  title: z.string().trim().min(1), subtitle: z.string().min(1).optional(), body: z.string().optional(), bodyPath: z.string().optional(),
+  title: z.string().trim().min(1), subtitle: z.string().trim().min(1), body: z.string().optional(), bodyPath: z.string().optional(),
   options: z.array(interactionOptionSchema), multiSelect: z.boolean().optional(), allowFreetext: z.boolean().optional(), freetextLabel: z.string().optional(), kind: z.enum(INTERACTION_KINDS).optional(), preAnswered: preAnswerSchema.optional(),
 });
 const deckSourceSchema = z.object({ sessionName: z.string().optional(), askedBy: z.string().optional(), blockedSince: z.string().optional(), nodeId: z.string().optional(), visual: z.literal('humanloop.visual/v1').optional() });
@@ -28,7 +28,8 @@ export const reviewDescriptorSchema = z.object({
   schema: z.literal('humanloop.review/v1'),
   file: z.string().min(1).refine(isAbsolute, 'file must be absolute'),
   output: z.string().min(1).refine(isAbsolute, 'output must be absolute'),
-  title: z.string().min(1),
+  title: z.string().trim().min(1),
+  subtitle: z.string().trim().min(1),
   source: reviewSourceSchema,
   blockedSince: z.string().datetime({ offset: true }),
 }).strict();

@@ -41,9 +41,8 @@ export interface Interaction {
   id: string;
   /** Short topic — the thing being decided, not the decision. */
   title: string;
-  /** ONE-sentence TL;DR of the choice/stakes. Renders as markdown in the
-   *  scrollable region; keep it a single line — long prose belongs in `body`. */
-  subtitle?: string;
+  /** One plain-English sentence stating the decision, recommendation/status, and stakes. */
+  subtitle: string;
   /** The full explanation: directive-flavored markdown rendered by termrender.
    *  This is where long or rich content goes (never the wall of detail in
    *  `subtitle`). `bodyPath` is the same content sourced from a file. */
@@ -210,7 +209,7 @@ interface TicketSummaryBase {
   dir: string;
   id: string;
   title: string;
-  subtitle?: string;
+  subtitle: string;
   blockedSince: string;
   source: DeckSource;
   claim?: ClaimSummary;
@@ -237,6 +236,7 @@ export interface ReviewDescriptor {
   file: string;
   output: string;
   title: string;
+  subtitle: string;
   source: DeckSource;
   blockedSince: string;
 }
@@ -309,7 +309,7 @@ export interface CanonicalInteractionOption {
 export interface CanonicalInteraction {
   id: string;
   title: string;
-  subtitle?: string;
+  subtitle: string;
   body?: string;
   options: CanonicalInteractionOption[];
   multiSelect?: boolean;

@@ -112,7 +112,7 @@ const preAnsweredSchema = z.object({ selectedOptionId: z.string().optional(), se
 const interactionInputSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(64),
   title: z.string().min(1),
-  subtitle: z.string().min(1).optional(),
+  subtitle: z.string().trim().min(1),
   body: z.string().optional(),
   bodyPath: z.string().optional(),
   options: z.array(optionInputSchema),
@@ -125,7 +125,7 @@ const interactionInputSchema = z.object({
 const canonicalInteractionSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(64),
   title: z.string().min(1),
-  subtitle: z.string().min(1).optional(),
+  subtitle: z.string().trim().min(1),
   body: z.string().optional(),
   options: z.array(optionSchema),
   multiSelect: z.boolean().optional(),
@@ -206,7 +206,7 @@ export function canonicalizeInteraction(raw: Interaction | CanonicalInteraction)
   const canonical: CanonicalInteraction = {
     id: parsed.id,
     title: parsed.title,
-    ...(parsed.subtitle === undefined ? {} : { subtitle: parsed.subtitle }),
+    subtitle: parsed.subtitle,
     ...(parsed.body === undefined ? {} : { body: parsed.body }),
     options: parsed.options.map((option) => ({ id: option.id, label: option.label, ...(option.description === undefined ? {} : { description: option.description }) })),
     ...(parsed.multiSelect === undefined ? {} : { multiSelect: parsed.multiSelect }),

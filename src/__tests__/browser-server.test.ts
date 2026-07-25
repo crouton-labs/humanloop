@@ -18,7 +18,7 @@ import type { Deck, FeedbackResult } from '../index.js';
 const deck: Deck = {
   title: 'Regression deck',
   interactions: [
-    { id: 'q1', title: 'Ship it?', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
+    { id: 'q1', title: 'Ship it?', subtitle: 'Ship it? requires your attention.', options: [{ id: 'yes', label: 'Yes', shortcut: 'y' }] },
   ],
 };
 

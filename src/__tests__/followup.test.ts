@@ -15,7 +15,7 @@ try {
   const handler = join(temp, 'handler.cjs');
   writeFileSync(handler, "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n");
   registerInboxRoot({ root, owner: 'test-owner', followUpHandler: { command: process.execPath, args: [handler] } });
-  const deck: Deck = { title: 'Follow-up race', interactions: [{ id: 'answer', title: 'Answer?', options: [{ id: 'yes', label: 'Yes' }] }] };
+  const deck: Deck = { title: 'Follow-up race', interactions: [{ id: 'answer', title: 'Answer?', subtitle: 'Answer? requires your attention.', options: [{ id: 'yes', label: 'Yes' }] }] };
   const { dir } = submitDeck({ root, id: 'race', deck });
   const rootAlias = join(temp, 'tickets-alias');
   symlinkSync(root, rootAlias, 'dir');
