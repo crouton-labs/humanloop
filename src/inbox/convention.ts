@@ -14,6 +14,7 @@ export function deliveryPath(dir: string): string { return `${dir}/delivery.json
 export function deliveryErrorPath(dir: string): string { return `${dir}/delivery-error.json`; }
 export function followupRequestPath(dir: string): string { return `${dir}/followup-request.json`; }
 export function followupResultPath(dir: string): string { return `${dir}/followup-result.json`; }
+export function followupProgressPath(dir: string): string { return `${dir}/followup-progress.json`; }
 export function visualsDir(dir: string): string { return `${dir}/visuals`; }
 
 /** Spawns a handler `{command,args}` with `event` as JSON on stdin. Exit 0

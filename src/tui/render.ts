@@ -207,7 +207,13 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     if (state.followUp !== undefined && state.followUp.status !== 'idle') {
       bodyLines.push('');
       bodyLines.push(`  ${DIM}── follow-up ${hline(Math.max(0, maxW - 14))}${RESET}`);
-      if (state.followUp.status === 'running') bodyLines.push(`  ${DIM}consulting…${RESET}`);
+      if (state.followUp.status === 'running') {
+        // The provider's live activity line rides alongside the spinnerless
+        // label so a long consult reads as working, not frozen.
+        const activity = state.followUp.activity?.replace(/\s+/g, ' ').trim();
+        const label = activity === undefined || activity === '' ? 'consulting…' : `consulting… — ${activity}`;
+        bodyLines.push(`  ${DIM}${label.length > maxW ? `${label.slice(0, Math.max(1, maxW - 1))}…` : label}${RESET}`);
+      }
       else if (state.followUp.status === 'ready') {
         for (const line of mdLines(state.followUp.markdown)) bodyLines.push(`  ${line}`);
       } else bodyLines.push(`  ${YELLOW}${state.followUp.error}${RESET}`);
@@ -265,7 +271,7 @@ function buildItemReviewLayout(state: TuiState, cols: number, rows: number): Ite
     postLines.push('');
     postLines.push(`  ${DIM}enter${RESET} submit  ${DIM}^J/⌥⏎${RESET} newline${state.editorAvailable ? `  ${DIM}^O${RESET} editor` : ''}  ${DIM}esc${RESET} cancel`);
   } else {
-    postLines.push(...renderActions(interaction, state.selectedAction, maxW, response, state.followUp?.status !== 'running'));
+    postLines.push(...renderActions(interaction, state.selectedAction, maxW, response));
   }
 
   // Transient hint (e.g. an empty multi-select Enter that was rejected). Sits
@@ -388,12 +394,14 @@ export function renderItemReview(state: TuiState, cols: number, rows: number): s
   return centerHorizontal(clamped, cols, bodyBoxW).map((line) => clipLine(line, cols));
 }
 
+/** The option list. Focus is always drawn: j/k and shortcuts stay live in every
+ *  card state (a running follow-up included), so the cursor must say where they
+ *  land — the consultation reports its own progress in the body. */
 function renderActions(
   interaction: Interaction,
   selectedAction: number,
   maxW: number,
   existing?: InteractionResponse,
-  showFocus = true,
 ): string[] {
   const lines: string[] = [];
   const opts = interaction.options;
@@ -409,7 +417,7 @@ function renderActions(
 
   for (let i = 0; i < opts.length; i++) {
     const o = opts[i]!;
-    const cursor = showFocus && i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const cursor = i === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     const sc = o.shortcut === undefined ? ' ' : o.shortcut;
     const keyBadge = `${DIM}[${sc}]${RESET}`;
     const box = multi
@@ -439,7 +447,7 @@ function renderActions(
   }
 
   if (interaction.allowFreetext && opts.length > 0) {
-    const cursor = showFocus && opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
+    const cursor = opts.length === selectedAction ? `${CYAN}▸${RESET}` : ' ';
     let label: string;
     if (interaction.freetextLabel !== undefined) label = interaction.freetextLabel;
     else if (multi) label = 'Add overall comment  (c on an option for per-option)';

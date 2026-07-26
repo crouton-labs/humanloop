@@ -340,14 +340,16 @@ export class InboxController {
   }
 
   private followUpViewState(dir: string): FollowUpState {
-    const { request, result } = readFollowUp(dir);
+    const { request, result, progress } = readFollowUp(dir);
     if (request === null) return { status: 'idle' };
     if (result !== null && result.requestId === request.requestId) {
       return result.status === 'ready'
         ? { status: 'ready', markdown: result.markdown! }
         : { status: 'error', error: result.error! };
     }
-    return request.state === 'running' ? { status: 'running' } : { status: 'idle' };
+    if (request.state !== 'running') return { status: 'idle' };
+    const activity = progress !== null && progress.requestId === request.requestId ? progress.line : undefined;
+    return activity === undefined ? { status: 'running' } : { status: 'running', activity };
   }
 
   private refreshFollowUp(dir: string): void {
@@ -807,7 +809,7 @@ export class InboxController {
     try {
       this.selectedWatcher = watch(dir, (_event, file) => {
         if (file === 'deck.json') { this.reloadSelectedDeck(); return; }
-        if (file === 'followup-result.json' || file === 'followup-request.json') { this.refreshFollowUp(dir); return; }
+        if (file === 'followup-result.json' || file === 'followup-request.json' || file === 'followup-progress.json') { this.refreshFollowUp(dir); return; }
         this.invalidate();
       });
     } catch {

@@ -17,8 +17,8 @@ export {
 } from './inbox/tickets.js';
 export type { SubmitDeckOptions, SubmitReviewOptions } from './inbox/tickets.js';
 export { dispatchCompletion, reconcileCompletions } from './inbox/completion.js';
-export { requestFollowUp, cancelFollowUp, submitFollowUpResult, readFollowUp } from './inbox/followup.js';
-export type { FollowUpRequestEvent, FollowUpRequest, FollowUpResult } from './inbox/followup.js';
+export { requestFollowUp, cancelFollowUp, submitFollowUpResult, publishFollowUpProgress, readFollowUp } from './inbox/followup.js';
+export type { FollowUpRequestEvent, FollowUpRequest, FollowUpResult, FollowUpProgress } from './inbox/followup.js';
 export {
   VISUAL_CAPABILITY,
   canonicalizeInteraction,

@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { atomicWriteJson, followupRequestPath, followupResultPath, readJson, runHandler, withExclusiveDirectoryLock } from './convention.js';
+import { atomicWriteJson, followupProgressPath, followupRequestPath, followupResultPath, readJson, runHandler, withExclusiveDirectoryLock } from './convention.js';
 import { registeredInboxRoot } from './registry.js';
 import { ticketRoot } from './tickets.js';
 import { checkMarkdown } from '../render/termrender.js';
@@ -42,6 +42,16 @@ export interface FollowUpResult {
   markdown?: string;
   error?: string;
   completedAt: string;
+}
+
+/** followup-progress.json — the provider's optional liveness channel while a
+ *  request is running. Latest-wins; it says what the provider is doing right
+ *  now, never a log. humanloop only displays it. */
+export interface FollowUpProgress {
+  schema: 'humanloop.followup-progress/v1';
+  requestId: string;
+  line: string;
+  updatedAt: string;
 }
 
 const CAPABILITY = 'humanloop.follow-up/v1' as const;
@@ -144,8 +154,29 @@ export function submitFollowUpResult(
   });
 }
 
-export function readFollowUp(dir: string): { request: FollowUpRequest | null; result: FollowUpResult | null } {
+/** The provider's optional progress writer. Same compare-and-publish gate as
+ *  `submitFollowUpResult`: a line lands only while ITS request is the current
+ *  `running` one, so a superseded worker can never narrate over a newer ask.
+ *  A stale writer is a silent no-op. */
+export function publishFollowUpProgress(root: string, dir: string, progress: { requestId: string; line: string }): { published: boolean } {
+  const { dir: canonicalDir } = requireCanonicalTicket(root, dir);
+  const line = progress.line.trim();
+  if (line === '') return { published: false };
+  return withExclusiveDirectoryLock(lockPath(canonicalDir), () => {
+    const current = readJson<FollowUpRequest>(followupRequestPath(canonicalDir));
+    if (current === null || current.requestId !== progress.requestId || current.state !== 'running') return { published: false };
+    const record: FollowUpProgress = { schema: 'humanloop.followup-progress/v1', requestId: progress.requestId, line, updatedAt: new Date().toISOString() };
+    atomicWriteJson(followupProgressPath(canonicalDir), record);
+    return { published: true };
+  });
+}
+
+export function readFollowUp(dir: string): { request: FollowUpRequest | null; result: FollowUpResult | null; progress: FollowUpProgress | null } {
   let canonicalDir: string;
-  try { canonicalDir = realpathSync(dir); } catch { return { request: null, result: null }; }
-  return { request: readJson<FollowUpRequest>(followupRequestPath(canonicalDir)), result: readJson<FollowUpResult>(followupResultPath(canonicalDir)) };
+  try { canonicalDir = realpathSync(dir); } catch { return { request: null, result: null, progress: null }; }
+  return {
+    request: readJson<FollowUpRequest>(followupRequestPath(canonicalDir)),
+    result: readJson<FollowUpResult>(followupResultPath(canonicalDir)),
+    progress: readJson<FollowUpProgress>(followupProgressPath(canonicalDir)),
+  };
 }

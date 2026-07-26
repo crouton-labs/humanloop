@@ -132,7 +132,7 @@ export interface VisualBlock {
 
 export type FollowUpState =
   | { status: 'idle' }
-  | { status: 'running' }
+  | { status: 'running'; activity?: string }
   | { status: 'ready'; markdown: string }
   | { status: 'error'; error: string };
 
