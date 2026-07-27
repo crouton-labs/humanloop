@@ -10,6 +10,7 @@ import { openBrowser } from '../browser/open.js';
 import { startReviewWebServer } from '../browser/server.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
 import { renderMarkdownBlockAware, type RenderedDoc } from '../render/termrender.js';
+import { plainTextDoc } from '../render/plain-doc.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
 import { diffFrame, renderInputBuffer } from '../tui/render.js';
 import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, clipLine, hline, panLine, sanitize, truncate, visibleWidth } from '../tui/ansi.js';
@@ -424,6 +425,11 @@ export function contentWidthForCols(cols: number): number {
   return Math.max(20, cols - 4);
 }
 
+/** Body width left after an optional line-number gutter. */
+export function bodyWidth(cols: number, gutterW = 0): number {
+  return Math.max(1, contentWidthForCols(cols) - (gutterW > 0 ? gutterW + 1 : 0));
+}
+
 /** The mapped render this surface paints: prose at the readability cap,
  *  diagrams at the full body width. */
 export function renderReviewDoc(content: string, cols: number): RenderedDoc {
@@ -460,18 +466,18 @@ export function widestVisibleRow(doc: RenderedDoc, scroll: number, bodyHeight: n
 /** How far the body can pan right, given what is currently on screen. Zero
  *  when nothing visible overflows — which is also what makes h/l contextual:
  *  the keys only pan while an overflowing row is in view. */
-export function maxHScroll(state: ReviewState, doc: RenderedDoc, cols: number, rows: number): number {
+export function maxHScroll(state: ReviewState, doc: RenderedDoc, cols: number, rows: number, gutterW = 0): number {
   const bodyHeight = Math.max(1, rows - reservedRows(state, cols));
   const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
   const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
-  return Math.max(0, widestVisibleRow(doc, scroll, bodyHeight) - contentWidthForCols(cols));
+  return Math.max(0, widestVisibleRow(doc, scroll, bodyHeight) - bodyWidth(cols, gutterW));
 }
 
 /** Pan the body horizontally, clamped to what is currently reachable. The
  *  stored offset is only ever clamped against the live window, so vertical
  *  scrolling and resize can never leave it pointing past the content. */
-export function panBy(state: ReviewState, delta: number, doc: RenderedDoc, cols: number, rows: number): ReviewState {
-  const max = maxHScroll(state, doc, cols, rows);
+export function panBy(state: ReviewState, delta: number, doc: RenderedDoc, cols: number, rows: number, gutterW = 0): ReviewState {
+  const max = maxHScroll(state, doc, cols, rows, gutterW);
   const next = Math.max(0, Math.min(state.hscroll + delta, max));
   return next === state.hscroll ? state : { ...state, hscroll: next };
 }
@@ -507,7 +513,14 @@ export function reservedRows(state: ReviewState, cols: number): number {
   return header + 9; // help
 }
 
-export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: RenderedDoc, cols: number, rows: number): string[] {
+export function renderReviewFrame(
+  state: ReviewState,
+  fileLabel: string,
+  doc: RenderedDoc,
+  cols: number,
+  rows: number,
+  opts?: { lineNumbers?: boolean },
+): string[] {
   const maxW = Math.min(Math.max(20, cols - 4), 120);
   const docW = renderWidthForCols(cols);
   const header: string[] = [
@@ -558,7 +571,8 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   const bodyHeight = Math.max(1, rows - reserved);
   const maxScroll = Math.max(0, doc.lines.length - bodyHeight);
   const scroll = Math.max(0, Math.min(state.scroll, maxScroll));
-  const contentW = contentWidthForCols(cols);
+  const gutterW = opts?.lineNumbers === true ? String(doc.lines.length).length : 0;
+  const contentW = bodyWidth(cols, gutterW);
   // Effective pan: the stored offset, clamped to what this window can reach.
   // Scrolling into narrow content parks the diagram offset rather than losing
   // it, so scrolling back restores the same horizontal position.
@@ -569,18 +583,21 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
   const body: string[] = [];
   for (const source of paintedBodyRows(doc, scroll, bodyHeight)) {
     if (source.abs === null) {
-      body.push(source.line);
+      body.push(`${' '.repeat(gutterW > 0 ? gutterW + 1 : 0)}${source.line}`);
       continue;
     }
     // Every body row is windowed into the body rectangle: a diagram wider than
     // the pane pans instead of spilling past the right edge.
     const row = panLine(source.line, hscroll, contentW);
     const u = state.rowUnits[source.abs] ?? null;
+    const gutter = gutterW > 0
+      ? `${DIM}${String(doc.spans[source.abs]?.[0] ?? source.abs + 1).padStart(gutterW)}${RESET} `
+      : '';
     // Tint the prose column at minimum, and a wide row across what it occupies.
     const tintW = Math.min(contentW, Math.max(docW, visibleWidth(row)));
-    if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${tintRow(row, tintW)}`);
-    else if (u !== null && commented.has(u)) body.push(`  ${YELLOW}▎${RESET} ${row}`);
-    else body.push(`    ${row}`);
+    if (u !== null && u >= lo && u <= hi) body.push(`  ${CYAN}▌${RESET} ${gutter}${tintRow(row, tintW)}`);
+    else if (u !== null && commented.has(u)) body.push(`  ${YELLOW}▎${RESET} ${gutter}${row}`);
+    else body.push(`    ${gutter}${row}`);
   }
   // Contextual pan hint: only while something on screen actually overflows.
   // Appends to the existing footer line, so the reserved row count is unchanged.
@@ -600,7 +617,12 @@ export function renderReviewFrame(state: ReviewState, fileLabel: string, doc: Re
 
 /** How one TUI session ended: a final result, or a request to hand the review
  *  off to the browser (terminal restored, draft persisted). */
-type SessionOutcome = { type: 'done'; result: FeedbackResult } | { type: 'handoff' };
+export type SessionOutcome = { type: 'done'; result: FeedbackResult } | { type: 'handoff' };
+
+export interface ReviewSurface {
+  doc: 'markdown' | 'plain';
+  keys: 'ticket' | 'accessory';
+}
 
 function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
   const draft = readReviewDraft(outPath);
@@ -630,7 +652,7 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
 
   while (true) {
     if (opts.signal?.aborted) return diskDraftResult(absFile, outPath);
-    const outcome = await runTerminalReviewSession(absFile, content, outPath, fileLabel, opts);
+    const outcome = await runTerminalReviewSession(absFile, content, outPath, fileLabel, opts, { doc: 'markdown', keys: 'ticket' });
     if (outcome.type === 'done') return outcome.result;
 
     // Browser handoff: the TUI is parked (terminal already restored, draft
@@ -679,13 +701,22 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
  *  final result (submit/close/cancel) or the human requests browser handoff;
  *  either way the terminal is restored before resolution. Re-reads the draft
  *  from disk on entry so browser edits survive a take-back. */
-function runTerminalReviewSession(absFile: string, content: string, outPath: string, fileLabel: string, opts: ReviewOptions): Promise<SessionOutcome> {
+export function runTerminalReviewSession(
+  absFile: string,
+  content: string,
+  outPath: string,
+  fileLabel: string,
+  opts: ReviewOptions,
+  surface: ReviewSurface,
+): Promise<SessionOutcome> {
   const sourceLines = content.split('\n');
   const draft = readReviewDraft(outPath);
 
   setupTerminal();
   let { cols, rows } = getTerminalSize();
-  let doc = renderReviewDoc(content, cols);
+  const renderDoc = (): RenderedDoc => surface.doc === 'plain' ? plainTextDoc(content) : renderReviewDoc(content, cols);
+  const gutterW = (): number => surface.doc === 'plain' ? String(doc.lines.length).length : 0;
+  let doc = renderDoc();
   let state = initReviewState(sourceLines, deriveAnchorUnits(doc), draft?.comments ?? [], draft?.version ?? 0);
   let prevFrame: string[] = [];
   let spaceArmed = false;
@@ -701,7 +732,7 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
     };
 
     const paint = (clear = false): void => {
-      const lines = renderReviewFrame(state, fileLabel, doc, cols, rows);
+      const lines = renderReviewFrame(state, fileLabel, doc, cols, rows, { lineNumbers: surface.doc === 'plain' });
       if (clear) {
         prevFrame = [];
         process.stdout.write('\x1b[2J\x1b[H');
@@ -727,7 +758,7 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
 
     const onResize = (): void => {
       ({ cols, rows } = getTerminalSize());
-      doc = renderReviewDoc(content, cols);
+      doc = renderDoc();
       // Unit SOURCE ranges are width-independent under the same renderer (only
       // their rendered-row bounds move), but a mid-session renderer→fallback
       // transition can reshape the list — so remap the anchor by its source
@@ -837,8 +868,8 @@ function runTerminalReviewSession(absFile: string, content: string, outPath: str
       else if (input === 'K') { state = moveActiveUnit(state, -1, true); state = ensureAnchorVisible(state, doc, bodyH()); }
       else if (input === 'u' || key.pageUp) state = scrollBy(state, -bodyH(), bodyH(), doc.lines.length);
       else if (input === 'd' || key.pageDown) state = scrollBy(state, bodyH(), bodyH(), doc.lines.length);
-      else if ((input === 'h' || key.leftArrow) && maxHScroll(state, doc, cols, rows) > 0) state = panBy(state, -PAN_STEP, doc, cols, rows);
-      else if ((input === 'l' || key.rightArrow) && maxHScroll(state, doc, cols, rows) > 0) state = panBy(state, PAN_STEP, doc, cols, rows);
+      else if ((input === 'h' || key.leftArrow) && maxHScroll(state, doc, cols, rows, gutterW()) > 0) state = panBy(state, -PAN_STEP, doc, cols, rows, gutterW());
+      else if ((input === 'l' || key.rightArrow) && maxHScroll(state, doc, cols, rows, gutterW()) > 0) state = panBy(state, PAN_STEP, doc, cols, rows, gutterW());
       else if (input === '?') state = openHelp(state);
       else if (key.escape) { finish(buildDraftFeedbackResult(absFile, state.comments)); return; }
       paint();
