@@ -11,6 +11,12 @@ import { startReviewWebServer } from '../browser/server.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
 import { renderMarkdownBlockAware, type RenderedDoc } from '../render/termrender.js';
 import { plainTextDoc } from '../render/plain-doc.js';
+import { withLeadingSeparator } from './accessory-format.js';
+import { reviewFileAsAccessory } from './accessory-review.js';
+import type { AccessoryOutcome } from './accessory-outcome.js';
+import { extractFilePaths } from './visible-paths.js';
+import { writeClipboardText } from '../tui/clipboard.js';
+import { pickFilePath } from '../tui/path-picker.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
 import { diffFrame, renderInputBuffer } from '../tui/render.js';
 import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, clipLine, hline, panLine, sanitize, truncate, visibleWidth } from '../tui/ansi.js';
@@ -485,6 +491,7 @@ export function panBy(state: ReviewState, delta: number, doc: RenderedDoc, cols:
 /** Cells one h/l press pans by — a chunk large enough to cross a diagram in a
  *  few presses, small enough to keep orientation. */
 const PAN_STEP = 8;
+const META_PREFIX_WAIT_MS = 100;
 
 // Single-hue anchor tint (a dark neutral step below the CYAN gutter bar).
 // termrender's only reset is `\x1b[0m`, so re-arming the background after each
@@ -519,7 +526,7 @@ export function renderReviewFrame(
   doc: RenderedDoc,
   cols: number,
   rows: number,
-  opts?: { lineNumbers?: boolean; keys?: 'ticket' | 'accessory'; nested?: boolean },
+  opts?: { lineNumbers?: boolean; keys?: 'ticket' | 'accessory'; nested?: boolean; notice?: string },
 ): string[] {
   const maxW = Math.min(Math.max(20, cols - 4), 120);
   const docW = renderWidthForCols(cols);
@@ -577,6 +584,10 @@ export function renderReviewFrame(
       `  ${DIM}j/k${RESET} move  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
       `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} submit  ${DIM}space w${RESET} browser  ${DIM}?${RESET} help  ${DIM}esc${RESET} close`,
     );
+  }
+
+  if (opts?.notice !== undefined && footer.length > 0) {
+    footer[footer.length - 1] = `  ${YELLOW}${opts.notice}${RESET}`;
   }
 
   const reserved = header.length + footer.length;
@@ -737,6 +748,9 @@ export function runTerminalReviewSession(
   let prevFrame: string[] = [];
   let spaceArmed = false;
   let settled = false;
+  let nestedActive = false;
+  let pendingEscape: ReturnType<typeof setTimeout> | undefined;
+  let notice: string | undefined;
 
   const bodyH = (): number => Math.max(1, rows - reservedRows(state, cols));
   state = ensureAnchorVisible(state, doc, bodyH());
@@ -752,6 +766,7 @@ export function runTerminalReviewSession(
         lineNumbers: surface.doc === 'plain',
         keys: surface.keys,
         nested: surface.nested,
+        notice,
       });
       if (clear) {
         prevFrame = [];
@@ -770,6 +785,7 @@ export function runTerminalReviewSession(
       process.stdin.removeListener('data', onData);
       process.stdout.removeListener('resize', onResize);
       opts.signal?.removeEventListener('abort', onAbort);
+      if (pendingEscape !== undefined) clearTimeout(pendingEscape);
       restoreTerminal();
       resolvePromise(outcome);
     };
@@ -799,6 +815,10 @@ export function runTerminalReviewSession(
     };
 
     const onAbort = (): void => {
+      // The nested picker/review owns the TTY until it returns. Let that
+      // handoff unwind before finishing the outer session so it cannot
+      // reattach listeners after this session has already restored its TTY.
+      if (nestedActive) return;
       finish(buildDraftFeedbackResult(absFile, state.comments));
     };
 
@@ -814,6 +834,98 @@ export function runTerminalReviewSession(
       await opts.onClose?.();
       finish(buildDraftFeedbackResult(absFile, state.comments));
     };
+
+    async function runNestedReview(): Promise<void> {
+      const saved = {
+        mode: state.mode,
+        scroll: state.scroll,
+        hscroll: state.hscroll,
+        activeUnit: state.activeUnit,
+        selectionAnchor: state.selectionAnchor,
+        compose: state.compose,
+        anchor: currentAnchor(state),
+      };
+      const savedActive = state.units[saved.activeUnit];
+      const savedSelection = saved.selectionAnchor === null ? undefined : state.units[saved.selectionAnchor];
+      let outcome: AccessoryOutcome = { kind: 'cancel' };
+
+      nestedActive = true;
+      // A leader prefix is meaningful only in the outer session. Do not let a
+      // key pressed after the nested review be consumed by a stale prefix.
+      spaceArmed = false;
+      persist();
+      process.stdin.removeListener('data', onData);
+      process.stdout.removeListener('resize', onResize);
+      restoreTerminal();
+
+      try {
+        const cwd = process.cwd();
+        const candidates = extractFilePaths([content], cwd);
+        setupTerminal();
+        try {
+          const file = await pickFilePath({ candidates, cwd, title: 'Review a file named in this document' });
+          if (file !== null) outcome = await reviewFileAsAccessory({ file, cwd, nested: true });
+        } finally {
+          restoreTerminal();
+        }
+      } catch (error) {
+        notice = error instanceof Error ? error.message : String(error);
+      } finally {
+        if (settled) return;
+        setupTerminal();
+        ({ cols, rows } = getTerminalSize());
+        doc = renderDoc();
+        const { units, rowUnits } = deriveAnchorUnits(doc);
+        state = {
+          ...state,
+          units,
+          rowUnits,
+          activeUnit: savedActive === undefined ? 0 : remapUnitIndex(units, savedActive),
+          selectionAnchor: savedSelection === undefined ? null : remapUnitIndex(units, savedSelection),
+          mode: saved.mode,
+          scroll: saved.scroll,
+          hscroll: saved.hscroll,
+          compose: saved.compose,
+        };
+        process.stdin.on('data', onData);
+        process.stdout.on('resize', onResize);
+        nestedActive = false;
+      }
+
+      if (opts.signal?.aborted) {
+        finish(buildDraftFeedbackResult(absFile, state.comments));
+        return;
+      }
+      if (outcome.kind === 'copy') {
+        if (!writeClipboardText(outcome.text)) {
+          notice = 'Clipboard unavailable — inserted instead.';
+        } else {
+          paint(true);
+          return;
+        }
+      }
+      if (outcome.kind === 'insert' || outcome.kind === 'copy') {
+        if (saved.mode === 'compose' && state.compose !== null) {
+          const c = state.compose;
+          const prefix = [...c.buffer].slice(0, c.cursor).join('');
+          const inserted = textInsert(c.buffer, c.cursor, withLeadingSeparator(c.buffer, prefix, outcome.text));
+          state = { ...state, compose: { ...c, ...inserted } };
+        } else if (saved.mode === 'view') {
+          const { line, endLine } = saved.anchor;
+          const comment: FeedbackComment = {
+            id: randomUUID(),
+            line,
+            endLine,
+            lineText: state.sourceLines.slice(line - 1, endLine).join('\n'),
+            comment: outcome.text,
+            createdAt: new Date().toISOString(),
+          };
+          state = { ...state, comments: [...state.comments, comment] };
+          persist();
+        }
+      }
+      paint(true);
+    }
 
     const handleComposeKey = (input: string, key: Key): void => {
       const c = state.compose;
@@ -856,9 +968,21 @@ export function runTerminalReviewSession(
       if (input === 'd') { if (state.comments.length > 0) { state = deleteAtListIndex(state); persist(); } return; }
     };
 
-    const onData = (data: Buffer): void => {
+    const handleInput = (input: string, key: Key, reviewChord = false): void => {
       if (settled) return;
-      const { input, key } = parseKeypress(data);
+      notice = undefined;
+      if (reviewChord) {
+        // A chord is never the tail of the outer space leader, including when
+        // nesting is refused, so the next key starts fresh in this session.
+        spaceArmed = false;
+        if (surface.nested === true) {
+          notice = 'already nested — one file review at a time';
+          paint();
+        } else if (state.mode === 'view' || state.mode === 'compose') {
+          void runNestedReview();
+        }
+        return;
+      }
 
       if (key.meta && input === 'i') { void requestClose(); return; }
 
@@ -904,6 +1028,32 @@ export function runTerminalReviewSession(
         return;
       }
       paint();
+    };
+
+    const onData = (data: Buffer): void => {
+      if (settled) return;
+      const raw = data.toString('utf8');
+      const { input, key } = parseKeypress(data);
+      if (pendingEscape !== undefined) {
+        clearTimeout(pendingEscape);
+        pendingEscape = undefined;
+        if (raw === 'R') {
+          handleInput('R', { ...key, meta: true }, true);
+          return;
+        }
+        handleInput('', { ...key, escape: true });
+        if (settled) return;
+      }
+      if (raw === '\x1b') {
+        // ESC is both a key and the conventional Meta prefix. Briefly hold it
+        // so an independently delivered R still forms Alt+Shift+R.
+        pendingEscape = setTimeout(() => {
+          pendingEscape = undefined;
+          handleInput('', key);
+        }, META_PREFIX_WAIT_MS);
+        return;
+      }
+      handleInput(input, key, (key.meta && input === 'R') || raw === '\x1bR');
     };
 
     process.stdin.on('data', onData);
