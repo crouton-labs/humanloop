@@ -20,6 +20,11 @@ import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
+import { reviewFileAsAccessory } from '../editor/accessory-review.js';
+import { withLeadingSeparator } from '../editor/accessory-format.js';
+import { extractFilePaths } from '../editor/visible-paths.js';
+import { writeClipboardText } from '../tui/clipboard.js';
+import { pickFilePath } from '../tui/path-picker.js';
 import { cancelFollowUp, readFollowUp, requestFollowUp } from './followup.js';
 import {
   cancelVisualRequest,
@@ -263,6 +268,7 @@ export class InboxController {
       onDirty: () => this.repaint(),
       visualProvider: this.visualProviderFor(item.dir, deck, claim.token),
       onEditorRequest: () => this.editActiveDeckInput(),
+      onFileReviewRequest: () => { void this.reviewFileIntoDeckInput(); },
       followUpAvailable: followUp.available,
       onFollowUpRequest: followUp.onRequest,
       onFollowUpCancel: followUp.onCancel,
@@ -544,6 +550,50 @@ export class InboxController {
       if (result.error !== undefined) this.status = result.error;
       this.repaint(true);
     }
+  }
+
+  /** Run an accessory review, then apply its disposition to the still-focused deck input. */
+  private async reviewFileIntoDeckInput(): Promise<void> {
+    const buffer = this.adapter?.inputBuffer();
+    if (buffer === undefined || this.activeDeck === undefined) return;
+
+    const texts = this.activeDeck.interactions.slice().reverse().flatMap((interaction) => [
+      interaction.body ?? '',
+      interaction.subtitle,
+      interaction.title,
+    ]);
+    texts.push(this.activeDeck.title);
+    const cwd = process.cwd();
+    const candidates = extractFilePaths(texts, cwd);
+    let outcome: Awaited<ReturnType<typeof reviewFileAsAccessory>> | undefined;
+    let pickerOpened = false;
+
+    this.suspendForChild();
+    try {
+      setupTerminal();
+      pickerOpened = true;
+      const file = await pickFilePath({ candidates, cwd, title: 'Review a file named in this deck' });
+      if (file !== null) outcome = await reviewFileAsAccessory({ file, cwd });
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (pickerOpened) restoreTerminal();
+      this.resumeAfterChild();
+      this.resize();
+      this.repaint(true);
+    }
+
+    if (outcome === undefined || outcome.kind === 'cancel') return;
+    if (outcome.kind === 'copy' && writeClipboardText(outcome.text)) return;
+    if (outcome.kind === 'copy') this.status = 'Clipboard unavailable; inserted review instead.';
+    const adapter = this.adapter;
+    if (adapter === undefined) return;
+    const current = adapter.inputBuffer();
+    const cursorPrefix = adapter.inputCursorPrefix();
+    if (current === undefined || cursorPrefix === undefined) return;
+    const text = withLeadingSeparator(current, cursorPrefix, outcome.text);
+    if (!adapter.insertAtInputCursor(text)) this.status = 'No focused text input for file review.';
+    this.repaint();
   }
 
   /** Give the raw TTY to a child process (native review editor or $EDITOR). */

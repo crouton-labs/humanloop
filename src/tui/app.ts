@@ -121,6 +121,7 @@ interface PanelInternals {
     onExit: MountedPanelOpts['onExit'];
     onDirty: MountedPanelOpts['onDirty'];
     onEditorRequest: MountedPanelOpts['onEditorRequest'];
+    onFileReviewRequest: MountedPanelOpts['onFileReviewRequest'];
     onFollowUpRequest: MountedPanelOpts['onFollowUpRequest'];
     onFollowUpCancel: MountedPanelOpts['onFollowUpCancel'];
   };
@@ -212,7 +213,7 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
     followUpAvailable,
     callbacks: {
       onProgress: opts.onProgress, onComplete: opts.onComplete, onExit: opts.onExit,
-      onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest,
+      onDirty: opts.onDirty, onEditorRequest: opts.onEditorRequest, onFileReviewRequest: opts.onFileReviewRequest,
       onFollowUpRequest: opts.onFollowUpRequest, onFollowUpCancel: opts.onFollowUpCancel,
     },
   };
@@ -244,6 +245,11 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
 
       if (key.ctrl && input === 'o' && internals.state.inputMode !== null && internals.callbacks.onEditorRequest !== undefined) {
         internals.callbacks.onEditorRequest();
+        return;
+      }
+      // Alt+Shift+R can arrive as either a parsed meta key or a raw ESC-R sequence.
+      if ((key.meta && input === 'R' || input === '\x1bR') && internals.state.inputMode !== null && internals.callbacks.onFileReviewRequest !== undefined) {
+        internals.callbacks.onFileReviewRequest();
         return;
       }
 
@@ -352,10 +358,27 @@ export function mountPanel(opts: MountedPanelOpts): MountedPanel {
       return internals.state.inputMode.buffer;
     },
 
+    getInputCursorPrefix() {
+      if (!internals.mounted || internals.state.inputMode === null) return undefined;
+      const mode = internals.state.inputMode;
+      return [...mode.buffer].slice(0, mode.cursor).join('');
+    },
+
     setInputBuffer(text) {
       if (!internals.mounted || internals.state.inputMode === null) return;
       internals.state.inputMode.buffer = text;
       internals.state.inputMode.cursor = [...text].length;
+    },
+
+    insertAtInputCursor(text) {
+      if (!internals.mounted || internals.state.inputMode === null) return false;
+      const mode = internals.state.inputMode;
+      const chars = [...mode.buffer];
+      const inserted = [...text];
+      chars.splice(mode.cursor, 0, ...inserted);
+      mode.buffer = chars.join('');
+      mode.cursor += inserted.length;
+      return true;
     },
   };
 }

@@ -346,6 +346,8 @@ export interface MountedPanelOpts {
   visualProvider?: VisualProvider;
   /** Host callback for Ctrl+O while a comment/freetext buffer is active. */
   onEditorRequest?: () => void;
+  /** Host callback for Alt+Shift+R while a comment/freetext buffer is active. */
+  onFileReviewRequest?: () => void;
   followUpAvailable?: boolean;
   onFollowUpRequest?: (question: string) => void;
   onFollowUpCancel?: () => void;
@@ -383,9 +385,13 @@ export interface MountedPanel {
    * panel-internal state: read the buffer here before spawning the editor.
    */
   getInputBuffer(): string | undefined;
+  /** Text before the input cursor, or undefined when no input is focused. */
+  getInputCursorPrefix(): string | undefined;
   /**
    * Replace the input-mode buffer (e.g. after an $EDITOR round-trip) and move
    * the cursor to the end. No-op when not in input mode.
    */
   setInputBuffer(text: string): void;
+  /** Insert text at the current code-point cursor. False when no input is focused. */
+  insertAtInputCursor(text: string): boolean;
 }

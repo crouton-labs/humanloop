@@ -14,6 +14,7 @@ export interface DeckAdapterOptions {
   onDirty: () => void;
   visualProvider?: VisualProvider;
   onEditorRequest?: () => void;
+  onFileReviewRequest?: () => void;
   followUpAvailable?: boolean;
   onFollowUpRequest?: (question: string) => void;
   onFollowUpCancel?: () => void;
@@ -41,6 +42,7 @@ export class DeckAdapter {
       onDirty: opts.onDirty,
       visualProvider: opts.visualProvider,
       onEditorRequest: opts.onEditorRequest,
+      onFileReviewRequest: opts.onFileReviewRequest,
       followUpAvailable: opts.followUpAvailable,
       onFollowUpRequest: opts.onFollowUpRequest,
       onFollowUpCancel: opts.onFollowUpCancel,
@@ -50,7 +52,9 @@ export class DeckAdapter {
   render(): string[] { return this.panel.render(); }
   resize(cols: number, rows: number): string[] { return this.panel.handleResize(cols, rows); }
   inputBuffer(): string | undefined { return this.panel.getInputBuffer(); }
+  inputCursorPrefix(): string | undefined { return this.panel.getInputCursorPrefix(); }
   setInputBuffer(text: string): void { this.panel.setInputBuffer(text); }
+  insertAtInputCursor(text: string): boolean { return this.panel.insertAtInputCursor(text); }
   setFollowUpHandlers(available: boolean, onRequest?: (question: string) => void, onCancel?: () => void): void { this.panel.setFollowUpHandlers(available, onRequest, onCancel); }
   setFollowUpState(state: FollowUpState): void { this.panel.setFollowUpState(state); }
   canAcceptHostKeys(): boolean { return this.panel.canAcceptHostKeys(); }

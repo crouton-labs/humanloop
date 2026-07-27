@@ -12,9 +12,7 @@ export interface PickFilePathOptions {
 
 function displayLabel(path: string, cwd: string): string {
   const rel = relative(cwd, path);
-  return rel !== '' && !rel.startsWith('..') && !resolve(cwd, rel).startsWith(`${resolve(cwd)}..`)
-    ? rel
-    : path;
+  return rel !== '' && !rel.startsWith('..') ? rel : path;
 }
 
 function isPrintable(input: string): boolean {
@@ -99,6 +97,16 @@ export function pickFilePath({ candidates, cwd, title }: PickFilePathOptions): P
         return;
       }
       if (key.return) {
+        select();
+        return;
+      }
+      // A terminal can deliver a pasted path and its trailing Enter in one
+      // raw-mode chunk; preserve the text before accepting it as a path.
+      const newline = input.search(/[\r\n]/);
+      if (newline >= 0) {
+        const pasted = input.slice(0, newline);
+        if (isPrintable(pasted)) filter += pasted;
+        selected = 0;
         select();
         return;
       }
