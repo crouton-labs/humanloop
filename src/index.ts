@@ -4,6 +4,7 @@ export { launchReview as review } from './editor/review.js';
 export type { ReviewOptions } from './editor/review.js';
 export { extractFilePaths, checkReviewableFile } from './editor/visible-paths.js';
 export { formatReviewMarkdown, withLeadingSeparator } from './editor/accessory-format.js';
+export type { AccessoryOutcome } from './editor/accessory-outcome.js';
 export { writeClipboardText } from './tui/clipboard.js';
 
 // Interaction-layer surface (SDK).
