@@ -118,7 +118,7 @@ const review = program.command('review');
 review.command('open').description('Submit a durable anchored review; subtitle is a required one-sentence recommendation/status and stakes. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'run the review in this terminal and block until submitted').action(async (options: { root?: string; inline?: boolean }) => {
   try {
     const body = objectInput();
-    if (typeof body.file !== 'string' || !existsSync(resolve(body.file))) throw new Error('file must be an existing markdown path');
+    if (typeof body.file !== 'string' || !existsSync(resolve(body.file))) throw new Error('file must be an existing path (a .md artifact or a source file)');
     if (typeof body.subtitle !== 'string' || body.subtitle.trim() === '') throw new Error('subtitle is required and must be a non-empty plain-English sentence stating the recommendation/status and stakes');
     const absFile = resolve(body.file);
     const output = typeof body.output === 'string' ? resolve(body.output) : `${absFile}.feedback.json`;

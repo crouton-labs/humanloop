@@ -58,7 +58,7 @@ const oldDeck = submitDeck({ root, id: 'z-last', deck: deck('2025-01-01T00:00:00
 const newDeck = submitDeck({ root, id: 'a-first', deck: deck('2025-01-02T00:00:00.000Z') });
 const review = submitReview({ root, id: 'review', review: { file: source, title: 'Review source', subtitle: 'Review findings require your decision.', source: { nodeId: 'node-1' }, blockedSince: '2025-01-02T00:00:00.000Z' } });
 assert.throws(() => submitReview({ root, id: 'missing-review-subtitle', review: { file: source, title: 'Missing subtitle', source: {} } as never }), /subtitle/, 'a review without an authored subtitle is invalid');
-assert.throws(() => submitReview({ root, id: 'bad-review', review: { file: join(temp, 'missing.md'), title: 'Bad', subtitle: 'This invalid review must be rejected.', source: {} } }), /existing absolute markdown/);
+assert.throws(() => submitReview({ root, id: 'bad-review', review: { file: join(temp, 'missing.md'), title: 'Bad', subtitle: 'This invalid review must be rejected.', source: {} } }), /existing absolute path/);
 assert.equal(existsSync(join(root, 'bad-review')), false, 'invalid submission does not strand an id');
 const prepared = join(root, 'prepared');
 mkdirSync(prepared);

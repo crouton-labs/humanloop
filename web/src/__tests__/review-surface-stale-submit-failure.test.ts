@@ -92,6 +92,7 @@ function makeReviewFixture(jobId: string): ReviewPayload {
     output: '/abs/source.md.feedback.json',
     jobId,
     content: 'line one\nline two\nline three\n',
+    language: null,
     result: { file: '/abs/source.md', submitted: false, approved: false, comments: [], savedAt: '2026-07-07T00:00:00.000Z' },
     version: 1,
     activated: true,

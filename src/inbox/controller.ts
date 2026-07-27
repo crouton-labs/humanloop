@@ -5,6 +5,7 @@ import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
 import { renderMarkdown } from '../render/termrender.js';
+import { codeFenceDocument, fenceLanguageFor, isMarkdownFile } from '../render/code-doc.js';
 import { startWebServer, type WebServerHandle } from '../browser/server.js';
 import { openBrowser } from '../browser/open.js';
 import { renderHandoff } from '../tui/render.js';
@@ -804,7 +805,12 @@ export class InboxController {
       let md = '';
       try { md = readFileSync(selected.file, 'utf8'); } catch { md = ''; }
       if (md === '') lines.push(`  ${DIM}(source file unavailable)${RESET}`);
-      else for (const rendered of renderMarkdown(md, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+      else {
+        // A source file previews as a syntax-highlighted code panel — the same
+        // fenced presentation the review surface itself opens it in.
+        const body = isMarkdownFile(selected.file) ? md : codeFenceDocument(md, fenceLanguageFor(selected.file));
+        for (const rendered of renderMarkdown(body, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+      }
     } else {
       const deck = readJson<Deck>(deckPath(selected.dir));
       if (deck !== null) {

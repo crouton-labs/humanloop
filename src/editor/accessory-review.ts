@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { formatReviewMarkdown } from './accessory-format.js';
 import { accessoryDraftPath, clearAccessoryDraft, readAccessoryDraft } from './accessory-draft.js';
-import { runTerminalReviewSession } from './terminal-review.js';
+import { docSurface, runTerminalReviewSession } from './terminal-review.js';
 import { checkReviewableFile } from './visible-paths.js';
 import type { AccessoryOutcome } from './accessory-outcome.js';
 
@@ -31,7 +31,7 @@ export async function reviewFileAsAccessory(opts: AccessoryReviewOptions): Promi
     outPath,
     basename(abs),
     { output: outPath },
-    { doc: 'plain', keys: 'accessory', nested: opts.nested === true },
+    docSurface(abs, 'accessory', opts.nested === true),
   );
 
   if (outcome.type !== 'accessory') return { kind: 'cancel' };

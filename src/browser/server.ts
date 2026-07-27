@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Deck, FeedbackResult, InteractionResponse } from '../types.js';
 import { deckPath, progressPath, readJson, writeResponse, clearProgress } from '../inbox/convention.js';
+import { fenceLanguageFor, isMarkdownFile } from '../render/code-doc.js';
 import {
   buildDraftFeedbackResult,
   buildFinalFeedbackResult,
@@ -447,6 +448,9 @@ async function startReviewServer(opts: ReviewWebServerOpts): Promise<WebServerHa
         output,
         jobId: basename(jobDir),
         content,
+        // null = render as a markdown document; a fence language = render the
+        // file as a syntax-highlighted source block (see web/lib/codeDoc.ts).
+        language: isMarkdownFile(file) ? null : fenceLanguageFor(file),
         result: currentSnapshot(),
         version,
         activated,

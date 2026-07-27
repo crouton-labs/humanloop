@@ -10,6 +10,7 @@ import { readTicketClaim, releaseClaimLocked, withTicketLock } from './claim.js'
 import { dispatchCompletion } from './completion.js';
 import { cancelVisualRequestsForTicket } from './visual.js';
 import { kickInboxMaintenance } from './maintenance.js';
+import { checkReviewableFile } from '../editor/visible-paths.js';
 
 const ticketId = z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(128);
 const responseSchema = z.object({ id: z.string().min(1), selectedOptionId: z.string().optional(), selectedOptionIds: z.array(z.string()).optional(), freetext: z.string().optional(), optionComments: z.record(z.string(), z.string()).optional() }).strict();
@@ -104,8 +105,12 @@ export function submitDeck(opts: SubmitDeckOptions): { id: string; dir: string; 
 
 export interface SubmitReviewOptions { root: string; id: string; review: Omit<ReviewDescriptor, 'schema' | 'file' | 'output' | 'blockedSince'> & { file: string; output?: string; blockedSince?: string }; }
 export function submitReview(opts: SubmitReviewOptions): { id: string; dir: string; kind: 'review' } {
-  if (!isAbsolute(opts.review.file) || !existsSync(opts.review.file)) throw new Error('review file must be an existing absolute markdown file');
-  if (!/\.md(?:own)?$/i.test(opts.review.file)) throw new Error('review file must be markdown');
+  // A review takes any reviewable TEXT file: a .md artifact renders as a
+  // document, a source file as a syntax-highlighted code panel. The limits
+  // (UTF-8, 2 MB, 5,000 lines) are the surface's, not the format's.
+  if (!isAbsolute(opts.review.file) || !existsSync(opts.review.file)) throw new Error('review file must be an existing absolute path');
+  const reviewable = checkReviewableFile(opts.review.file);
+  if (!reviewable.ok) throw new Error(`review file is not reviewable: ${reviewable.reason}`);
   const source = realpathSync(opts.review.file);
   const { dir, created } = ticketDir(opts.root, opts.id);
   try {

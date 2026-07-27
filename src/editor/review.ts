@@ -11,6 +11,7 @@ import {
 } from './feedback.js';
 import { launchTerminalReview } from './terminal-review.js';
 import { waitForParkedReviewSubmit } from './parked.js';
+import { isMarkdownFile } from '../render/code-doc.js';
 
 export interface ReviewOptions {
   /** Where the resumable review draft is written. */
@@ -54,11 +55,13 @@ export function reviewVimscript(): string {
   return [
     `" hl propose — review layer. Runs on a CLEAN config (nvim -u NONE: no`,
     `" init.lua, no LazyVim, no plugins/keymaps). Look/feel is ONLY the user's`,
-    `" 'gloam' colorscheme + built-in treesitter markdown highlighting + (when`,
-    `" installed) render-markdown.nvim for GFM tables/headings, applied below.`,
+    `" 'gloam' colorscheme + treesitter highlighting (markdown for a .md doc,`,
+    `" the file's own language for a source file) + (when installed)`,
+    `" render-markdown.nvim for GFM tables/headings, applied below.`,
     `" The rest is the read-only guard, comment commands, and autosave.`,
     `let g:hl_out = $HL_OUTPUT`,
     `let g:hl_src = $HL_SOURCE`,
+    `let g:hl_markdown = $HL_MARKDOWN ==# '1'`,
     `let g:hl_review_url = $HL_REVIEW_URL`,
     `let g:hl_handoff_flag = $HL_HANDOFF_FLAG`,
     `let s:comments = []`,
@@ -398,6 +401,24 @@ export function reviewVimscript(): string {
     `  " Read-only guard so review never mutates the source doc.`,
     `  setlocal nomodifiable`,
     `  setlocal signcolumn=yes`,
+    `  if !g:hl_markdown`,
+    `    " A source file (.ts/.py/.sql…): highlight it the way the user's own`,
+    `    " editor would. -u NONE leaves filetype detection and :syntax off, but`,
+    `    " $VIMRUNTIME and the site dir stay on runtimepath — so ftdetect,`,
+    `    " legacy syntax files, AND the installed treesitter parsers/queries all`,
+    `    " resolve. Treesitter first (gloam's @-groups); :syntax is the fallback`,
+    `    " that colors any language with no parser installed.`,
+    `    " Order matters: :syntax enable marks the buffer as detected, so a`,
+    `    " detect that runs after it silently no-ops and the buffer stays`,
+    `    " filetype-less (and therefore uncolored).`,
+    `    silent! filetype on`,
+    `    silent! filetype detect`,
+    `    silent! syntax enable`,
+    `    " :lua swallows the rest of the line, bar included — endif on its own.`,
+    `    if has('nvim')`,
+    `      silent! lua pcall(vim.treesitter.start, 0)`,
+    `    endif`,
+    `  else`,
     `  if &filetype !=# 'markdown' | setlocal filetype=markdown | endif`,
     `  " gloam only defines treesitter @markup.* highlight groups for markdown,`,
     `  " so the styling needs treesitter active. Built-in treesitter plus the`,
@@ -446,6 +467,7 @@ export function reviewVimscript(): string {
     `  vim.schedule(paint)`,
     `end)`,
     `HLLUA`,
+    `  endif`,
     `  endif`,
     `  " Buffer-local <Space> maps. Clean config has no which-key/<leader>`,
     `  " bindings to collide with, and these are gone outside this buffer.`,
@@ -583,7 +605,7 @@ async function stopReviewServer(handle: WebServerHandle | null): Promise<void> {
 }
 
 /**
- * Open a markdown file for review. Humanloop's own terminal surface
+ * Open a file (a .md artifact or a source file) for review. Humanloop's own terminal surface
  * (`launchTerminalReview`) is the default: it renders Markdown (including
  * Mermaid) via termrender and anchors comments to source lines. Passing an
  * explicit `opts.editor` opts into the legacy read-only Neovim/Vim session
@@ -595,7 +617,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
 }
 
 /**
- * Open a markdown file in a clean, read-only Neovim/Vim review session. The
+ * Open the review file in a clean, read-only Neovim/Vim review session. The
  * human anchors comments to source lines/selections with native vim motions
  * and explicitly submits a proposal. Blocks until the editor exits. Autosaved
  * drafts survive exit; canonical ticket finalization belongs to the controller.
@@ -603,7 +625,7 @@ export async function launchReview(file: string, opts: ReviewOptions): Promise<F
 async function launchNeovimReview(file: string, opts: ReviewOptions): Promise<FeedbackResult> {
   const absFile = resolve(file);
   if (!existsSync(absFile)) {
-    throw new Error(`Markdown file not found: ${absFile}`);
+    throw new Error(`Review file not found: ${absFile}`);
   }
   const outPath = resolve(opts.output);
   const bin = resolveEditor(opts.editor);
@@ -617,15 +639,17 @@ async function launchNeovimReview(file: string, opts: ReviewOptions): Promise<Fe
   const submitFlagPath = join(dir, 'review-submit.flag');
   const closeFlagPath = join(dir, 'review-close.flag');
   // `-u NONE`: do NOT load the user's init.lua / LazyVim / plugins / keymaps.
-  // Default runtimepath still includes the config dir (for the gloam
-  // colorscheme) and the site dir (for the treesitter markdown parser), so the
-  // review layer pulls in ONLY the colorscheme + treesitter styling itself.
+  // Default runtimepath still includes $VIMRUNTIME (ftdetect + legacy syntax),
+  // the config dir (for the gloam colorscheme), and the site dir (installed
+  // treesitter parsers/queries), so the review layer pulls in ONLY the
+  // colorscheme + treesitter/syntax styling itself.
   const editorArgs = ['-u', 'NONE', '-n', '-i', 'NONE', absFile, '-c', `source ${initPath}`];
   async function runEditor(reviewUrl: string): Promise<void> {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       HL_OUTPUT: outPath,
       HL_SOURCE: absFile,
+      HL_MARKDOWN: isMarkdownFile(absFile) ? '1' : '0',
       HL_REVIEW_URL: reviewUrl,
       HL_HANDOFF_FLAG: handoffFlagPath,
       HL_SUBMIT_FLAG: submitFlagPath,

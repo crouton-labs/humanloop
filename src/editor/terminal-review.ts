@@ -10,7 +10,7 @@ import { openBrowser } from '../browser/open.js';
 import { startReviewWebServer } from '../browser/server.js';
 import { buildDraftFeedbackResult, buildFinalFeedbackResult, readReviewDraft, writeReviewDraft } from './feedback.js';
 import { renderMarkdownBlockAware, type RenderedDoc } from '../render/termrender.js';
-import { plainTextDoc } from '../render/plain-doc.js';
+import { codeRenderedDoc, fenceLanguageFor, isMarkdownFile } from '../render/code-doc.js';
 import { withLeadingSeparator } from './accessory-format.js';
 import { reviewFileAsAccessory } from './accessory-review.js';
 import type { AccessoryOutcome } from './accessory-outcome.js';
@@ -618,8 +618,11 @@ export function renderReviewFrame(
     // the pane pans instead of spilling past the right edge.
     const row = panLine(source.line, hscroll, contentW);
     const u = state.rowUnits[source.abs] ?? null;
+    // A row with no span is chrome (the code panel's border), not a source
+    // line — it gets blank gutter width rather than an invented line number.
+    const gutterLine = doc.spans[source.abs]?.[0];
     const gutter = gutterW > 0
-      ? `${DIM}${String(doc.spans[source.abs]?.[0] ?? source.abs + 1).padStart(gutterW)}${RESET} `
+      ? (gutterLine === undefined ? ' '.repeat(gutterW + 1) : `${DIM}${String(gutterLine).padStart(gutterW)}${RESET} `)
       : '';
     // Tint the prose column at minimum, and a wide row across what it occupies.
     const tintW = Math.min(contentW, Math.max(docW, visibleWidth(row)));
@@ -651,9 +654,22 @@ export type SessionOutcome =
   | { type: 'accessory'; disposition: 'insert' | 'copy'; comments: FeedbackComment[] };
 
 export interface ReviewSurface {
-  doc: 'markdown' | 'plain';
+  /** `markdown` renders the file AS a document; `code` renders it as a
+   *  syntax-highlighted source panel with a line-number gutter. */
+  doc: 'markdown' | 'code';
+  /** Fence language for `doc: 'code'` (see `fenceLanguageFor`). */
+  language?: string;
   keys: 'ticket' | 'accessory';
   nested?: boolean;
+}
+
+/** How a ticket's file is presented: markdown renders as a document, anything
+ *  else as a syntax-highlighted source panel. */
+export function docSurface(absFile: string, keys: ReviewSurface['keys'] = 'ticket', nested?: boolean): ReviewSurface {
+  const surface: ReviewSurface = isMarkdownFile(absFile)
+    ? { doc: 'markdown', keys }
+    : { doc: 'code', language: fenceLanguageFor(absFile), keys };
+  return nested === undefined ? surface : { ...surface, nested };
 }
 
 function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
@@ -662,7 +678,10 @@ function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
 }
 
 /**
- * Open a Markdown file in humanloop's own terminal review surface: the
+ * Open a file in humanloop's own terminal review surface. A `.md` artifact
+ * renders as a document; any other text file (a .ts/.py/.sql source) renders
+ * as a syntax-highlighted code panel with a line-number gutter, anchored to
+ * its real source lines either way. The
  * document renders via termrender (Mermaid included), the anchor is a
  * highlighted leaf unit — a bullet, table row, code line, paragraph — in the
  * rendered document itself (gutter bar + tint via termrender's per-row source
@@ -684,7 +703,7 @@ export async function launchTerminalReview(file: string, opts: ReviewOptions): P
 
   while (true) {
     if (opts.signal?.aborted) return diskDraftResult(absFile, outPath);
-    const outcome = await runTerminalReviewSession(absFile, content, outPath, fileLabel, opts, { doc: 'markdown', keys: 'ticket' });
+    const outcome = await runTerminalReviewSession(absFile, content, outPath, fileLabel, opts, docSurface(absFile));
     if (outcome.type === 'done') return outcome.result;
 
     // Browser handoff: the TUI is parked (terminal already restored, draft
@@ -746,8 +765,10 @@ export function runTerminalReviewSession(
 
   setupTerminal();
   let { cols, rows } = getTerminalSize();
-  const renderDoc = (): RenderedDoc => surface.doc === 'plain' ? plainTextDoc(content) : renderReviewDoc(content, cols);
-  const gutterW = (): number => surface.doc === 'plain' ? String(doc.lines.length).length : 0;
+  const renderDoc = (): RenderedDoc => surface.doc === 'code'
+    ? codeRenderedDoc(content, surface.language ?? 'text', contentWidthForCols(cols))
+    : renderReviewDoc(content, cols);
+  const gutterW = (): number => surface.doc === 'code' ? String(sourceLines.length).length : 0;
   let doc = renderDoc();
   let state = initReviewState(sourceLines, deriveAnchorUnits(doc), draft?.comments ?? [], draft?.version ?? 0);
   let prevFrame: string[] = [];
@@ -768,7 +789,7 @@ export function runTerminalReviewSession(
 
     const paint = (clear = false): void => {
       const lines = renderReviewFrame(state, fileLabel, doc, cols, rows, {
-        lineNumbers: surface.doc === 'plain',
+        lineNumbers: surface.doc === 'code',
         keys: surface.keys,
         nested: surface.nested,
         notice,

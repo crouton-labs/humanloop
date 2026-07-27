@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { INTERACTION_KINDS } from '../types.js';
 import type { Deck, ReviewDescriptor } from '../types.js';
 import { checkMarkdown } from '../render/termrender.js';
+import { checkReviewableFile } from '../editor/visible-paths.js';
 
 export const interactionOptionSchema = z.object({ id: z.string().min(1), label: z.string().min(1), description: z.string().optional() });
 export const preAnswerSchema = z.object({ selectedOptionId: z.string().optional(), selectedOptionIds: z.array(z.string()).optional(), freetext: z.string().optional(), label: z.string().optional() });
@@ -69,7 +70,11 @@ export function validateReviewDescriptor(parsed: unknown): ReviewDescriptor { re
 /** Canonicalize and authorize the one review projection boundary before every write. */
 export function validateReviewProjection(dir: string, parsed: unknown): ReviewDescriptor {
   const descriptor = validateReviewDescriptor(parsed);
-  if (!/\.md(?:own)?$/i.test(descriptor.file) || !existsSync(descriptor.file)) throw new Error('review file must be an existing absolute markdown file');
+  // Any reviewable UTF-8 text file: a .md artifact renders as a document, a
+  // source file as a syntax-highlighted code panel.
+  if (!existsSync(descriptor.file)) throw new Error('review file must be an existing absolute path');
+  const reviewable = checkReviewableFile(descriptor.file);
+  if (!reviewable.ok) throw new Error(`review file is not reviewable: ${reviewable.reason}`);
   const file = realpathSync(descriptor.file);
   const output = resolve(realpathSync(dirname(descriptor.output)), basename(descriptor.output));
   const reserved = new Set(['deck.json', 'review.json', 'response.json', 'progress.json', 'claim.json', 'delivery.json', 'delivery-error.json', 'followup-request.json', 'followup-result.json', 'visuals']);

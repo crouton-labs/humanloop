@@ -96,6 +96,9 @@ export interface ReviewPayload {
   output: string;
   jobId: string;
   content: string;
+  /** Fence language when the review file is a SOURCE file; null for a markdown
+   *  artifact, which renders as a document. */
+  language: string | null;
   result: FeedbackResult;
   version: number;
   activated: boolean;

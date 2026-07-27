@@ -1,6 +1,23 @@
 import type { FeedbackComment, ReviewPayload } from '@/types';
 import { buildSourceMap, hasValidRangeColumns, sourceSelectionFromLineRange, type SourceMap, type SourceSelection } from './sourceMap';
 import { deriveAnchorUnits, remapUnitIndex, unitBoundsForRange, unitIndexForLine, type AnchorUnit } from './anchorUnits';
+import { codeFenceDocument, foldFenceSourceMap, foldFenceUnits } from './codeDoc';
+
+/** The document the surface actually renders, plus its source map and anchor
+ *  units. A markdown artifact renders as itself; a source file renders as one
+ *  fenced code block whose lines are folded back onto real source lines. */
+function presentReview(review: ReviewPayload): { content: string; sourceMap: SourceMap; units: AnchorUnit[] } {
+  if (review.language === null) {
+    return { content: review.content, sourceMap: buildSourceMap(review.content), units: deriveAnchorUnits(review.content) };
+  }
+  const sourceLineCount = review.content.split('\n').length;
+  const content = codeFenceDocument(review.content, review.language);
+  return {
+    content,
+    sourceMap: foldFenceSourceMap(buildSourceMap(content), sourceLineCount),
+    units: foldFenceUnits(deriveAnchorUnits(content), sourceLineCount),
+  };
+}
 
 export type SaveState = 'clean' | 'dirty' | 'saving' | 'save-error' | 'conflict';
 
@@ -51,15 +68,14 @@ export function activeUnitBounds(state: ReviewState): { line: number; endLine: n
 }
 
 export function buildInitialReviewState(review: ReviewPayload): ReviewState {
-  const sourceMap = buildSourceMap(review.content);
-  const units = deriveAnchorUnits(review.content);
+  const { content, sourceMap, units } = presentReview(review);
   const firstLine = review.result.comments[0]?.line;
   const activeUnit = typeof firstLine === 'number' ? unitIndexForLine(units, firstLine) : 0;
   return {
     file: review.file,
     output: review.output,
     jobId: review.jobId,
-    content: review.content,
+    content,
     sourceMap,
     units,
     comments: [...review.result.comments],
@@ -116,8 +132,7 @@ export function isDirty(state: ReviewState): boolean {
 }
 
 export function replaceFromPayload(state: ReviewState, review: ReviewPayload): ReviewState {
-  const sourceMap = buildSourceMap(review.content);
-  const units = deriveAnchorUnits(review.content);
+  const { content, sourceMap, units } = presentReview(review);
   const prevUnit = state.units[state.activeUnit];
   const activeUnit = prevUnit !== undefined ? remapUnitIndex(units, prevUnit) : 0;
   return {
@@ -125,7 +140,7 @@ export function replaceFromPayload(state: ReviewState, review: ReviewPayload): R
     file: review.file,
     output: review.output,
     jobId: review.jobId,
-    content: review.content,
+    content,
     sourceMap,
     units,
     comments: [...review.result.comments],

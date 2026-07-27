@@ -8,6 +8,7 @@ function payload(): ReviewPayload {
   return {
     kind: 'review', file: '/f', output: '/f.json', jobId: 'j',
     content: 'a\nb\nc\n',
+    language: null,
     result: { file: '/f', submitted: false, approved: false, comments: [], savedAt: '' },
     version: 0,
     activated: true,
