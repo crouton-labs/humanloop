@@ -519,7 +519,7 @@ export function renderReviewFrame(
   doc: RenderedDoc,
   cols: number,
   rows: number,
-  opts?: { lineNumbers?: boolean },
+  opts?: { lineNumbers?: boolean; keys?: 'ticket' | 'accessory'; nested?: boolean },
 ): string[] {
   const maxW = Math.min(Math.max(20, cols - 4), 120);
   const docW = renderWidthForCols(cols);
@@ -551,15 +551,27 @@ export function renderReviewFrame(
     footer.push('');
     footer.push(`  ${DIM}j/k${RESET} move  ${DIM}enter/e${RESET} edit  ${DIM}d${RESET} delete  ${DIM}q/esc${RESET} close`);
   } else if (state.mode === 'help') {
+    const accessory = opts?.keys === 'accessory';
     footer.push('  Keys:');
     footer.push(`  ${DIM}j/k${RESET}         move anchor            ${DIM}shift+j/k${RESET}   extend selection`);
     footer.push(`  ${DIM}u/d, pgup/pgdn${RESET}  scroll document       ${DIM}h/l${RESET}         pan visible wide diagrams`);
     footer.push(`  ${DIM}space c${RESET}     compose comment        ${DIM}space l${RESET}     list comments`);
-    footer.push(`  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
-    footer.push(`  ${DIM}space w${RESET}     hand off to browser`);
+    footer.push(accessory
+      ? `  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit → insert at cursor`
+      : `  ${DIM}space u${RESET}     undo last comment      ${DIM}space s${RESET}     submit review`);
+    footer.push(accessory
+      ? `  ${DIM}space y${RESET}     submit → clipboard    ${DIM}alt+shift+R${RESET}  ${opts?.nested === true ? '(already nested — one level only)' : 'review a file named here'}`
+      : `  ${DIM}space w${RESET}     hand off to browser`);
     footer.push(`  ${DIM}?${RESET}           toggle this help       ${DIM}esc${RESET}         close/cancel`);
     footer.push('');
     footer.push(`  ${DIM}esc / ?${RESET} close`);
+  } else if (opts?.keys === 'accessory') {
+    footer.push(
+      `  ${DIM}j/k${RESET} move  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
+      `${DIM}space l${RESET} list  ${DIM}space u${RESET} undo  ${DIM}space s${RESET} insert  ${DIM}space y${RESET} copy  ` +
+      `${DIM}alt+shift+R${RESET} ${opts.nested === true ? '(already nested — one level only)' : 'review a file named here'}  ` +
+      `${DIM}?${RESET} help  ${DIM}q/esc${RESET} close`,
+    );
   } else {
     footer.push(
       `  ${DIM}j/k${RESET} move  ${DIM}shift-j/k${RESET} extend  ${DIM}u/d${RESET} scroll  ${DIM}space c${RESET} comment  ` +
@@ -615,13 +627,17 @@ export function renderReviewFrame(
 
 // ── Host loop (impure — the only part that touches the real TTY) ───────────
 
-/** How one TUI session ended: a final result, or a request to hand the review
- *  off to the browser (terminal restored, draft persisted). */
-export type SessionOutcome = { type: 'done'; result: FeedbackResult } | { type: 'handoff' };
+/** How one TUI session ended: a ticket result, browser handoff, or accessory
+ *  disposition. The terminal is restored and the current draft persisted. */
+export type SessionOutcome =
+  | { type: 'done'; result: FeedbackResult }
+  | { type: 'handoff' }
+  | { type: 'accessory'; disposition: 'insert' | 'copy'; comments: FeedbackComment[] };
 
 export interface ReviewSurface {
   doc: 'markdown' | 'plain';
   keys: 'ticket' | 'accessory';
+  nested?: boolean;
 }
 
 function diskDraftResult(absFile: string, outPath: string): FeedbackResult {
@@ -732,7 +748,11 @@ export function runTerminalReviewSession(
     };
 
     const paint = (clear = false): void => {
-      const lines = renderReviewFrame(state, fileLabel, doc, cols, rows, { lineNumbers: surface.doc === 'plain' });
+      const lines = renderReviewFrame(state, fileLabel, doc, cols, rows, {
+        lineNumbers: surface.doc === 'plain',
+        keys: surface.keys,
+        nested: surface.nested,
+      });
       if (clear) {
         prevFrame = [];
         process.stdout.write('\x1b[2J\x1b[H');
@@ -851,8 +871,16 @@ export function runTerminalReviewSession(
           state = ensureAnchorVisible(state, doc, bodyH());
         } else if (input === 'l') state = openList(state);
         else if (input === 'u') { state = undoLast(state); persist(); }
-        else if (input === 's') { void submit(); return; }
-        else if (input === 'w') { persist(); finishWith({ type: 'handoff' }); return; }
+        else if (surface.keys === 'accessory' && (input === 's' || input === 'y')) {
+          persist();
+          finishWith({
+            type: 'accessory',
+            disposition: input === 's' ? 'insert' : 'copy',
+            comments: state.comments,
+          });
+          return;
+        } else if (surface.keys === 'ticket' && input === 's') { void submit(); return; }
+        else if (surface.keys === 'ticket' && input === 'w') { persist(); finishWith({ type: 'handoff' }); return; }
         paint();
         return;
       }
@@ -871,7 +899,10 @@ export function runTerminalReviewSession(
       else if ((input === 'h' || key.leftArrow) && maxHScroll(state, doc, cols, rows, gutterW()) > 0) state = panBy(state, -PAN_STEP, doc, cols, rows, gutterW());
       else if ((input === 'l' || key.rightArrow) && maxHScroll(state, doc, cols, rows, gutterW()) > 0) state = panBy(state, PAN_STEP, doc, cols, rows, gutterW());
       else if (input === '?') state = openHelp(state);
-      else if (key.escape) { finish(buildDraftFeedbackResult(absFile, state.comments)); return; }
+      else if (key.escape || (surface.keys === 'accessory' && input === 'q')) {
+        finish(buildDraftFeedbackResult(absFile, state.comments));
+        return;
+      }
       paint();
     };
 
