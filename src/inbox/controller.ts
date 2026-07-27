@@ -140,7 +140,6 @@ export class InboxController {
   resize(cols = getTerminalSize().cols, rows = getTerminalSize().rows): void {
     this.cols = cols;
     this.rows = rows;
-    this.frame = [];
     this.adapter?.resize(this.detailSize().cols, this.detailSize().rows);
     this.repaint(true);
   }
@@ -857,7 +856,11 @@ export class InboxController {
     // While a child owns the TTY (native review), fs-watch invalidations must
     // not scribble the inbox frame over the editor's screen.
     if (this.closed || !this.running || this.suspended) return;
-    if (clear) process.stdout.write('\x1b[2J\x1b[H');
+    // Clearing erases whatever the diff cache claims is on screen, so the cache
+    // must go with it: otherwise a repaint(true) that follows an already-painting
+    // call (resize() paints, then the caller repaints) wipes the screen and then
+    // emits an empty diff, leaving the pane blank until content next changes.
+    if (clear) { process.stdout.write('\x1b[2J\x1b[H'); this.frame = []; }
     const diff = diffFrame(this.frame, this.render(), this.rows, this.cols);
     process.stdout.write('\x1b[?2026h');
     for (const write of diff.writes) process.stdout.write(write);
