@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { validateDeck } from './inbox/deck-schema.js';
 import { managedInboxRoot, registerInboxRoot, registeredInboxRoot, unregisterInboxRoot, listInboxRoots, type InboxRootRegistration } from './inbox/registry.js';
 import { submitDeck, submitReview } from './inbox/tickets.js';
@@ -13,6 +13,7 @@ import { openInboxPopup } from './surfaces/inbox-popup.js';
 import { toggleInboxPopup } from './tui/tmux.js';
 import { ask } from './api.js';
 import { launchReview } from './editor/review.js';
+import { reviewFileAsAccessory, type AccessoryOutcome } from './editor/accessory-review.js';
 import { writeFeedbackResult } from './editor/feedback.js';
 import { display } from './surfaces/display.js';
 import { renderMarkdown, checkMarkdown } from './render/termrender.js';
@@ -37,6 +38,20 @@ function fail(error: unknown): never {
   const help = new Set(['inbox', 'deck', 'review', 'view', 'doc']).has(family) ? `hl ${family} --help` : 'hl inbox --help';
   emit({ error: 'bad_input', message, next: `Run ${help} for usage.` });
   process.exit(1);
+}
+
+function writeAccessoryOutcome(path: string, outcome: AccessoryOutcome): void {
+  const tmp = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(tmp, JSON.stringify(outcome));
+  renameSync(tmp, path);
+}
+
+function waitForEnter(): Promise<void> {
+  return new Promise((resolvePromise) => {
+    process.stdin.once('data', () => resolvePromise());
+    process.stdin.resume();
+  });
 }
 
 /** Explicit --root values filter the scan; no --root (an empty array from commander) falls through to the registered-roots fallback in scanInbox/the controller, so it must be undefined, not []. */
@@ -99,7 +114,8 @@ program.command('deck').command('ask').description('Submit a durable deck ticket
   } catch (error) { fail(error); }
 });
 
-program.command('review').command('open').description('Submit a durable anchored review; subtitle is a required one-sentence recommendation/status and stakes. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'run the review in this terminal and block until submitted').action(async (options: { root?: string; inline?: boolean }) => {
+const review = program.command('review');
+review.command('open').description('Submit a durable anchored review; subtitle is a required one-sentence recommendation/status and stakes. --inline blocks in this terminal instead.').option('--root <path>').option('--inline', 'run the review in this terminal and block until submitted').action(async (options: { root?: string; inline?: boolean }) => {
   try {
     const body = objectInput();
     if (typeof body.file !== 'string' || !existsSync(resolve(body.file))) throw new Error('file must be an existing markdown path');
@@ -115,6 +131,23 @@ program.command('review').command('open').description('Submit a durable anchored
     const registration = options.root === undefined ? managedInboxRoot() : requireRegisteredRoot(options.root);
     emit({ ...submitReview({ root: registration.root, id: typeof body.id === 'string' ? body.id : randomUUID(), review: { file: absFile, output, title: body.title, subtitle: body.subtitle, source: typeof body.source === 'object' && body.source !== null ? body.source as never : {} } }), queued: true });
   } catch (error) { fail(error); }
+});
+review.command('file').description('Review a local file in this terminal and write the accessory outcome as JSON.').requiredOption('--path <file>').requiredOption('--result <file>').option('--cwd <dir>').option('--nested').action(async (options: { path: string; result: string; cwd?: string; nested?: boolean }) => {
+  const result = resolve(options.result);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write('hl review file requires an interactive TTY\n');
+    writeAccessoryOutcome(result, { kind: 'cancel' });
+    process.exit(0);
+  }
+  try {
+    const outcome = await reviewFileAsAccessory({ file: resolve(options.path), cwd: resolve(options.cwd ?? process.cwd()), nested: options.nested });
+    writeAccessoryOutcome(result, outcome);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\nPress Enter to close.\n`);
+    await waitForEnter();
+    writeAccessoryOutcome(result, { kind: 'cancel' });
+  }
+  process.exit(0);
 });
 
 const view = program.command('view').description('Passively display files; never a ticket surface.');
