@@ -21,6 +21,7 @@ import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
 import { editBufferInEditor } from '../editor/roundtrip.js';
 import { reviewFileAsAccessory } from '../editor/accessory-review.js';
+import { META_PREFIX_WAIT_MS } from '../editor/terminal-review.js';
 import { withLeadingSeparator } from '../editor/accessory-format.js';
 import { extractFilePaths } from '../editor/visible-paths.js';
 import { writeClipboardText } from '../tui/clipboard.js';
@@ -497,8 +498,31 @@ export class InboxController {
       if (this.claim !== undefined) heartbeatClaim(this.claim.dir, this.claim.token);
     }, 10_000);
     await new Promise<void>((resolve) => {
+      let pendingEscape: ReturnType<typeof setTimeout> | undefined;
       const onData = (data: Buffer) => {
+        const raw = data.toString('utf8');
         const { input, key } = parseKeypress(data);
+        if (pendingEscape !== undefined) {
+          clearTimeout(pendingEscape);
+          pendingEscape = undefined;
+          if (raw === 'R') {
+            this.handleKey('R', { ...key, meta: true });
+            if (this.closed) finish();
+            return;
+          }
+          this.handleKey('', { ...key, escape: true });
+          if (this.closed) { finish(); return; }
+        }
+        if (raw === '\x1b') {
+          // ESC is also the terminal Meta prefix. Hold it briefly so a
+          // separately delivered R still reaches the deck as Alt+Shift+R.
+          pendingEscape = setTimeout(() => {
+            pendingEscape = undefined;
+            this.handleKey('', key);
+            if (this.closed) finish();
+          }, META_PREFIX_WAIT_MS);
+          return;
+        }
         this.handleKey(input, key);
         if (this.closed) finish();
       };
@@ -508,6 +532,7 @@ export class InboxController {
       this.finishRun = () => {
         if (done) return;
         done = true;
+        if (pendingEscape !== undefined) clearTimeout(pendingEscape);
         process.stdin.removeListener('data', onData);
         this.stdinListener = undefined;
         process.stdout.removeListener('resize', onResize);

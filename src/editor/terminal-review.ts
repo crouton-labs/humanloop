@@ -491,7 +491,10 @@ export function panBy(state: ReviewState, delta: number, doc: RenderedDoc, cols:
 /** Cells one h/l press pans by — a chunk large enough to cross a diagram in a
  *  few presses, small enough to keep orientation. */
 const PAN_STEP = 8;
-const META_PREFIX_WAIT_MS = 100;
+/** How long a bare ESC is held before dispatching as Escape, so an
+ *  independently delivered R can still complete the Alt+Shift+R chord.
+ *  Shared by every host that folds the chord out of a raw stdin stream. */
+export const META_PREFIX_WAIT_MS = 100;
 
 // Single-hue anchor tint (a dark neutral step below the CYAN gutter bar).
 // termrender's only reset is `\x1b[0m`, so re-arming the background after each
@@ -606,7 +609,9 @@ export function renderReviewFrame(
   const body: string[] = [];
   for (const source of paintedBodyRows(doc, scroll, bodyHeight)) {
     if (source.abs === null) {
-      body.push(`${' '.repeat(gutterW > 0 ? gutterW + 1 : 0)}${source.line}`);
+      // Indicator/fill rows reserve the same 4-col marker prefix and gutter a
+      // source row does, so the content column never shifts while scrolling.
+      body.push(`  ${' '.repeat(gutterW > 0 ? gutterW + 1 : 0)}${source.line}`);
       continue;
     }
     // Every body row is windowed into the body rectangle: a diagram wider than

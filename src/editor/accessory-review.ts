@@ -35,9 +35,12 @@ export async function reviewFileAsAccessory(opts: AccessoryReviewOptions): Promi
   );
 
   if (outcome.type !== 'accessory') return { kind: 'cancel' };
+  // A submit ends the review whatever it produced, so the draft is cleared for
+  // every submit — including the zero-comment one, which reports `cancel`
+  // because it has nothing to insert or copy.
+  clearAccessoryDraft(abs);
   const text = formatReviewMarkdown(abs, opts.cwd, outcome.comments, content.split('\n').length);
   if (text === '') return { kind: 'cancel' };
 
-  clearAccessoryDraft(abs);
   return { kind: outcome.disposition, text };
 }
