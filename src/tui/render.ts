@@ -1,3 +1,4 @@
+import stringWidth from 'string-width';
 import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import { renderMarkdownBlockAwareLines } from '../render/termrender.js';
 import {
@@ -117,6 +118,49 @@ export function renderInputBuffer(buffer: string, cursor: number, maxWidth: numb
   return wrapped.map((line) => (
     line.includes('\uE000') ? line.replace('\uE000', `${REVERSE} ${RESET}`) : line
   ));
+}
+
+/** Code-point bounds of every visual row `renderInputBuffer` paints, mirroring
+ *  `hardWrap` (character-based, lossless) so a cursor index maps to the row the
+ *  human actually sees. `end` is exclusive of the row's trailing '\n', if any. */
+export function wrappedRowBounds(buffer: string, width: number): { start: number; end: number }[] {
+  const chars = [...buffer];
+  const w = Math.max(1, width);
+  const rows: { start: number; end: number }[] = [];
+  let start = 0;
+  let rowW = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]!;
+    if (ch === '\n') {
+      rows.push({ start, end: i });
+      start = i + 1;
+      rowW = 0;
+      continue;
+    }
+    const cw = stringWidth(ch);
+    if (rowW + cw > w) {
+      rows.push({ start, end: i });
+      start = i;
+      rowW = cw;
+    } else {
+      rowW += cw;
+    }
+  }
+  rows.push({ start, end: chars.length });
+  return rows;
+}
+
+/** Vertical motion by *visual* row — what up/down mean in a wrapped input box,
+ *  where one long soft-wrapped paragraph spans many rows. Returns the new
+ *  code-point cursor, unchanged when there is no row in that direction. */
+export function verticalCursor(buffer: string, cursor: number, delta: number, width: number): number {
+  const rows = wrappedRowBounds(buffer, width);
+  const at = Math.max(0, Math.min(cursor, [...buffer].length));
+  let r = 0;
+  for (let i = 0; i < rows.length; i++) if (rows[i]!.start <= at) r = i;
+  const target = rows[r + delta];
+  if (target === undefined) return at;
+  return Math.min(target.start + (at - rows[r]!.start), target.end);
 }
 
 interface ItemReviewLayout {

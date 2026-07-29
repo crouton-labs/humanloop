@@ -18,7 +18,7 @@ import { extractFilePaths } from './visible-paths.js';
 import { writeClipboardText } from '../tui/clipboard.js';
 import { pickFilePath } from '../tui/path-picker.js';
 import { setupTerminal, restoreTerminal, getTerminalSize, parseKeypress, type Key } from '../tui/terminal.js';
-import { diffFrame, renderInputBuffer } from '../tui/render.js';
+import { diffFrame, renderInputBuffer, verticalCursor } from '../tui/render.js';
 import { BOLD, CYAN, DIM, ESC, RESET, YELLOW, clipLine, hline, panLine, sanitize, truncate, visibleWidth } from '../tui/ansi.js';
 
 // ── Pure state ───────────────────────────────────────────────────────────────
@@ -416,6 +416,40 @@ export function textVertical(buffer: string, cursor: number, delta: number): num
   return Math.min(nextEnd, nextStart + col);
 }
 
+/** Vertical motion by *visual* row (what up/down mean in a wrapped compose box):
+ *  a long soft-wrapped comment has many rows even though it is one logical
+ *  line. Shares `verticalCursor` with the frame renderer's own wrap. */
+export function textVerticalWrapped(buffer: string, cursor: number, delta: number, width: number): number {
+  return verticalCursor(buffer, cursor, delta, width);
+}
+
+/** Start of the word before the cursor (readline alt-b / alt+left). */
+export function textWordLeft(buffer: string, cursor: number): number {
+  const chars = codePoints(buffer);
+  let i = Math.max(0, Math.min(cursor, chars.length));
+  while (i > 0 && /\s/.test(chars[i - 1]!)) i--;
+  while (i > 0 && !/\s/.test(chars[i - 1]!)) i--;
+  return i;
+}
+
+/** Just past the end of the word after the cursor (readline alt-f / alt+right). */
+export function textWordRight(buffer: string, cursor: number): number {
+  const chars = codePoints(buffer);
+  let i = Math.max(0, Math.min(cursor, chars.length));
+  while (i < chars.length && /\s/.test(chars[i]!)) i++;
+  while (i < chars.length && !/\s/.test(chars[i]!)) i++;
+  return i;
+}
+
+/** Delete back to the start of the previous word (alt+backspace / ctrl+w). */
+export function textWordBackspace(buffer: string, cursor: number): { buffer: string; cursor: number } {
+  const chars = codePoints(buffer);
+  const at = Math.max(0, Math.min(cursor, chars.length));
+  const to = textWordLeft(buffer, at);
+  if (to === at) return { buffer, cursor: at };
+  return { buffer: [...chars.slice(0, to), ...chars.slice(at)].join(''), cursor: to };
+}
+
 // ── Rendering (pure) ─────────────────────────────────────────────────────────
 
 /** Width prose is rendered at for a given terminal width: 2-col left
@@ -779,6 +813,9 @@ export function runTerminalReviewSession(
   let notice: string | undefined;
 
   const bodyH = (): number => Math.max(1, rows - reservedRows(state, cols));
+  // Wrap width of the compose box — kept identical to the renderInputBuffer call
+  // in renderReviewFrame so up/down step by the rows actually on screen.
+  const composeWidth = (): number => Math.max(10, Math.min(Math.max(20, cols - 4), 120) - 2);
   state = ensureAnchorVisible(state, doc, bodyH());
 
   return new Promise<SessionOutcome>((resolvePromise) => {
@@ -959,14 +996,17 @@ export function runTerminalReviewSession(
       if (key.escape) { state = closeCompose(state); return; }
       if (key.return) { state = commitCompose(state); persist(); return; }
       if (key.newline) { const r = textInsert(c.buffer, c.cursor, '\n'); state = { ...state, compose: { ...c, ...r } }; return; }
+      if (key.meta && key.backspace) { const r = textWordBackspace(c.buffer, c.cursor); state = { ...state, compose: { ...c, ...r } }; return; }
       if (key.backspace) { const r = textBackspace(c.buffer, c.cursor); state = { ...state, compose: { ...c, ...r } }; return; }
       if (key.del) { const r = textDelete(c.buffer, c.cursor); state = { ...state, compose: { ...c, ...r } }; return; }
+      if (key.wordLeft) { state = { ...state, compose: { ...c, cursor: textWordLeft(c.buffer, c.cursor) } }; return; }
+      if (key.wordRight) { state = { ...state, compose: { ...c, cursor: textWordRight(c.buffer, c.cursor) } }; return; }
       if (key.leftArrow) { state = { ...state, compose: { ...c, cursor: Math.max(0, c.cursor - 1) } }; return; }
       if (key.rightArrow) { state = { ...state, compose: { ...c, cursor: Math.min([...c.buffer].length, c.cursor + 1) } }; return; }
-      if (key.home) { state = { ...state, compose: { ...c, cursor: textHome(c.buffer, c.cursor) } }; return; }
-      if (key.end) { state = { ...state, compose: { ...c, cursor: textEnd(c.buffer, c.cursor) } }; return; }
-      if (key.upArrow) { state = { ...state, compose: { ...c, cursor: textVertical(c.buffer, c.cursor, -1) } }; return; }
-      if (key.downArrow) { state = { ...state, compose: { ...c, cursor: textVertical(c.buffer, c.cursor, 1) } }; return; }
+      if (key.home || (key.ctrl && input === 'a')) { state = { ...state, compose: { ...c, cursor: textHome(c.buffer, c.cursor) } }; return; }
+      if (key.end || (key.ctrl && input === 'e')) { state = { ...state, compose: { ...c, cursor: textEnd(c.buffer, c.cursor) } }; return; }
+      if (key.upArrow) { state = { ...state, compose: { ...c, cursor: textVerticalWrapped(c.buffer, c.cursor, -1, composeWidth()) } }; return; }
+      if (key.downArrow) { state = { ...state, compose: { ...c, cursor: textVerticalWrapped(c.buffer, c.cursor, 1, composeWidth()) } }; return; }
       if (input.length === 1 && !key.ctrl) {
         const r = textInsert(c.buffer, c.cursor, input);
         state = { ...state, compose: { ...c, ...r } };
@@ -1065,6 +1105,15 @@ export function runTerminalReviewSession(
         pendingEscape = undefined;
         if (raw === 'R') {
           handleInput('R', { ...key, meta: true }, true);
+          return;
+        }
+        // Alt+arrow whose ESC prefix arrived in its own read: the tail is either
+        // the bare CSI arrow or a whole arrow sequence. Either way it is word
+        // motion, not an Escape that would cancel the comment being composed.
+        if (raw === '[D' || raw === '\x1b[D') { handleInput('', { ...key, leftArrow: false, wordLeft: true }); return; }
+        if (raw === '[C' || raw === '\x1b[C') { handleInput('', { ...key, rightArrow: false, wordRight: true }); return; }
+        if (raw === '[A' || raw === '[B') {
+          handleInput('', { ...key, upArrow: raw === '[A', downArrow: raw === '[B' });
           return;
         }
         handleInput('', { ...key, escape: true });

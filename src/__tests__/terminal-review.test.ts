@@ -27,6 +27,10 @@ import {
   textHome,
   textInsert,
   textVertical,
+  textVerticalWrapped,
+  textWordBackspace,
+  textWordLeft,
+  textWordRight,
   undoLast,
   unitIndexForLine,
   unitRangeForSpan,
@@ -291,6 +295,25 @@ const { units } = anchor;
   assert.equal(textVertical(r.buffer, 8, -1), 2, 'up preserves the column on the previous line');
   r = textBackspace(r.buffer, 11);
   assert.deepEqual(r, { buffer: 'hello\nworl', cursor: 10 });
+}
+
+// Word motion and visual (wrapped) vertical motion in the compose box: alt+arrow
+// steps whole words, and up/down step the rows the box actually paints — a long
+// soft-wrapped comment is many visual rows even though it is one logical line.
+{
+  const b = 'alpha beta gamma';
+  assert.equal(textWordLeft(b, 16), 11, 'alt+left lands on the start of the word before the cursor');
+  assert.equal(textWordLeft(b, 11), 6, 'alt+left from a word start skips to the previous word');
+  assert.equal(textWordRight(b, 0), 5, 'alt+right lands just past the current word');
+  assert.equal(textWordRight(b, 5), 10, 'alt+right skips the space then the next word');
+  assert.deepEqual(textWordBackspace(b, 16), { buffer: 'alpha beta ', cursor: 11 }, 'alt+backspace erases one word');
+
+  // width 6 wraps into rows 'alpha ' | 'beta g' | 'amma'.
+  assert.equal(textVerticalWrapped(b, 2, 1, 6), 8, 'down moves to the next wrapped row, same column');
+  assert.equal(textVerticalWrapped(b, 8, -1, 6), 2, 'up moves back to the previous wrapped row');
+  assert.equal(textVerticalWrapped(b, 2, -1, 6), 2, 'up on the first row is a no-op');
+  assert.equal(textVerticalWrapped(b, 15, 1, 6), 15, 'down on the last row is a no-op');
+  assert.equal(textVerticalWrapped('ab\ncd', 1, 1, 40), 4, 'hard newlines still separate rows');
 }
 
 // Render frame: the anchor highlight (gutter bar + tint) covers exactly the

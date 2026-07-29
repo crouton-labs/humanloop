@@ -57,10 +57,18 @@ export function parseKeypress(data: Buffer): { input: string; key: Key } {
   if (str === '\x1b[B') { key.downArrow = true; return { input: '', key }; }
   if (str === '\x1b[C') { key.rightArrow = true; return { input: '', key }; }
   if (str === '\x1b[D') { key.leftArrow = true; return { input: '', key }; }
-  // Word-wise motion: ctrl/alt + left/right (xterm modifier encodings) and the
-  // readline alt-b / alt-f bindings. Must precede the bare-ESC checks below.
-  if (str === '\x1b[1;5C' || str === '\x1b[1;3C' || str === '\x1bf') { key.wordRight = true; return { input: '', key }; }
-  if (str === '\x1b[1;5D' || str === '\x1b[1;3D' || str === '\x1bb') { key.wordLeft = true; return { input: '', key }; }
+  // Word-wise motion. Terminals disagree on how they encode alt/ctrl + arrow:
+  // xterm modifier params (3=alt, 5=ctrl, 9=alt on some kitty/Alacritty configs),
+  // an ESC-prefixed bare arrow (iTerm2 "Esc+" option), or the readline alt-b /
+  // alt-f bindings. Accept them all. Must precede the bare-ESC checks below.
+  if (str === '\x1b[1;5C' || str === '\x1b[1;3C' || str === '\x1b[1;9C' || str === '\x1b\x1b[C' || str === '\x1bf') {
+    key.wordRight = true;
+    return { input: '', key };
+  }
+  if (str === '\x1b[1;5D' || str === '\x1b[1;3D' || str === '\x1b[1;9D' || str === '\x1b\x1b[D' || str === '\x1bb') {
+    key.wordLeft = true;
+    return { input: '', key };
+  }
   if (str === '\x1b[H' || str === '\x1b[1~') { key.home = true; return { input: '', key }; }
   if (str === '\x1b[F' || str === '\x1b[4~') { key.end = true; return { input: '', key }; }
   if (str === '\x1b[5~') { key.pageUp = true; return { input: '', key }; }

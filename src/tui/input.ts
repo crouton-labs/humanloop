@@ -1,6 +1,6 @@
 import type { TuiState, Interaction, InteractionResponse } from '../types.js';
 import type { Key } from './terminal.js';
-import { panItemReview } from './render.js';
+import { panItemReview, verticalCursor } from './render.js';
 
 export type RenderFn = () => void;
 export type ExitFn = () => void;
@@ -390,14 +390,12 @@ function handleInputMode(
     return;
   }
   if (key.downArrow) {
-    const next = lineBelowIndex(mode.buffer, mode.cursor);
-    if (next !== undefined) mode.cursor = next;
+    mode.cursor = verticalCursor(mode.buffer, mode.cursor, 1, inputWrapWidth());
     render();
     return;
   }
   if (key.upArrow) {
-    const next = lineAboveIndex(mode.buffer, mode.cursor);
-    if (next !== undefined) mode.cursor = next;
+    mode.cursor = verticalCursor(mode.buffer, mode.cursor, -1, inputWrapWidth());
     render();
     return;
   }
@@ -595,28 +593,12 @@ function lineEnd(buffer: string, cursor: number): number {
   return i;
 }
 
-function lineAboveIndex(buffer: string, cursor: number): number | undefined {
-  const chars = [...buffer];
-  const at = Math.min(cursor, chars.length);
-  const start = lineStart(buffer, at);
-  if (start === 0) return undefined;
-  const column = at - start;
-  const previousEnd = start - 1;
-  const previousStart = lineStart(buffer, previousEnd);
-  return Math.min(previousStart + column, previousEnd);
-}
-
-function lineBelowIndex(buffer: string, cursor: number): number | undefined {
-  const chars = [...buffer];
-  const at = Math.min(cursor, chars.length);
-  const start = lineStart(buffer, at);
-  const column = at - start;
-  const end = lineEnd(buffer, at);
-  if (end >= chars.length) return undefined;
-  const nextStart = end + 1;
-  let nextEnd = nextStart;
-  while (nextEnd < chars.length && chars[nextEnd] !== '\n') nextEnd++;
-  return Math.min(nextStart + column, nextEnd);
+/** Width the input buffer is wrapped to on screen — kept in step with the
+ *  `renderInputBuffer(..., maxW - 1)` call in the item-review layout, so up/down
+ *  step by the rows the human sees rather than by logical lines. */
+function inputWrapWidth(): number {
+  const cols = process.stdout.columns || 80;
+  return Math.max(10, Math.min(cols - 4, 120) - 1);
 }
 
 // ── Final ────────────────────────────────────────────────────────────────────
