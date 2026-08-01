@@ -218,6 +218,7 @@ interface TicketSummaryBase {
 export interface DeckTicketSummary extends TicketSummaryBase {
   kind: 'deck';
   interactionKind?: InteractionKind;
+  interactionCount: number;
 }
 
 export interface ReviewTicketSummary extends TicketSummaryBase {

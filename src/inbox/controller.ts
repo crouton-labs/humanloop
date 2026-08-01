@@ -1,11 +1,10 @@
-import { readFileSync, watch, type FSWatcher } from 'node:fs';
+import { watch, type FSWatcher } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { Deck, DeckSource, FocusEvent, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
+import type { Deck, FocusEvent, FollowUpState, InteractionResponse, ReviewDescriptor, ReviewTicketSummary, TicketSummary, VisualHandle, VisualProvider, VisualRequest, VisualResult } from '../types.js';
 import type { Key } from '../tui/terminal.js';
 import { getTerminalSize, parseKeypress, restoreTerminal, setupTerminal } from '../tui/terminal.js';
 import { diffFrame } from '../tui/render.js';
 import { renderMarkdown } from '../render/termrender.js';
-import { codeFenceDocument, fenceLanguageFor, isMarkdownFile } from '../render/code-doc.js';
 import { startWebServer, type WebServerHandle } from '../browser/server.js';
 import { openBrowser } from '../browser/open.js';
 import { renderHandoff } from '../tui/render.js';
@@ -16,7 +15,7 @@ import { scanInbox } from './scan.js';
 import { inboxActivityPath, inboxRootsDirectory, inboxStateDirectory, listInboxRoots, registeredInboxRoot } from './registry.js';
 import { claimTicket, heartbeatClaim, releaseClaim } from './claim.js';
 import { cancelTicket, completeDeck, readTicketResult, ticketRoot } from './tickets.js';
-import { clearProgress, deckPath, progressPath, readJson, responsePath, reviewPath, runHandler, visualsDir } from './convention.js';
+import { clearProgress, deckPath, readJson, responsePath, reviewPath, runHandler, visualsDir } from './convention.js';
 import { DeckAdapter } from './deck-adapter.js';
 import { validateDeck } from './deck-schema.js';
 import { ReviewAdapter } from './review-adapter.js';
@@ -61,8 +60,6 @@ export class InboxController {
   private items: TicketSummary[] = [];
   private selectedDir: string | undefined;
   private selectedIndex = 0;
-  /** Scroll state belongs to the passive preview, never to an editable deck. */
-  private previewScrollOffset = 0;
   private screen: Screen = 'list';
   private adapter: DeckAdapter | undefined;
   private activeDeck: Deck | undefined;
@@ -128,12 +125,10 @@ export class InboxController {
     if (this.items.length === 0) {
       this.selectedIndex = 0;
       this.selectedDir = undefined;
-      this.previewScrollOffset = 0;
       return;
     }
     this.selectedIndex = Math.min(priorIndex, this.items.length - 1);
     this.selectedDir = this.items[this.selectedIndex]!.dir;
-    this.previewScrollOffset = 0;
   }
 
   invalidate(): void { this.rescan(); this.repaint(); }
@@ -220,12 +215,7 @@ export class InboxController {
       return;
     }
     if (key.escape || input === 'q') { this.close(); return; }
-    // Passive previews share the deck's documented scroll bindings without
-    // claiming or mounting an editable panel. Ctrl+E/Y are line-wise aliases;
-    // u/d and Ctrl+U/D/Page keys move a useful chunk.
-    if (input === 'd' || key.pageDown || (key.ctrl && (input === 'd' || input === 'e'))) this.scrollPreview(input === 'e' ? 1 : 10);
-    else if (input === 'u' || key.pageUp || (key.ctrl && (input === 'u' || input === 'y'))) this.scrollPreview(input === 'y' ? -1 : -10);
-    else if (input === 'j' || key.downArrow) this.select(this.selectedIndex + 1);
+    if (input === 'j' || key.downArrow) this.select(this.selectedIndex + 1);
     else if (input === 'k' || key.upArrow) this.select(this.selectedIndex - 1);
     else if (input === 'g' || input === 'G') void this.focusSelectedSource();
     else if (key.return || input === 'a') this.activate();
@@ -731,14 +721,8 @@ export class InboxController {
 
   private select(index: number): void {
     if (this.items.length === 0) return;
-    const next = Math.max(0, Math.min(index, this.items.length - 1));
-    if (next !== this.selectedIndex) this.previewScrollOffset = 0;
-    this.selectedIndex = next;
+    this.selectedIndex = Math.max(0, Math.min(index, this.items.length - 1));
     this.selectedDir = this.items[this.selectedIndex]!.dir;
-  }
-
-  private scrollPreview(delta: number): void {
-    this.previewScrollOffset = Math.max(0, this.previewScrollOffset + delta);
   }
 
   private detailSize(): { cols: number; rows: number } {
@@ -751,12 +735,13 @@ export class InboxController {
     if (this.deckBrowserStarting) return [`  ${DIM}Opening browser review…${RESET}`];
     if (this.adapter !== undefined) return this.adapter.render();
     const selected = this.items[this.selectedIndex];
-    if (selected === undefined) return this.previewViewport(this.passiveDetailLines(width), width, rows);
+    if (selected === undefined) return this.passiveDetailLines(width).slice(0, rows);
     const focusHint = this.focusAvailable(selected.dir) ? `  ${DIM}g${RESET} chat` : '';
     const footer = selected.kind === 'deck'
-      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser${focusHint}  ${DIM}q${RESET} close`]
-      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}u/d${RESET} scroll  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, ` ${focusHint}  ${DIM}q${RESET} close`];
-    return [...this.previewViewport(this.passiveDetailLines(width), width, Math.max(0, rows - footer.length)), ...footer.map((line) => clipLine(line, width))];
+      ? [`  ${DIM}Enter${RESET} opens the full ticket  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, `  ${DIM}Active ask:${RESET} c comment  u/d scroll  w browser${focusHint}  ${DIM}q${RESET} close`]
+      : [`  ${DIM}Enter${RESET} opens the full review  ${DIM}j/k${RESET} select  ${DIM}x${RESET} cancel`, ` ${focusHint}  ${DIM}q${RESET} close`];
+    const preview = this.passiveDetailLines(width).slice(0, Math.max(0, rows - footer.length));
+    return [...preview, ...footer.map((line) => clipLine(line, width))];
   }
 
   private focusAvailable(dir: string): boolean {
@@ -790,61 +775,13 @@ export class InboxController {
   private passiveDetailLines(width: number): string[] {
     const selected = this.items[this.selectedIndex];
     if (selected === undefined) return [`  ${DIM}Select a pending interaction.${RESET}`];
-    const source = sourceLabel(selected.source);
     const lines = [`  ${BOLD}${CYAN}${selected.title}${RESET}`, ''];
-    if (selected.kind === 'review') {
-      for (const rendered of renderMarkdown(selected.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
-      lines.push('');
-    }
-    lines.push(`  ${DIM}${selected.kind}${source === undefined ? '' : ` · ${source}`}${RESET}`);
-    if (selected.kind === 'review') {
-      lines.push('', `  ${DIM}${selected.file}${RESET}`);
-      const draft = readJson<{ comments?: unknown[] }>(progressPath(selected.dir))?.comments;
-      const draftCount = Array.isArray(draft) ? draft.length : 0;
-      lines.push(`  ${DIM}${draftCount} draft comment${draftCount === 1 ? '' : 's'}${RESET}`, '');
-      let md = '';
-      try { md = readFileSync(selected.file, 'utf8'); } catch { md = ''; }
-      if (md === '') lines.push(`  ${DIM}(source file unavailable)${RESET}`);
-      else {
-        // A source file previews as a syntax-highlighted code panel — the same
-        // fenced presentation the review surface itself opens it in.
-        const body = isMarkdownFile(selected.file) ? md : codeFenceDocument(md, fenceLanguageFor(selected.file));
-        for (const rendered of renderMarkdown(body, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
-      }
-    } else {
-      const deck = readJson<Deck>(deckPath(selected.dir));
-      if (deck !== null) {
-        for (const interaction of deck.interactions) {
-          lines.push('', `  ${BOLD}${interaction.title}${RESET}`);
-          for (const rendered of renderMarkdown(interaction.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
-          if (interaction.body) for (const rendered of renderMarkdown(interaction.body, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
-          for (const option of interaction.options) lines.push(`    ${DIM}• ${option.label}${RESET}`);
-        }
-        const saved = readJson<{ responses?: unknown[] }>(progressPath(selected.dir))?.responses;
-        lines.push('', `  ${DIM}${Array.isArray(saved) ? saved.length : 0} saved responses${RESET}`);
-      }
-    }
+    for (const rendered of renderMarkdown(selected.subtitle, Math.max(1, width - 2))) lines.push(`  ${rendered}`);
+    const count = selected.kind === 'deck'
+      ? `${selected.interactionCount} question${selected.interactionCount === 1 ? '' : 's'}`
+      : '1 file to review';
+    lines.push('', `  ${DIM}${count}${RESET}`);
     return lines.map((line) => clipLine(line, width));
-  }
-
-  private previewViewport(lines: string[], width: number, rows: number): string[] {
-    if (rows < 1) return [];
-    const maxOffset = Math.max(0, lines.length - Math.max(1, rows - 1));
-    this.previewScrollOffset = Math.min(this.previewScrollOffset, maxOffset);
-    const start = this.previewScrollOffset;
-    const hasAbove = start > 0;
-    // Reserve an indicator row before selecting content so a remaining tail is
-    // always signalled instead of silently disappearing below the viewport.
-    let contentRows = rows - (hasAbove ? 1 : 0);
-    let end = Math.min(lines.length, start + contentRows);
-    const hasBelow = end < lines.length;
-    if (hasBelow) { contentRows--; end = Math.min(lines.length, start + Math.max(0, contentRows)); }
-    const out: string[] = [];
-    if (hasAbove) out.push(`  ${DIM}↑ more above${RESET}`);
-    out.push(...lines.slice(start, end));
-    if (hasBelow) out.push(`  ${DIM}↓ more below${RESET}`);
-    while (out.length < rows) out.push('');
-    return out.map((line) => clipLine(line, width));
   }
 
   private withStatus(lines: string[]): string[] {
@@ -910,6 +847,3 @@ function isToggleCloseChord(input: string): boolean { return input === '\x1bi' |
 function isAnswerBearingDeck(deck: Deck): boolean {
   return deck.interactions.some((interaction) => interaction.kind !== 'notify');
 }
-
-/** Machine node IDs remain stored for routing, but passive detail shows only authored labels. */
-function sourceLabel(source: DeckSource): string | undefined { return source.sessionName?.trim() || source.askedBy?.trim() || undefined; }

@@ -16,7 +16,7 @@ import { atomicWriteJson, deckPath, followupRequestPath, followupResultPath } fr
 import { readFollowUp, submitFollowUpResult } from '../inbox/followup.js';
 
 const key = (part: Partial<import('../tui/terminal.js').Key> = {}) => ({ ctrl: false, meta: false, upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, wordLeft: false, wordRight: false, home: false, end: false, pageUp: false, pageDown: false, del: false, return: false, newline: false, escape: false, tab: false, backTab: false, backspace: false, ...part });
-const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, subtitle: `${id} requires your attention.`, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
+const item = (id: string): TicketSummary => ({ dir: `/tickets/${id}`, id, kind: 'deck', title: id, subtitle: `${id} requires your attention.`, interactionCount: 1, source: {}, blockedSince: '2025-01-01T00:00:00.000Z' });
 
 assert.deepEqual(inboxLayout(120, 30), { mode: 'two-column', listWidth: 40, detailWidth: 79, height: 30 });
 assert.equal(inboxLayout(80, 24).mode, 'list');
@@ -49,9 +49,9 @@ const deck = (id: string): Deck => ({ title: id, source: { blockedSince: new Dat
 const first = submitDeck({ root, id: 'first', deck: deck('first') });
 const active = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async () => undefined });
 const initialInbox = active.render().join('\n');
-assert.ok(initialInbox.includes('Notes requires your attention.'), 'every sidebar row renders its required subtitle');
-assert.ok(initialInbox.includes('Release planning'), 'passive detail renders the authored source label');
-assert.ok(!initialInbox.includes('node-private-123'), 'passive detail never renders machine node IDs');
+assert.ok(initialInbox.includes('Notes requires your attention.'), 'the selected ticket preview renders its required subtitle');
+assert.ok(initialInbox.includes('1 question'), 'the selected ticket preview renders its question count');
+assert.ok(!initialInbox.includes('Release planning') && !initialInbox.includes('node-private-123'), 'the selected ticket preview omits source metadata');
 active.activate();
 active.handleKey('r', key());
 for (const char of 'draft') active.handleKey(char, key());
@@ -70,7 +70,10 @@ writeFileSync(reviewSource, 'Review body stays below the descriptor context.\n')
 const reviewPreview = submitReview({ root, id: 'review-preview', review: { file: reviewSource, title: 'Review source', subtitle: 'Review this source before approving the release.', source: { sessionName: 'Release planning' } } });
 const reviewController = new InboxController({ roots: [root], cols: 100, rows: 24 });
 while (reviewController.snapshot().selectedDir !== reviewPreview.dir) reviewController.handleKey('j', key());
-assert.ok(reviewController.render().join('\n').includes('Review this source before approving the release.'), 'passive review detail renders its authored subtitle');
+const renderedReviewPreview = reviewController.render().join('\n');
+assert.ok(renderedReviewPreview.includes('Review this source before approving the release.'), 'passive review detail renders its authored subtitle');
+assert.ok(renderedReviewPreview.includes('1 file to review'), 'passive review detail identifies the compact review payload');
+assert.ok(!renderedReviewPreview.includes('Review body stays below the descriptor context.'), 'passive review detail omits the source document');
 reviewController.close();
 
 const navigation = submitDeck({ root, id: 'navigation', deck: { title: 'navigation', interactions: [
@@ -97,16 +100,10 @@ const notification = submitDeck({ root, id: 'notification', deck: { title: 'noti
 let acknowledgement: import('../types.js').InteractionResponse[] | undefined;
 const notifyController = new InboxController({ roots: [root], cols: 100, rows: 24, completeDeck: async (_dir, responses) => { acknowledgement = responses; } });
 while (notifyController.snapshot().selectedDir !== notification.dir) notifyController.handleKey('j', key());
-assert.ok(notifyController.render().join('\n').includes('Notification body'), 'passive deck preview renders notification bodies');
-assert.ok(notifyController.render().join('\n').includes('Enter') && notifyController.render().join('\n').includes('c comment'), 'preview keeps full-ticket controls visible');
-notifyController.handleKey('d', key());
-assert.ok(notifyController.render().join('\n').includes('↑ more above'), 'd scrolls the passive preview');
-const beforeMove = notifyController.snapshot().selectedDir;
-notifyController.handleKey('j', key());
-const returnKey = notifyController.snapshot().selectedDir === beforeMove ? 'j' : 'k';
-if (returnKey === 'j') notifyController.handleKey('k', key());
-while (notifyController.snapshot().selectedDir !== notification.dir) notifyController.handleKey(returnKey, key());
-assert.ok(!notifyController.render().join('\n').includes('↑ more above'), 'selection changes reset passive preview scrolling');
+const renderedNotificationPreview = notifyController.render().join('\n');
+assert.ok(renderedNotificationPreview.includes('Read the complete notice') && renderedNotificationPreview.includes('1 question'), 'passive deck preview renders only its subtitle and question count');
+assert.ok(!renderedNotificationPreview.includes('Notification body') && !renderedNotificationPreview.includes('Notice detail 0'), 'passive deck preview omits interaction bodies');
+assert.ok(renderedNotificationPreview.includes('Enter') && renderedNotificationPreview.includes('c comment'), 'preview keeps full-ticket controls visible');
 notifyController.handleKey('a', key());
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(notifyController.snapshot().screen, 'detail', 'activation opens a notification in its deck');
