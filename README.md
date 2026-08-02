@@ -1,0 +1,1 @@
+Humanloop was absorbed into `@north-light/crouter@0.3.171`. Its source now lives in crouter under `src/core/human/`, `src/core/termrender/`, `src/clients/inbox/`, and `src/clients/deck-web/`. This repository is archived and publishes nothing.
