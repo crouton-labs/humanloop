@@ -46,4 +46,4 @@ Build green, `npm test` green, conventional commit. CI publishes on push to `mai
 ## Pointers
 
 - What earns test coverage and how long local feedback may take → [[testing]]
-- Terminal editor vs surrounding-surface keyboard behavior → [[taste/text-input-scroll-controls]]
+- Terminal editor vs surrounding-surface keyboard behavior → [[insights/text-input-scroll-controls]]
